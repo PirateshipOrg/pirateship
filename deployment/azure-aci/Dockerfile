@@ -118,6 +118,4 @@ RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 # Place Rust in PATH
 ENV PATH = "/home/${USER}/.cargo/bin:${PATH}"
 
-RUN mkdir -p /home/${USER}/testing_newscripts
-
 CMD ["/usr/sbin/sshd", "-D"]

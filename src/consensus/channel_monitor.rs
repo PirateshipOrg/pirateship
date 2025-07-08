@@ -5,7 +5,7 @@ use log::info;
 use crate::{config::AtomicConfig, utils::channel::{Receiver, Sender}};
 
 pub struct ChannelMonitor {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     channels: HashMap<String, ChannelInfo>,
 }
 
@@ -16,21 +16,15 @@ enum ChannelInfo {
 
 trait ChannelSender {
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool;
 }
 
 trait ChannelReceiver {
     fn len(&self) -> usize;
-    fn is_empty(&self) -> bool;
 }
 
 impl<T: Send + 'static> ChannelSender for Sender<T> {
     fn len(&self) -> usize {
         self.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
     }
 }
 
@@ -38,16 +32,12 @@ impl<T: Send + 'static> ChannelReceiver for Receiver<T> {
     fn len(&self) -> usize {
         self.len()
     }
-
-    fn is_empty(&self) -> bool {
-        self.is_empty()
-    }
 }
 
 impl ChannelMonitor {
     pub fn new(config: AtomicConfig) -> Self {
         Self {
-            config,
+            _config: config,
             channels: HashMap::new(),
         }
     }
@@ -69,9 +59,7 @@ impl ChannelMonitor {
                 ChannelInfo::Receiver(receiver) => receiver.len(),
             };
             
-            if len > 0 {
-                channel_stats.push(format!("{}={}", name, len));
-            }
+            channel_stats.push(format!("{}={}", name, len));
         }
 
         if !channel_stats.is_empty() {

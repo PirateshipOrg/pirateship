@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_cbor;
-use std::collections::HashMap;
 
 // Error codes for CBOR operations
 pub const CBOR_ERROR_TITLE: &str = "title";

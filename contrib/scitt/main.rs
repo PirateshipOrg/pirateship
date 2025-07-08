@@ -2,7 +2,6 @@ use log::{debug, error, info};
 use pft::config::{self, Config};
 use pft::consensus;
 use pft::consensus::batch_proposal::TxWithAckChanTag;
-use pft::consensus::engines::kvs::KVSAppEngine;
 use pft::consensus::engines::scitt::SCITTAppEngine;
 use pft::utils::channel::{make_channel, Receiver, Sender};
 use std::io::Write;
