@@ -11,16 +11,6 @@ use crate::{
     utils::channel::{make_channel, Receiver, Sender},
 };
 
-macro_rules! ask_logserver {
-    ($me:expr, $query:expr, $($args:expr),+) => {
-        {
-            let (tx, rx) = make_channel(1);
-            $me.logserver_tx.send($query($($args),+, tx)).await.unwrap();
-            rx.recv().await.unwrap()
-        }
-    };
-}
-
 pub type ProofChain = Vec<ProtoBlock>;
 pub struct ReceiptBuilder {
     // The chain of blocks from the requested block to the subsequent auditQC
@@ -38,8 +28,11 @@ pub enum IssuerCommand {
     NewChunk(Vec<CachedBlock>),
     /// Drop tail of cached blocks
     Rollback(u64),
+    /// Garbage collect cached blocks (at most) up to the current bci
+    GC(u64),
 }
 
+const MIN_CACHED_BLOCKS: usize = 1000;
 pub struct Issuer {
     config: AtomicConfig,
 
@@ -59,7 +52,7 @@ impl Issuer {
             config,
             issuer_rx,
             logserver_tx,
-            cached_blocks: VecDeque::new(),
+            cached_blocks: VecDeque::with_capacity(MIN_CACHED_BLOCKS),
         }
     }
 
@@ -89,6 +82,9 @@ impl Issuer {
                     Some(IssuerCommand::Rollback(block_n)) => {
                         self.handle_rollback(block_n).await;
                     },
+                    Some(IssuerCommand::GC(bci)) => {
+                        self.handle_gc(bci).await;
+                    },
                     None => {
                         // Channel closed
                         return Err(());
@@ -113,7 +109,9 @@ impl Issuer {
             return Some(index);
         }
 
-        let chunk = ask_logserver!(self, LogServerQuery::GetChunk, block_n, head);
+        let (tx, rx) = make_channel(1);
+        self.logserver_tx.send(LogServerQuery::GetChunk(block_n, head, tx)).await.unwrap();
+        let chunk = rx.recv().await.unwrap();
 
         if chunk.is_empty() {
             return None; // logserver does not have the necessary ledger chunk to build this receipt (?)
@@ -195,6 +193,16 @@ impl Issuer {
             self.cached_blocks.truncate(index + 1);
         } else {
             self.cached_blocks.clear();
+        }
+    }
+
+    async fn handle_gc(&mut self, bci: u64) {
+        // Doing this for now. Maybe we can just use a sliding window and not worry about GC
+        let bci_cbi = self.find_block(bci).await;
+        if self.cached_blocks.len() - bci_cbi.unwrap_or(0) > MIN_CACHED_BLOCKS {
+            self.cached_blocks.drain(0..bci_cbi.unwrap_or(0));
+        } else {
+            self.cached_blocks.drain(0..self.cached_blocks.len() - MIN_CACHED_BLOCKS);
         }
     }
 }

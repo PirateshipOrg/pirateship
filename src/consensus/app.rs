@@ -249,6 +249,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
 
         if self.stats.bci > 1 {
             self.gc_tx.send(self.stats.bci - 1).await.unwrap();
+            let _ = self.issuer_tx.send(IssuerCommand::GC(self.stats.bci)).await;
         } 
 
     }
