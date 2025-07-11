@@ -5,6 +5,7 @@ edition = "2021"
 
 
 [dependencies]
+pft = { path = "../" }
 actix-web = "4"
 reqwest = { version = "0.12", features = ["json"] }
 ed25519-dalek = {version = "2.1.1", features = ["alloc", "fast", "std", "zeroize", "pem", "pkcs8", "batch"]}
@@ -26,9 +27,6 @@ core_affinity = "0.8.1"
 log4rs = "1.3.0"
 chrono= "0.4.40"
 iso8601 = "0.6.2"
-
-
-pft = { path = "../"}
 async-recursion = "1.1.1"
 
 [[bin]]
@@ -42,3 +40,7 @@ path = "svr3/main.rs"
 [[bin]]
 name = "smallbank"
 path = "smallbank/main.rs"
+
+[[bin]]
+name = "scitt"
+path = "scitt/main.rs"

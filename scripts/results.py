@@ -6,7 +6,7 @@ import os
 import pickle
 from typing import Callable, Dict, List, OrderedDict, Tuple
 
-from experiments import Experiment
+from experiments import BaseExperiment
 from collections import defaultdict
 import re
 from dateutil.parser import isoparse
@@ -164,7 +164,7 @@ class Stats:
 class Result:
     name: str
     plotter_func: Callable
-    experiment_groups: Dict[str, List[Experiment]]
+    experiment_groups: Dict[str, List[BaseExperiment]]
     workdir: str
     kwargs: dict
 
@@ -231,7 +231,7 @@ class Result:
         latencies = []
         duration = experiment.duration
         for repeat_num in range(experiment.repeats):
-            log_dir = os.path.join(experiment.local_workdir, "logs", str(repeat_num))
+            log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
             # Find the first node log file and all client log files in log_dir
             node_log_files = list(sorted([f for f in os.listdir(log_dir) if f.startswith("node") and f.endswith(".log")]))
             client_log_files = [f for f in os.listdir(log_dir) if f.startswith("client") and f.endswith(".log")]
@@ -304,7 +304,7 @@ class Result:
         """
         For autobahn, we only take the first repeat.
         """
-        log_dir = os.path.join(experiment.local_workdir, "logs", "0")
+        log_dir = os.path.join(experiment.get_local_workdir(), "logs", "0")
         print(log_dir)
         try:
             result = AutobahnLogParser.process(log_dir).result()
@@ -854,10 +854,6 @@ class Result:
         # Save plot dict
         with open(os.path.join(self.workdir, "plot_dict.pkl"), "wb") as f:
             pickle.dump(plot_dict, f)
-
-        output = self.kwargs.get('output', None)
-        self.tput_latency_sweep_plot(plot_dict, output)
-
         # Print a summary of the results
         with open(os.path.join(self.workdir, "summary.txt"), "w") as f:
             for legend, stats in plot_dict.items():
@@ -869,6 +865,10 @@ class Result:
                     f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
                     f.write(f"Stdev Tput: {stat.stdev_tput} ktx/s, Stdev Latency: {stat.stdev_latency} ms\n")
                     f.write("==================================\n")
+
+        output = self.kwargs.get('output', None)
+        self.tput_latency_sweep_plot(plot_dict, output)
+
 
 
     def stacked_bar_graph_parse(self, ramp_up, ramp_down, legends) -> OrderedDict[str, List[Stats]]:
@@ -1039,7 +1039,7 @@ class Result:
             patterns = [re.compile(pattern)]
 
         target_node = event["target"]
-        log_path = os.path.join(self.experiments[0].local_workdir, "logs", "0", f"{target_node}.log")
+        log_path = os.path.join(self.experiments[0].get_local_workdir(), "logs", "0", f"{target_node}.log")
 
         target_occurrence_num = event.get("occurrence_num", 1)
         occurrence_num = 0
@@ -1091,7 +1091,7 @@ class Result:
 
             tputs = []
             tputs_unbatched = []
-            log_dir = f"{expr[0].local_workdir}/logs/0"
+            log_dir = f"{expr[0].get_local_workdir()}/logs/0"
             points = self.parse_node_logs(
                 log_dir, [f"{target_node}.log"],
                 expr[0].duration,

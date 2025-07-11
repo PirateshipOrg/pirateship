@@ -7,7 +7,7 @@ use pft::consensus;
 use tokio::{runtime, signal};
 use std::process::exit;
 use std::{env, fs, io, path, sync::{atomic::AtomicUsize, Arc, Mutex}};
-use pft::consensus::engines::{null_app::NullApp, kvs::KVSAppEngine};
+use pft::consensus::engines::{null_app::NullApp, kvs::KVSAppEngine, scitt::SCITTAppEngine};
 use std::io::Write;
 
 #[global_allocator]
@@ -46,6 +46,7 @@ fn get_feature_set() -> (&'static str, &'static str) {
     #[cfg(feature = "app_logger")]{ app = "app_logger"; }
     #[cfg(feature = "app_kvs")]{ app = "app_kvs"; }
     #[cfg(feature = "app_sql")]{ app = "app_sql"; }
+    #[cfg(feature = "app_scitt")]{ app = "app_scitt"; }
 
     #[cfg(feature = "lucky_raft")]{ protocol = "lucky_raft"; }
     #[cfg(feature = "signed_raft")]{ protocol = "signed_raft"; }
@@ -64,6 +65,9 @@ async fn run_main(cfg: Config) -> io::Result<()> {
     
     #[cfg(feature = "app_kvs")]
     let mut node = consensus::ConsensusNode::<KVSAppEngine>::new(cfg);
+
+    #[cfg(feature = "app_scitt")]
+    let mut node = consensus::ConsensusNode::<SCITTAppEngine>::new(cfg);
     
     #[cfg(feature = "app_sql")]
     let node = Arc::new(consensus::ConsensusNode::<PinnedSQLEngine>::new(&cfg));

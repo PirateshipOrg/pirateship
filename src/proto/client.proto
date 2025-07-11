@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package proto.client;
 import "execution.proto";
+import "consensus.proto";
 
 message ProtoClientRequest {
     // This structure is temporary. It MUST change.
@@ -22,14 +23,30 @@ message ProtoByzResponse {
 }
 
 message ProtoTransactionReceipt {
+    oneof receipt {
+        ProtoAuditReceipt audit_receipt = 1;
+        ProtoUnloggedReceipt unlogged_receipt = 2;
+        ProtoCommitReceipt commit_receipt = 3;
+    }
+    repeated ProtoByzResponse byz_responses = 4;
+}
+
+message ProtoAuditReceipt {
+    repeated proto.consensus.ProtoBlock chain = 1;
+    repeated bytes proof = 2;
+}
+
+message ProtoCommitReceipt {
     bytes req_digest = 1;
     uint64 block_n = 2;
     uint64 tx_n = 3;
-
     proto.execution.ProtoTransactionResult results = 4;
+    repeated proto.consensus.ProtoBlock chain = 5;
+    repeated bytes proof = 6;
+}
 
-    bool await_byz_response = 5;
-    repeated ProtoByzResponse byz_responses = 6;
+message ProtoUnloggedReceipt {
+    proto.execution.ProtoTransactionResult results = 1;
 }
 
 message ProtoTentativeReceipt {

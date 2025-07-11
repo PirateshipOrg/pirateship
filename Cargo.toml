@@ -68,18 +68,6 @@ harness = false
 name = "verify_bench"
 harness = false
 
-[[bench]]
-name = "tx_serde_bench"
-harness = false
-
-[[bench]]
-name = "storage"
-harness = false
-
-[[bench]]
-name = "crypto_service_bench"
-harness = false
-
 
 [features]
 # Perf counters
@@ -103,11 +91,14 @@ evil = []
 extra_2pc = []
 no_pipeline = []
 extra_qc_check = []
+policy_validation = []
+channel_monitoring = []
 
 # Applications
 app_logger = []
 app_kvs = []
 app_sql = []
+app_scitt = []
 # Protocols specs
 lucky_raft = ["fixed_leader", "never_sign", "no_qc"]
 signed_raft = ["fixed_leader", "dynamic_sign", "no_qc"]

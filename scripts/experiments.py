@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from deployment import Deployment
+from deployment_aci import AciDeployment
 from ssh_utils import run_local, run_remote_public_ip, copy_remote_public_ip, copy_file_from_remote_public_ip, copy_dir_from_remote_public_ip
 from crypto import gen_keys_and_certs, TLS_CERT_SUFFIX, TLS_PRIVKEY_SUFFIX, ROOT_CERT_SUFFIX, PUB_KEYLIST_NAME, SIGN_PRIVKEY_SUFFIX
 from copy import deepcopy
@@ -10,12 +11,14 @@ import json
 from time import sleep
 from typing import List, Tuple
 import os
+from abc import ABC, abstractmethod
 
 
 DEFAULT_CA_NAME = "Pft"
 
+
 @dataclass
-class Experiment:
+class BaseExperiment(ABC):
     name: str
     group_name: str
     seq_num: int
@@ -32,6 +35,76 @@ class Experiment:
     project_home: str
     controller_must_run: bool
 
+    @abstractmethod
+    def deploy(self,
+               deployment: Deployment,
+               last_git_hash="",
+               last_git_diff="",
+               last_build_command="") -> None:
+        pass
+
+    @abstractmethod
+    def get_build_details(self) -> Tuple[str, str]:
+        pass
+
+    def run_plan(self) -> Tuple[List[str], int]:
+        if self.done():
+            return [], 0 # May arise if this experiment is brought back from the dead
+        self.__done__ = False
+
+        # Find which repeats have logs copied to local machine.
+        # I will not check for integrity of the log dir.
+        # If the log dir is not empty, I will assume the logs are complete.
+        # If that is not the case, delete the logs manually.
+        maybe_incomplete_repeats = []
+        for i in range(self.repeats):
+            dirname = os.path.join(self.local_workdir, "logs", str(i))
+            print("Checking locally:", dirname)
+            # Does this dir have any files?
+            if len(os.listdir(dirname)) > 0:
+                print(f"Skipping repeat {i} for experiment {self.name}")
+                continue
+            maybe_incomplete_repeats.append(i)
+
+        # Does the remote workdir have the logs?
+        need_to_run_repeats = []
+        available_remotely = 0
+        for i in maybe_incomplete_repeats:
+            dirname = os.path.join(self.remote_workdir, "logs", str(i))
+            print("Checking remotely:", dirname)
+            res = run_remote_public_ip([
+                f"ls {dirname}"
+            ], self.dev_ssh_user, self.dev_ssh_key, self.dev_vm, hide=True)[0]
+            if len(res) == 0:
+                need_to_run_repeats.append(i)
+            else:
+                print(f"Logs for repeat {i} already exist in remote")
+                available_remotely += 1
+
+        print("Need to run repeats:", need_to_run_repeats)
+
+        script_lines = [f"sh {self.remote_workdir}/arbiter_{i}.sh" for i in need_to_run_repeats]
+
+        return script_lines, available_remotely
+
+    def save_if_done(self):
+        # Check if all the logs are present
+        for i in range(self.repeats):
+            dirname = os.path.join(self.local_workdir, "logs", str(i))
+            if len(os.listdir(dirname)) == 0:
+                print(f"Logs for repeat {i} are missing. Experiment {self.name} is not done.")
+                return
+
+        self.__done__ = True
+        with open(os.path.join(self.local_workdir, "experiment.pkl"), "wb") as f:
+            pickle.dump(self, f)
+        print("Experiment", self.name, "is done.")
+
+    def set_local_workdir(self, workdir):
+        self.local_workdir = workdir
+
+    def get_local_workdir(self):
+        return self.local_workdir
 
     def done(self):
         try:
@@ -39,6 +112,13 @@ class Experiment:
             return done
         except Exception:
             return False
+
+    def tag_experiment(self, workdir):
+        with open(os.path.join(workdir, "experiment.txt"), "w") as f:
+            pprint(self, f)
+
+        with open(os.path.join(workdir, "experiment.pkl"), "wb") as f:
+            pickle.dump(self, f)
 
     def create_directory(self, workdir):
         build_dir = os.path.join(workdir, "build")
@@ -55,6 +135,9 @@ class Experiment:
         ])
 
         return build_dir, config_dir, log_dir_base, log_dirs
+
+
+class PirateShipExperiment(BaseExperiment):
 
     def tag_source(self, workdir):
         if self.git_hash_override is None:
@@ -87,7 +170,7 @@ class Experiment:
                 os.path.join(config_dir, f"{k}{SIGN_PRIVKEY_SUFFIX}"), # signing_priv_key_path
             ) for k in participants
         }
-        
+
 
     def generate_configs(self, deployment: Deployment, config_dir, log_dir):
         # If config_dir is not empty, assume the configs have already been generated
@@ -115,7 +198,7 @@ class Experiment:
             vms = deployment.get_nodes_with_tee("nontee")
         else:
             vms = deployment.get_wan_setup(self.node_distribution)
-        
+
         self.binary_mapping = defaultdict(list)
 
         for node_num in range(1, self.num_nodes+1):
@@ -126,7 +209,7 @@ class Experiment:
 
             _vm = vms[rr_cnt % len(vms)]
             self.binary_mapping[_vm].append(name)
-            
+
             private_ip = _vm.private_ip
             rr_cnt += 1
             connect_addr = f"{private_ip}:{port}"
@@ -142,8 +225,9 @@ class Experiment:
             config = deepcopy(self.base_node_config)
             config["net_config"]["name"] = name
             config["net_config"]["addr"] = listen_addr
-            # config["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"{log_dir}/{name}-db"
-            config["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"/data/{name}-db"
+            #TODO(natacha): Remove hardcoded dependency on /data/
+            config["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"{log_dir}/{name}-db"
+            #config["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"/data/{name}-db"
 
 
             node_configs[name] = config
@@ -154,7 +238,7 @@ class Experiment:
             client_vms = deployment.get_all_client_vms_in_region(self.client_region)
 
         crypto_info = self.gen_crypto(config_dir, node_list_for_crypto, len(client_vms))
-        
+
 
         for k, v in node_configs.items():
             tls_cert_path, tls_key_path, tls_root_ca_cert_path,\
@@ -223,16 +307,11 @@ class Experiment:
 
 
 
-    def tag_experiment(self, workdir):
-        with open(os.path.join(workdir, "experiment.txt"), "w") as f:
-            pprint(self, f)
 
-        with open(os.path.join(workdir, "experiment.pkl"), "wb") as f:
-            pickle.dump(self, f)
 
     def copy_back_build_files(self):
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
-        TARGET_BINARIES = ["client", "controller", "server", "net-perf"]
+        TARGET_BINARIES = ["client", "server", "net-perf"]
 
         # Copy the target/release to build directory
         for bin in TARGET_BINARIES:
@@ -245,7 +324,7 @@ class Experiment:
         if len(os.listdir(os.path.join(self.local_workdir, "build"))) > 0:
             print("Skipping build for experiment", self.name)
             return
-        
+
         with open(os.path.join(self.local_workdir, "git_hash.txt"), "r") as f:
             git_hash = f.read().strip()
 
@@ -253,6 +332,7 @@ class Experiment:
         cmds = [
             f"git clone {self.project_home} {remote_repo}"
         ]
+        print(cmds)
         try:
             run_remote_public_ip(cmds, self.dev_ssh_user, self.dev_ssh_key, self.dev_vm)
         except Exception as e:
@@ -274,15 +354,15 @@ class Experiment:
         # Setup git env
         cmd = []
 
-        # Checkout the git hash and apply the diff 
+        # Checkout the git hash and apply the diff
         cmds = [
             f"cd {remote_repo} && git reset --hard",
             f"cd {remote_repo} && git checkout {git_hash}",
             f"cd {remote_repo} && git submodule update --init --recursive",
             f"cd {remote_repo} && git apply --allow-empty --reject --whitespace=fix diff.patch",
         ]
-        
-        # Then build       
+
+        # Then build
         cmds.append(
             f"cd {remote_repo} && {self.build_command}"
         )
@@ -297,7 +377,7 @@ class Experiment:
 
         self.copy_back_build_files()
 
-        
+
 
     def generate_arbiter_script(self):
 
@@ -325,10 +405,10 @@ SCP_CMD="scp -o StrictHostKeyChecking=no -i {self.dev_ssh_key}"
                         binary_name = "controller"
 
                     _script += f"""
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'RUST_BACKTRACE=full {self.remote_workdir}/build/{binary_name} {self.remote_workdir}/configs/{bin}_config.json > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err' &
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'RUST_BACKTRACE=full  {self.remote_workdir}/build/{binary_name} {self.remote_workdir}/configs/{bin}_config.json > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err' &
 PID="$PID $!"
 """
-                    
+
             _script += f"""
 # Sleep for the duration of the experiment
 sleep {self.duration}
@@ -351,21 +431,27 @@ sleep 10
                         binary_name = "client"
                     elif "controller" in bin:
                         binary_name = "controller"
-                
+
                 # Copy the logs back
                     _script += f"""
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'pkill -2 -c {binary_name}' || true
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'pkill -15 -c {binary_name}' || true
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'pkill -9 -c {binary_name}' || true
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'rm -rf /data/*' || true
-$SCP_CMD {self.dev_ssh_user}@{vm.public_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.log {self.remote_workdir}/logs/{repeat_num}/{bin}.log || true
-$SCP_CMD {self.dev_ssh_user}@{vm.public_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.err {self.remote_workdir}/logs/{repeat_num}/{bin}.err || true
+echo "Trying to kill things"
+result="1"
+while [ "$result" != "0" ]; do
+     $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -2 -c {binary_name}' || true
+     $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -15 -c {binary_name}' || true
+     $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -9 -c {binary_name}' || true
+     result=$($SSH_CMD {self.dev_ssh_user}@{vm.private_ip} "pgrep -x '{binary_name}' > /dev/null && echo 1 || echo 0")
+     echo "Result: $result"
+done
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'rm -rf /data/*' || true
+$SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.log {self.remote_workdir}/logs/{repeat_num}/{bin}.log || true
+$SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.err {self.remote_workdir}/logs/{repeat_num}/{bin}.err || true
 """
-                    
+
             _script += f"""
-sleep 60
+sleep 30
 """
-                    
+
             # pkill -9 -c server also kills tmux-server. So we can't run a server on the dev VM.
             # It kills the tmux session and the experiment. And we end up with a lot of orphaned processes.
 
@@ -382,7 +468,7 @@ sleep 60
         ], self.dev_ssh_user, self.dev_ssh_key, self.dev_vm, hide=True)
 
         return any([bin in res[0] for bin in TARGET_BINARIES])
-    
+
 
     def get_build_details(self) -> Tuple[str, str]:
         '''
@@ -392,7 +478,7 @@ sleep 60
             git_hash = f.read().strip()
         with open(os.path.join(self.local_workdir, "diff.patch"), "r") as f:
             diff = f.read().strip()
-        
+
         return git_hash, diff, self.build_command
 
 
@@ -415,7 +501,7 @@ sleep 60
         self.dev_ssh_user = deployment.ssh_user
         self.dev_ssh_key = deployment.ssh_key
         self.generate_configs(deployment, config_dir, log_dir_base)
-        self.local_workdir = workdir
+        self.set_local_workdir(workdir)
 
         # Hard dependency on Linux style paths
         self.remote_workdir = f"/home/{deployment.ssh_user}/{deployment.workdir}/experiments/{self.name}"
@@ -446,59 +532,5 @@ sleep 60
         with open(os.path.join(workdir, "experiment.txt"), "w") as f:
             pprint(self, f)
 
-
-    def run_plan(self) -> Tuple[List[str], int]:
-        if self.done():
-            return [], 0 # May arise if this experiment is brought back from the dead
-        self.__done__ = False
-
-        # Find which repeats have logs copied to local machine.
-        # I will not check for integrity of the log dir.
-        # If the log dir is not empty, I will assume the logs are complete.
-        # If that is not the case, delete the logs manually.
-        maybe_incomplete_repeats = []
-        for i in range(self.repeats):
-            dirname = os.path.join(self.local_workdir, "logs", str(i))
-            print("Checking locally:", dirname)
-            # Does this dir have any files?
-            if len(os.listdir(dirname)) > 0:
-                print(f"Skipping repeat {i} for experiment {self.name}")
-                continue
-            maybe_incomplete_repeats.append(i)
-
-        # Does the remote workdir have the logs?
-        need_to_run_repeats = []
-        available_remotely = 0
-        for i in maybe_incomplete_repeats:
-            dirname = os.path.join(self.remote_workdir, "logs", str(i))
-            print("Checking remotely:", dirname)
-            res = run_remote_public_ip([
-                f"ls {dirname}"
-            ], self.dev_ssh_user, self.dev_ssh_key, self.dev_vm, hide=True)[0]
-            if len(res) == 0:
-                need_to_run_repeats.append(i)
-            else:
-                print(f"Logs for repeat {i} already exist in remote")
-                available_remotely += 1
-
-        print("Need to run repeats:", need_to_run_repeats)
-
-        script_lines = [f"sh {self.remote_workdir}/arbiter_{i}.sh" for i in need_to_run_repeats]
-
-        return script_lines, available_remotely
-    
-
-    def save_if_done(self):
-        # Check if all the logs are present
-        for i in range(self.repeats):
-            dirname = os.path.join(self.local_workdir, "logs", str(i))
-            if len(os.listdir(dirname)) == 0:
-                print(f"Logs for repeat {i} are missing. Experiment {self.name} is not done.")
-                return
-
-        self.__done__ = True
-        with open(os.path.join(self.local_workdir, "experiment.pkl"), "wb") as f:
-            pickle.dump(self, f)
-        print("Experiment", self.name, "is done.")
 
 

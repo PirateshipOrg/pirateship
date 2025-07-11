@@ -1,6 +1,6 @@
 from copy import deepcopy
 import json
-from experiments import Experiment, copy_file_from_remote_public_ip
+from experiments import PirateShipExperiment, copy_file_from_remote_public_ip
 import os
 import subprocess
 from typing import List
@@ -590,7 +590,7 @@ def gen_config(nodes: int, base_port: int, workers: int, node_parameters: NodePa
 
     return committee
 
-class AutobahnExperiment(Experiment):
+class AutobahnExperiment(PirateShipExperiment):
     def copy_back_build_files(self):
         remote_repo = f"/home/{self.dev_ssh_user}/repo/autobahn"
         TARGET_BINARIES = ["node", "benchmark_client"]

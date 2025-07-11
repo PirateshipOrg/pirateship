@@ -1,0 +1,88 @@
+workdir = "deployment_artifacts"
+project_home = "https://github.com/grapheo12/pirateship"
+
+[deployment_config]
+type = "aci"
+mode = "lan"
+ssh_pub_key = "/home/ncrooks/PirateShipMain/cluster_key_pub.pem"
+ssh_key = "/home/ncrooks/PirateShipMain/cluster_key.pem"
+ssh_user = "pftadmin"
+node_port_base = 3000
+template = "/home/ncrooks/PirateShipMain/pirateship/deployment/azure-aci/arm-template-standard.json"
+registry_name = "ncrookspirateship"
+resource_group = "ncrooks-pirateship"
+image_name = "pftimage"
+local = false
+docker_ssh = 2222
+confidential = false
+
+
+
+[node_config]
+
+[node_config.net_config]
+client_max_retry = 10
+
+[node_config.rpc_config]
+recv_buffer_size = 32768
+channel_depth = 1000
+
+[node_config.consensus_config]
+quorum_diversity_k = 3
+liveness_u = 2
+max_backlog_batch_size = 1000
+signature_max_delay_blocks = 50
+signature_max_delay_ms = 10000
+vote_processing_workers = 5
+view_timeout_ms = 4000
+batch_max_delay_ms = 5
+
+[node_config.consensus_config.log_storage_config.RocksDB]
+write_buffer_size = 2147483648
+max_write_buffer_number = 1
+max_write_buffers_to_merge = 1
+
+[node_config.app_config]
+logger_stats_report_ms = 100
+
+[node_config.evil_config]
+simulate_byzantine_behavior = false
+byzantine_start_block = 0
+
+
+[client_config]
+
+[client_config.net_config]
+client_max_retry = 10
+
+[client_config.workload_config]
+num_requests = 100_000_000
+request_config = "Blanks"
+
+[[experiments]]
+name = "pirateship"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make"
+duration = 120
+
+[experiments.sweeping_parameters]
+num_clients = [1, 2]
+
+
+[[results]]
+name = "tput_latency_client_sweep"
+plotter = "tput_latency_sweep"
+ramp_up = 30
+ramp_down = 30
+output = "lan_experiment.pdf"
+
+[results.legends]
+# Experiment group to legend mapping
+pirateship = "pirateship+byz"
+pbft = "pbft+onlybyz"
+signed_raft = "signed_raft"
+
+[results.font]
+size = 55

@@ -1,0 +1,5 @@
+platforms: 
+ - location: "localhost"
+   nodepool_count: "5"
+   clientpool_count: "1" 
+ 

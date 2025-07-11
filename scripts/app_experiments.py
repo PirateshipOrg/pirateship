@@ -1,7 +1,7 @@
 from collections import defaultdict
 from copy import deepcopy
 import json
-from experiments import Experiment, copy_file_from_remote_public_ip
+from experiments import PirateShipExperiment, copy_file_from_remote_public_ip
 from deployment import Deployment
 import os
 import subprocess
@@ -10,7 +10,7 @@ from typing import List
 from ssh_utils import run_remote_public_ip, copy_remote_public_ip
 
 
-class AppExperiment(Experiment):
+class AppExperiment(PirateShipExperiment):
     def copy_back_build_files(self):
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
         TARGET_BINARIES = [self.workload]

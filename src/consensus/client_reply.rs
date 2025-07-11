@@ -1,10 +1,10 @@
 use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
-use log::{info, trace};
+use log::{error, info, trace};
 use prost::Message as _;
 use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
 
-use crate::{config::{AtomicConfig, NodeInfo}, crypto::HashType, proto::{client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTryAgain}, execution::ProtoTransactionResult, rpc::ProtoPayload}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
+use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoAuditReceipt, ProtoByzResponse, ProtoClientReply, ProtoCommitReceipt, ProtoTransactionReceipt, ProtoTryAgain, ProtoUnloggedReceipt}, execution::ProtoTransactionResult, rpc::ProtoPayload}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{make_channel, Receiver, Sender}};
 
 use super::batch_proposal::MsgAckChanWithTag;
 
@@ -14,20 +14,21 @@ pub enum ClientReplyCommand {
     CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>),
     ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>),
     UnloggedRequestAck(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
-    ProbeRequestAck(u64 /* block_n */, MsgAckChanWithTag),
+    ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, MsgAckChanWithTag),
 }
 
 enum ReplyProcessorCommand {
-    CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>),
+    CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>, ProofChain, MerkleInclusionProof),
     ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
-    Probe(u64 /* block_n */, Vec<MsgAckChanWithTag>),
+    Probe(u64 /* block_n */, ProofChain, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
 }
 pub struct ClientReplyHandler {
     config: AtomicConfig,
 
     batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
     reply_command_rx: Receiver<ClientReplyCommand>,
+    issuer_tx: Sender<IssuerCommand>,
 
     reply_map: HashMap<HashType, Vec<MsgAckChanWithTag>>,
     byz_reply_map: HashMap<HashType, Vec<(u64, SenderType)>>,
@@ -40,7 +41,7 @@ pub struct ClientReplyHandler {
     reply_processors: JoinSet<()>,
     reply_processor_queue: (async_channel::Sender<ReplyProcessorCommand>, async_channel::Receiver<ReplyProcessorCommand>),
 
-    probe_buffer: BTreeMap<u64 /* block_n */, Vec<MsgAckChanWithTag>>,
+    probe_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
     acked_bci: u64,
 
     must_cancel: bool,
@@ -51,12 +52,14 @@ impl ClientReplyHandler {
         config: AtomicConfig,
         batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         reply_command_rx: Receiver<ClientReplyCommand>,
+        issuer_tx: Sender<IssuerCommand>,
     ) -> Self {
         let _chan_depth = config.get().rpc_config.channel_depth as usize;
         Self {
             config,
             batch_rx,
             reply_command_rx,
+            issuer_tx,
             reply_map: HashMap::new(),
             byz_reply_map: HashMap::new(),
             crash_commit_reply_buf: HashMap::new(),
@@ -77,16 +80,21 @@ impl ClientReplyHandler {
             client_reply_handler.reply_processors.spawn(async move {
                 while let Ok(cmd) = rx.recv().await {
                     match cmd {
-                        ReplyProcessorCommand::CrashCommit(block_n, tx_n, hsh, reply, (reply_chan, client_tag, _), byz_responses) => {
+                        ReplyProcessorCommand::CrashCommit(block_n, tx_n, hsh, reply, (reply_chan, client_tag, _), byz_responses, proof_chain, inclusion_proof) => {
                             let reply = ProtoClientReply {
                                 reply: Some(
                                     crate::proto::client::proto_client_reply::Reply::Receipt(
                                         ProtoTransactionReceipt {
-                                            req_digest: hsh,
-                                            block_n,
-                                            tx_n,
-                                            results: Some(reply),
-                                            await_byz_response: true,
+                                            receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::CommitReceipt(
+                                                ProtoCommitReceipt {
+                                                    req_digest: hsh,
+                                                    block_n,
+                                                    tx_n,
+                                                    results: Some(reply),
+                                                    chain: proof_chain,
+                                                    proof: inclusion_proof.as_vec(),
+                                                }
+                                            )),
                                             byz_responses,
                                         },
                                 )),
@@ -110,13 +118,13 @@ impl ClientReplyHandler {
                                 reply: Some(
                                     crate::proto::client::proto_client_reply::Reply::Receipt(
                                         ProtoTransactionReceipt {
-                                            req_digest: vec![],
-                                            block_n: 0,
-                                            tx_n: 0,
-                                            results: Some(reply),
-                                            await_byz_response: false,
+                                            receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::UnloggedReceipt(
+                                                ProtoUnloggedReceipt {
+                                                    results: Some(reply),
+                                                }
+                                            )),
                                             byz_responses: vec![],
-                                        },
+                                        }
                                     ),
                                 ),
                                 client_tag: tag,
@@ -131,29 +139,28 @@ impl ClientReplyHandler {
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         },
 
-                        ReplyProcessorCommand::Probe(block_n, reply_vec) => {
-                            let reply = ProtoClientReply {
-                                reply: Some(
-                                    crate::proto::client::proto_client_reply::Reply::Receipt(
-                                        ProtoTransactionReceipt {
-                                            req_digest: vec![],
-                                            block_n,
-                                            tx_n: 0,
-                                            results: None,
-                                            await_byz_response: false,
-                                            byz_responses: vec![],
-                                        },
-                                    ),
-                                ),
-                                client_tag: 0,  // TODO: this should be a real tag; but currently probe is not done over the network so we are ok.
-                            };
-
-                            let reply_ser = reply.encode_to_vec();
-                            let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-                            
-                            for (reply_chan, tag, sender) in reply_vec {
+                        ReplyProcessorCommand::Probe(_block_n, proof_chain, reply_vec) => {
+                            for ((reply_chan, client_tag, _sender), _tx_n, inclusion_proof) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
+                                let reply = ProtoClientReply {
+                                    reply: Some(
+                                        crate::proto::client::proto_client_reply::Reply::Receipt(
+                                            ProtoTransactionReceipt {
+                                                receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::AuditReceipt(
+                                                    ProtoAuditReceipt {
+                                                        chain: proof_chain.clone(),
+                                                        proof: inclusion_proof.as_vec(),
+                                                    }
+                                                )),
+                                                byz_responses: vec![],
+                                            },
+                                        ),
+                                    ),
+                                    client_tag,
+                                };
+                                let reply_ser = reply.encode_to_vec();
+                                let _sz = reply_ser.len();
+                                let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
                                 
                                 let _ = reply_chan.send((reply_msg.clone(), latency_profile)).await;
                             }
@@ -219,11 +226,21 @@ impl ClientReplyHandler {
     }
 
     async fn do_crash_commit_reply(&mut self, reply_sender_vec: Vec<MsgAckChanWithTag>, hash: HashType, n: u64, reply_vec: Vec<ProtoTransactionResult>) {
+        let (tx, rx) = oneshot::channel();
+        self.issuer_tx.send(IssuerCommand::IssueCommitReceipt(n,  (0..reply_vec.len()).map(|i| i as u64).collect(), tx)).await.unwrap();
+        let builder = rx.await.unwrap().unwrap_or_else(|| {
+            error!("Failed to build commit receipt for block {}", n);
+            crate::consensus::issuer::ReceiptBuilder {
+                chain: vec![],
+                proofs: vec![MerkleInclusionProof::default(); reply_vec.len()],
+            }
+        });
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        for (tx_n, ((reply_chan, client_tag, sender), reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
+        assert_eq!(reply_sender_vec.len(), builder.proofs.len());
+        for (tx_n, (((reply_chan, client_tag, sender), reply), proof)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).zip(builder.proofs).enumerate() {
             let byz_responses = self.byz_response_store.remove(&sender).unwrap_or_default();
-            
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses)).await.unwrap();
+
+            self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses, builder.chain.clone(), proof)).await.unwrap();
         }
     }
 
@@ -295,11 +312,11 @@ impl ClientReplyHandler {
                 let sender = sender.2;
                 self.reply_processor_queue.0.send(ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, client_tag, sender))).await.unwrap();
             },
-            ClientReplyCommand::ProbeRequestAck(block_n, sender) => {
+            ClientReplyCommand::ProbeRequestAck(block_n, tx_n, sender) => {
                 if let Some(vec) = self.probe_buffer.get_mut(&block_n) {
-                    vec.push(sender);
+                    vec.push((sender, tx_n));
                 } else {
-                    self.probe_buffer.insert(block_n, vec![sender]);
+                    self.probe_buffer.insert(block_n, vec![(sender, tx_n)]);
                 }
 
                 self.maybe_clear_probe_buf().await;
@@ -322,7 +339,14 @@ impl ClientReplyHandler {
         });
 
         for (block_n, reply_vec) in remove_vec {
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(block_n, reply_vec)).await.unwrap();
+            let (tx, rx) = oneshot::channel();
+            self.issuer_tx.send(IssuerCommand::IssueAuditReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
+            let Some(builder) = rx.await.unwrap() else {
+                error!("Failed to build audit receipt for block {}", block_n);
+                continue;
+            };
+            assert_eq!(reply_vec.len(), builder.proofs.len());
+            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
         }
     }
 
@@ -338,7 +362,6 @@ impl ClientReplyHandler {
     }
 
     async fn maybe_clear_reply_buf(&mut self, batch_hash: HashType) {
-        
         // Byz register must happen first. Otherwise when crash commit piggybacks the byz commit reply, it will be too late.
         if let Some((n, reply_vec)) = self.byz_commit_reply_buf.remove(&batch_hash) {
             if let Some(reply_sender_vec) = self.byz_reply_map.remove(&batch_hash) {

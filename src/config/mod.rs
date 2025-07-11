@@ -149,11 +149,25 @@ pub struct ClientRpcConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum LoopType {
+    Closed,
+    Open { request_rate: f64 },
+}
+
+impl Default for LoopType {
+    fn default() -> Self {
+        LoopType::Closed
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorkloadConfig {
     pub num_clients: usize,
     pub duration: u64,
     pub max_concurrent_requests: usize,
-    pub request_config: RequestConfig
+    pub request_config: RequestConfig,
+    #[serde(default)]
+    pub loop_type: LoopType,
 }
 
 

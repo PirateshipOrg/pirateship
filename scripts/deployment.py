@@ -68,7 +68,11 @@ class Deployment:
         self.ssh_user = config["ssh_user"]
 
         if os.path.isabs(config["ssh_key"]):
-            self.ssh_key = config["ssh_key"]
+            # Extract final name of file, removing path
+            ssh_key_name = os.path.basename(config["ssh_key"])
+            # Copy the key into workdir/deployment
+            execute_command_args(["cp", config["ssh_key"], os.path.join(workdir, "deployment",ssh_key_name)])
+            self.ssh_key = os.path.join(workdir, "deployment", ssh_key_name)
         else:
             self.ssh_key = os.path.join(workdir, "deployment", config["ssh_key"])
         self.node_port_base = int(config["node_port_base"])
@@ -487,3 +491,4 @@ echo "Done {job_file}" >> status.txt
         if wait_till_end:
             self.wait_till_end(len(cmds))
             
+

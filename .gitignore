@@ -23,3 +23,5 @@ __pycache__
 **/deployment_artifacts/
 
 latencies.txt
+*.pub
+*.pem

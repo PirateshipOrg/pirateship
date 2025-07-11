@@ -76,7 +76,13 @@ pub mod channel {
                     Err(_) => None,
                 }
             }
+
+            #[cfg(feature = "channel_monitoring")]
+            pub fn len(&self) -> usize {
+                self.0.len()
+            }
         }
+
 
         impl <T> AsyncSenderWrapper<T> {
 
@@ -91,7 +97,10 @@ pub mod channel {
                 self.0.send((Instant::now(), e)).await
             }
 
-
+            #[cfg(feature = "channel_monitoring")]
+            pub fn len(&self) -> usize {
+                self.0.len()
+            }
         }
 
 

@@ -23,8 +23,10 @@ from crypto import *
 from app_experiments import AppExperiment
 from ssh_utils import *
 from deployment import Deployment
-from experiments import Experiment
+from deployment_aci import AciDeployment
+from experiments import BaseExperiment, PirateShipExperiment
 from autobahn_experiments import AutobahnExperiment
+from ccf_experiments import CCFExperiment
 from results import *
 import pickle
 import re
@@ -116,7 +118,14 @@ def parse_config(path, workdir=None, existing_experiments=None):
         curr_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
         workdir = os.path.join(toml_dict["workdir"], curr_time)
 
-    deployment = Deployment(toml_dict["deployment_config"], workdir)
+    # Create Deployment (Terraform, ACI, etc.)
+    # TODO(natacha): Add a way for Hybrid deployments (as a way to facilitate ACI + VM testing)
+    type = toml_dict["deployment_config"].get("type")
+    if (type is None) or  type == "vm":
+        # Default to VM deployment
+        deployment = Deployment(toml_dict["deployment_config"], workdir)
+    else:
+        deployment = AciDeployment(toml_dict["deployment_config"], workdir)
 
     base_node_config = toml_dict["node_config"]
     base_client_config = toml_dict["client_config"]
@@ -131,11 +140,13 @@ def parse_config(path, workdir=None, existing_experiments=None):
         git_hash_override = e.get("git_hash", None)
         experiment_type = e.get("type", "pirateship")
         if experiment_type == "pirateship":
-            klass = Experiment
+            klass = PirateShipExperiment
         elif experiment_type == "app":
             klass = AppExperiment
         elif experiment_type == "autobahn":
             klass = AutobahnExperiment
+        elif experiment_type == "ccf":
+            klass = CCFExperiment
         project_home = toml_dict["project_home"]
 
         if "sweeping_parameters" in e:
@@ -209,7 +220,7 @@ def parse_config(path, workdir=None, existing_experiments=None):
 
 @click.group(cls=DefaultGroup, default='all', default_if_no_args=True, help="Run experiment pipeline (runs all if no subcommand is provided)")
 @click.pass_context
-def main(ctx):
+def main(ctx):#
     if ctx.invoked_subcommand is None:
         # Run all()
         ctx.invoke(all)
@@ -414,7 +425,7 @@ def deploy_experiments(config, workdir):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     if len(experiments) == 0:
@@ -423,6 +434,12 @@ def deploy_experiments(config, workdir):
     cached_git_hash = ""
     cached_diff = ""
     cached_build_cmd = ""
+
+    must_reset_quota = False
+    if isinstance(deployment, AciDeployment) and deployment.local:
+        deployment.lift_dev_cpu_quota()
+        must_reset_quota = True
+
     for experiment in experiments:
         try:
             experiment.deploy(deployment, last_git_hash=cached_git_hash, last_git_diff=cached_diff, last_build_command=cached_build_cmd)
@@ -441,6 +458,8 @@ def deploy_experiments(config, workdir):
     # Copy over the entire directory to all nodes
     deployment.copy_all_to_remote_public_ip()
 
+    if must_reset_quota:
+        deployment.reset_cpu_quota()
 
 @main.command()
 @click.option(
@@ -470,7 +489,7 @@ def run_experiments(config, workdir, name):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     script_lines = []
@@ -611,7 +630,7 @@ def clean_logs(config, workdir):
         if "experiment_pristine.pkl" in files:
             with open(os.path.join(root, "experiment_pristine.pkl"), "rb") as f:
                 experiment = pickle.load(f)
-                assert isinstance(experiment, Experiment)
+                assert isinstance(experiment, BaseExperiment)
             
             with open(os.path.join(root, "experiment.pkl"), "wb") as f:
                 pickle.dump(experiment, f)
@@ -641,7 +660,7 @@ def results(config, workdir):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     script_lines = []

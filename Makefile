@@ -76,6 +76,10 @@ hotstuff_logger:
 chained_pbft_logger:
 	CC=clang CXX=clang++ cargo build --release --features chained_pbft,app_logger,storage --no-default-features
 
+.PHONY: pirateship_scitt
+pirateship_scitt:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/Cargo.toml --bin scitt
+
 .PHONY: bench
 bench:
 	CC=clang CXX=clang++ cargo bench

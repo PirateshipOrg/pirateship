@@ -70,6 +70,7 @@ impl ReadCache {
 pub enum LogServerQuery {
     CheckHash(u64 /* block.n */, Vec<u8> /* block_hash */, Sender<bool>),
     GetHints(u64 /* last needed block.n */, Sender<Vec<ProtoBlockHint>>),
+    GetChunk(u64 /* starting block.n */, u64 /* ending block.n */, Sender<Vec<CachedBlock>>),
 }
 
 pub enum LogServerCommand {
@@ -420,6 +421,26 @@ impl LogServer {
 
                 let res = sender.send(hints).await;
                 info!("Sent hints size {}, result = {:?}", len, res);
+            },
+            LogServerQuery::GetChunk(start, end, sender) => {
+                let mut chunk = Vec::new();
+
+                for n in start..=end {
+                    let block = match self.get_block(n).await {
+                        Some(block) => block,
+                        None => {
+                            warn!("Block {} not found", n);
+                            chunk.clear();
+                            break;
+                        }
+                    };
+                    chunk.push(block);
+                }
+
+                let len = chunk.len();
+
+                let res = sender.send(chunk).await;
+                info!("Sent chunk size {}, result = {:?}", len, res);
             }
         }
     }

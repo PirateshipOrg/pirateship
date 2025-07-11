@@ -5,7 +5,7 @@ use log::{error, info, trace, warn};
 use prost::Message;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::{config::AtomicConfig, proto::{client::{ProtoClientReply, ProtoClientRequest}, consensus::ProtoVote, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}, rpc::ProtoPayload}, rpc::{client::PinnedClient, PinnedMessage}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
+use crate::{config::AtomicConfig, proto::{client::{proto_transaction_receipt, ProtoClientReply, ProtoClientRequest, ProtoTransactionReceipt}, consensus::ProtoVote, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}, rpc::ProtoPayload}, rpc::{client::PinnedClient, PinnedMessage}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
 
 pub struct TwoPCCommand {
     key: String,
@@ -302,7 +302,11 @@ impl TwoPCHandler {
             let reply = reply.unwrap();
             match reply {
                 crate::proto::client::proto_client_reply::Reply::Receipt(proto_transaction_receipt) => {
-                    let results = proto_transaction_receipt.results;
+                    let Some(proto_transaction_receipt::Receipt::CommitReceipt(receipt)) = proto_transaction_receipt.receipt else {
+                        warn!("Receipt is None");
+                        return false;
+                    };
+                    let results = receipt.results;
                     if results.is_none() {
                         warn!("Results is none");
                         return false;
