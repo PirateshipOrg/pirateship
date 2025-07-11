@@ -2,7 +2,7 @@ use std::io::{Error, ErrorKind};
 
 use bytes::BytesMut;
 use ed25519_dalek::SIGNATURE_LENGTH;
-use prost::{DecodeError, EncodeError, Message};
+use prost::{DecodeError, Message};
 
 use crate::{crypto::{HashType, DIGEST_LENGTH}, proto::consensus::{DefferedSignature, ProtoBlock}};
 
@@ -27,6 +27,25 @@ pub fn serialize_proto_block_nascent(block: &ProtoBlock) -> Result<Vec<u8>, Erro
 
     Ok(bytes.to_vec())
 }
+
+pub fn serialize_proto_block_nascent_with_merkle_root(block: &ProtoBlock, merkle_root: &HashType) -> Result<Vec<u8>, Error> {
+    // maybe there is a better way to do this...
+    let mut modified_block = block.clone();
+    modified_block.tx_list.clear();
+    modified_block.parent.clear();
+    modified_block.sig = None;
+    
+    let mut bytes = BytesMut::with_capacity(DIGEST_LENGTH + SIGNATURE_LENGTH + modified_block.encoded_len() + merkle_root.len());
+    // Serialized format: signature || parent_hash || merkle_root || block without tx_list
+    bytes.extend_from_slice(&[0u8; SIGNATURE_LENGTH]);
+    bytes.extend_from_slice(&[0u8; DIGEST_LENGTH]);
+    bytes.extend_from_slice(merkle_root);
+    
+    modified_block.encode(&mut bytes).unwrap();
+
+    Ok(bytes.to_vec())
+}
+
 
 pub fn serialize_proto_block_prefilled(mut block: ProtoBlock) -> Vec<u8> {
     let mut bytes = BytesMut::with_capacity(DIGEST_LENGTH + SIGNATURE_LENGTH + block.encoded_len());
@@ -98,9 +117,10 @@ pub fn deserialize_proto_block(bytes: &[u8]) -> Result<ProtoBlock, DecodeError> 
 
 #[cfg(test)]
 mod test {
+    use ed25519_dalek::SIGNATURE_LENGTH;
     use rand::{thread_rng, Rng};
 
-    use crate::{crypto::hash, proto::{consensus::ProtoBlock, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}}};
+    use crate::{crypto::{hash, DIGEST_LENGTH}, proto::{consensus::ProtoBlock, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}}};
 
     #[test]
     fn test_proto_block_serde() {
@@ -137,4 +157,45 @@ mod test {
 
         assert_eq!(hsh1, hsh2);
     }
+
+    #[test]
+    fn test_proto_block_serde_with_mt() {
+        let mut block = ProtoBlock::default();
+        let mut tx = Vec::with_capacity(1000);
+        for _ in 0..1000 {
+            let mut rng = thread_rng();
+            tx.push(ProtoTransaction {
+                on_receive: None,
+                on_crash_commit: Some(ProtoTransactionPhase {
+                    ops: vec![ProtoTransactionOp {
+                        op_type: crate::proto::execution::ProtoTransactionOpType::Noop as i32,
+                        operands: vec![vec![rng.gen(); 512]],
+                    }],
+                }),
+                on_byzantine_commit: None,
+                is_reconfiguration: false,
+                is_2pc: false,
+            });
+        }
+        block.tx_list = tx;
+
+        let merkle_tree = crate::crypto::MerkleTree::from_block(&block);
+        let ser = super::serialize_proto_block_nascent(&block).unwrap();
+        let ser_with_mt = super::serialize_proto_block_nascent_with_merkle_root(&block, &merkle_tree.root()).unwrap();
+
+        let block2 = super::deserialize_proto_block(&ser).unwrap();
+        let merkle_tree2 = crate::crypto::MerkleTree::from_block(&block2);
+        let ser2 = super::serialize_proto_block_nascent_with_merkle_root(&block2, &merkle_tree2.root()).unwrap();
+
+        assert_eq!(block.n, block2.n);
+        assert_eq!(merkle_tree.root(), merkle_tree2.root());
+        assert_eq!(ser_with_mt.len(), ser2.len());
+
+        let hsh1 = ser_with_mt.as_slice();
+        let hsh2 = hash(ser2.as_slice());
+
+        assert_eq!(hsh1, hsh2);
+    }
+
+
 }

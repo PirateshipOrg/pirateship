@@ -319,7 +319,12 @@ impl PinnedClient {
         let stream = match TcpStream::connect(&peer.addr).await {
             Ok(s) => s,
             Err(e) => {
-                println!("Failed to connect: {}", e);
+                static CONNECT_FAIL_COUNT: AtomicUsize = AtomicUsize::new(0);
+                const LOG_EVERY_N: usize = 250;
+                let count = CONNECT_FAIL_COUNT.fetch_add(1, Ordering::Relaxed);
+                if count % LOG_EVERY_N == 0 {
+                    warn!("Failed to connect: {} (failure #{})", e, count);
+                }
                 return Err(e); 
         }
         };
@@ -332,7 +337,7 @@ impl PinnedClient {
         {
                 Ok(s) => s,
                 Err(e) => {
-                  println!("Failed to connect (TLS): {}", e);
+                  warn!("Failed to connect (TLS): {}", e);
                   return Err(e); 
             }
        };

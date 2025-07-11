@@ -106,7 +106,7 @@ engraft = ["fixed_leader", "never_sign", "no_qc", "extra_2pc"]
 chained_pbft = ["round_robin_leader", "always_sign", "view_change"]
 jolteon = ["round_robin_leader", "always_sign", "view_change", "no_pipeline"]
 hotstuff = ["round_robin_leader", "always_sign", "view_change", "no_pipeline", "extra_qc_check"]
-pirateship = ["round_robin_leader", "dynamic_sign", "view_change", "channel_monitoring"]
+pirateship = ["round_robin_leader", "dynamic_sign", "view_change"]
 
 default = ["pirateship", "app_logger", "storage", "fast_path", "platforms"]
 # default = ["jolteon", "app_logger", "storage"]

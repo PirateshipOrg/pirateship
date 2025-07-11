@@ -163,27 +163,14 @@ impl AppEngine for SCITTAppEngine {
                             }
                             let from = TXID::from_vec(&op.operands[0]);
                             let to = TXID::from_vec(&op.operands[1]);
-                            let mut scan_result = Vec::new();
-                            if let (Some(from), Some(to)) = (&from, &to) {
-                                for (key, versions) in self.state.ci_state.iter() {
-                                    if key.block_n >= from.block_n && key.block_n <= to.block_n {
-                                        for (pos, _) in versions {
-                                            if *pos >= from.block_n && *pos <= to.block_n {
-                                                scan_result.push(key.to_vec());
-                                            }
-                                        }
-                                    }
-                                }
-                                for (key, _) in self.state.bci_state.iter() {
-                                    if key.block_n >= from.block_n && key.block_n <= to.block_n {
-                                        scan_result.push(key.to_vec());
-                                    }
-                                }
+
+                            let scan_result = self.scan(&from, &to);
+                            if let Some(scan_result) = scan_result {
+                                txn_result.result.push(ProtoTransactionOpResult {
+                                    success: true,
+                                    values: scan_result,
+                                });
                             }
-                            txn_result.result.push(ProtoTransactionOpResult {
-                                success: true,
-                                values: scan_result,
-                            });
                         } else {
                             warn!("Invalid operation type: {}", op.op_type);
                             continue;
@@ -299,23 +286,45 @@ impl AppEngine for SCITTAppEngine {
         };
 
         for op in ops {
-            if op.operands.len() != 1 {
-                continue;
+            if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+                if op_type == ProtoTransactionOpType::Read {
+                    if op.operands.len() != 1 {
+                        continue;
+                    }
+                    let mut op_result = ProtoTransactionOpResult {
+                        success: false,
+                        values: vec![],
+                    };
+                    let key = TXID::from_vec(&op.operands[0]);
+                    let mut result = None;
+                    if let Some(txid) = key {
+                        result = self.read(&txid);
+                    }
+                    if let Some(value) = result {
+                        op_result.success = true;
+                        op_result.values = vec![value];
+                    }
+                    txn_result.result.push(op_result);
+                } else if op_type == ProtoTransactionOpType::Scan {
+                    if op.operands.len() != 2 {
+                        continue;
+                    }
+                    let mut op_result = ProtoTransactionOpResult {
+                        success: false,
+                        values: vec![],
+                    };
+                    let from = TXID::from_vec(&op.operands[0]);
+                    let to = TXID::from_vec(&op.operands[1]);
+                    let scan_result = self.scan(&from, &to);
+                    if let Some(scan_result) = scan_result {
+                        op_result.success = true;
+                        op_result.values = scan_result;
+                    }
+                    txn_result.result.push(op_result);
+                } else {
+                    warn!("Invalid operation type: {}", op_type.as_str_name());
+                }
             }
-            let mut op_result = ProtoTransactionOpResult {
-                success: false,
-                values: vec![],
-            };
-            let key = TXID::from_vec(&op.operands[0]);
-            let mut result = None;
-            if let Some(txid) = key {
-                result = self.read(&txid);
-            }
-            if let Some(value) = result {
-                op_result.success = true;
-                op_result.values = vec![value];
-            }
-            txn_result.result.push(op_result);
         }
 
         return txn_result;
@@ -344,6 +353,29 @@ impl SCITTAppEngine {
             return Some(v.clone());
         } else {
             return None;
+        }
+    }
+
+    fn scan(&self, from: &Option<TXID>, to: &Option<TXID>) -> Option<Vec<Vec<u8>>> {
+        if let (Some(from), Some(to)) = (from, to) {
+            let mut scan_result = Vec::new();
+            for (key, versions) in self.state.ci_state.iter() {
+                if key.block_n >= from.block_n && key.block_n <= to.block_n {
+                    for (pos, _) in versions {
+                        if *pos >= from.block_n && *pos <= to.block_n {
+                            scan_result.push(key.to_vec());
+                        }
+                    }
+                }
+            }
+            for (key, _) in self.state.bci_state.iter() {
+                if key.block_n >= from.block_n && key.block_n <= to.block_n {
+                    scan_result.push(key.to_vec());
+                }
+            }
+            Some(scan_result)
+        } else {
+            None
         }
     }
 }

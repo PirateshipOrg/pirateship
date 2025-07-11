@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_cbor;
 
 // Error codes for CBOR operations
-pub const CBOR_ERROR_TITLE: &str = "title";
-pub const CBOR_ERROR_DETAIL: &str = "detail";
+pub const _CBOR_ERROR_TITLE: &str = "title";
+pub const _CBOR_ERROR_DETAIL: &str = "detail";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ErrorInfo {
@@ -75,7 +75,7 @@ pub fn operation_props_to_cbor(
 /// 
 /// # Errors
 /// Returns an error if CBOR decoding fails
-pub fn cbor_to_operation_props(cbor_data: &[u8]) -> Result<OperationResponse, serde_cbor::Error> {
+pub fn _cbor_to_operation_props(cbor_data: &[u8]) -> Result<OperationResponse, serde_cbor::Error> {
     serde_cbor::from_slice(cbor_data)
 }
 
@@ -94,7 +94,7 @@ mod tests {
         ).unwrap();
 
         // Verify we can deserialize it back
-        let operation = cbor_to_operation_props(&cbor_data).unwrap();
+        let operation = _cbor_to_operation_props(&cbor_data).unwrap();
         assert_eq!(operation.operation_id, "op-123");
         assert_eq!(operation.status, "succeeded");
         assert_eq!(operation.entry_id, Some("entry-456".to_string()));
@@ -112,7 +112,7 @@ mod tests {
         ).unwrap();
 
         // Verify we can deserialize it back
-        let operation = cbor_to_operation_props(&cbor_data).unwrap();
+        let operation = _cbor_to_operation_props(&cbor_data).unwrap();
         assert_eq!(operation.operation_id, "op-789");
         assert_eq!(operation.status, "failed");
         assert!(operation.entry_id.is_none());
@@ -133,7 +133,7 @@ mod tests {
         ).unwrap();
 
         // Verify we can deserialize it back
-        let operation = cbor_to_operation_props(&cbor_data).unwrap();
+        let operation = _cbor_to_operation_props(&cbor_data).unwrap();
         assert_eq!(operation.operation_id, "op-minimal");
         assert_eq!(operation.status, "running");
         assert!(operation.entry_id.is_none());

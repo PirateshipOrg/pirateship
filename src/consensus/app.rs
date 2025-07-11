@@ -5,7 +5,7 @@ use log::{error, info, trace, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
 use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
 #[cfg(feature = "channel_monitoring")]
@@ -116,6 +116,7 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
     client_reply_tx: Sender<ClientReplyCommand>,
+    issuer_tx: Sender<IssuerCommand>,
 
     checkpoint_timer: Arc<Pin<Box<ResettableTimer>>>,
     log_timer: Arc<Pin<Box<ResettableTimer>>>,
@@ -135,7 +136,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     pub fn new(
         config: AtomicConfig,
         staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-        client_reply_tx: Sender<ClientReplyCommand>, gc_tx: Sender<u64>,
+        client_reply_tx: Sender<ClientReplyCommand>, issuer_tx: Sender<IssuerCommand>, gc_tx: Sender<u64>,
 
         #[cfg(feature = "extra_2pc")]
         twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
@@ -158,6 +159,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             staging_rx,
             unlogged_rx,
             client_reply_tx,
+            issuer_tx,
             checkpoint_timer,
             log_timer,
             perf_counter,
@@ -317,6 +319,9 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     }
                     (block.block_hash.clone(), block.block.n)
                 }).collect::<(Vec<_>, Vec<_>)>();
+
+                let _ = self.issuer_tx.send(IssuerCommand::NewChunk(blocks.clone())).await;
+
                 let results = self.engine.handle_crash_commit(blocks);
                 
                 for n in &block_ns {
@@ -377,6 +382,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 }
 
                 self.stats.last_n = new_last_block;
+                let _ = self.issuer_tx.send(IssuerCommand::Rollback(new_last_block)).await;
                 self.engine.handle_rollback(new_last_block);
             }
         }

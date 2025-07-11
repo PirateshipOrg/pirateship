@@ -8,6 +8,7 @@ use crate::{
 
 use sha2::{Digest, Sha256, Sha512};
 
+#[derive(Clone, Debug)]
 pub struct MerkleInclusionProof(Vec<HashType>);
 
 impl MerkleInclusionProof {
@@ -31,6 +32,10 @@ impl MerkleInclusionProof {
 
     pub fn as_vec(self) -> Vec<HashType> {
         self.0
+    }
+
+    pub fn default() -> Self {
+        MerkleInclusionProof(vec![])
     }
 }
 
@@ -94,7 +99,7 @@ impl MerkleTree {
     }
 
     pub fn generate_inclusion_proof(&self, block_n: usize) -> MerkleInclusionProof {
-        assert!(block_n < self.n_leaves, "block_n out of bounds");
+        assert!(block_n < self.n_leaves, "block_n out of bounds {} {}", block_n, self.n_leaves);
         let mut proof = Vec::new();
 
         let mut current_index = block_n;
