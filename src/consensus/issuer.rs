@@ -74,7 +74,7 @@ impl Issuer {
                         self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 2).await;
                     },
                     Some(IssuerCommand::IssueCommitReceipt(block_n, tx_n_list, reply_tx)) => {
-                        self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 1).await;
+                        self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 0).await; // commit receipts do not need auditQCs
                     },
                     Some(IssuerCommand::NewChunk(cached_blocks)) => {
                         self.handle_new_chunk(cached_blocks).await;
@@ -150,6 +150,7 @@ impl Issuer {
             chain.push(b.block.clone());
             if !b.block.qc.is_empty() {
                 if b.block.qc.len() >= self.byzantine_fast_path_threshold() {
+                    qcs += 2;
                     break; // we have enough QCs to prove the block committed or audited
                 }
                 qcs += 1;
@@ -159,20 +160,22 @@ impl Issuer {
             }
         }
 
-        if txs.is_empty() {
-            // No transactions requested, just return the chain and empty proofs
-            let _ = reply.send(Some(ReceiptBuilder {
-                chain,
-                proofs: vec![],
-            }));
+        if qcs < n_qcs {
+            warn!("Not enough QCs to prove block {} audited: {} < {}", block_n, qcs, n_qcs);
+            let _ = reply.send(None);
             return;
         }
 
-        assert!(block.block.n == block_n, "Block number mismatch: expected {}, got {}", block_n, block.block.n);
-        let proofs = txs
+        let proofs = if txs.is_empty() {
+            (0..block.block.tx_list.len())
+            .map(|tx| block.merkle_tree.generate_inclusion_proof(tx as usize))
+            .collect()
+        } else {
+            txs
             .iter()
             .map(|&tx| block.merkle_tree.generate_inclusion_proof(tx as usize))
-            .collect();
+            .collect()
+        };
 
         let _ = reply.send(Some(ReceiptBuilder { chain, proofs }));
     }

@@ -5,7 +5,7 @@ mod ed25519;
 // mod sha256;
 mod sha512;
 mod service;
-mod merkle;
+pub mod merkle;
 
 #[cfg(test)]
 mod tests;

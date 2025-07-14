@@ -68,6 +68,9 @@ harness = false
 name = "verify_bench"
 harness = false
 
+[[bench]]
+name = "merkle_proof"
+harness = false
 
 [features]
 # Perf counters

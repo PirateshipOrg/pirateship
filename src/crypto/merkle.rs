@@ -1,5 +1,6 @@
 use bytes::BytesMut;
 use prost::Message;
+use rand_chacha::rand_core::le;
 
 use crate::{
     crypto::{default_hash, hash, HashType, Sha},
@@ -125,6 +126,39 @@ impl MerkleTree {
         MerkleInclusionProof(proof)
     }
 
+    /// benchmarks show that this is actually slightly slower than calling `generate_inclusion_proof` N times... left it for future reference
+    pub fn generate_all_inclusion_proofs(&self) -> Vec<MerkleInclusionProof> {
+        let mut proofs: Vec<Vec<HashType>> = vec![vec![]; self.n_leaves];
+        
+        let h = (self.n_padded_leaves as f64).log2() as usize;
+        let mut level_start = 0;
+        let mut level_size = self.n_padded_leaves;
+        
+        for level in 0..h {
+            for i in 0..level_size {
+            let sibling_index = i ^ 1; // Flip last bit to get sibling
+            if sibling_index < level_size {
+                let sibling_hash = &self.tree[level_start + sibling_index];
+                
+                // Determine which leaf indices this node contributes to
+                let group_size = 1 << level;
+                let base_leaf_index = (i / 2) * group_size * 2;
+                
+                for offset in 0..group_size {
+                    let leaf_index = base_leaf_index + offset + (i % 2) * group_size;
+                    if leaf_index < self.n_leaves {
+                        proofs[leaf_index].push(sibling_hash.clone());
+                    }
+                }
+            }
+            }
+            level_start += level_size;
+            level_size /= 2;
+        }
+        
+        proofs.into_iter().map(|proof| MerkleInclusionProof(proof)).collect()
+    }
+
     pub fn root(&self) -> &HashType {
         &self.root
     }
@@ -135,7 +169,7 @@ impl MerkleTree {
 }
 
 #[test]
-fn test_merkle_tree_proof() {
+fn test_merkle_tree_generate_inclusion_proof() {
     let num_leaves = 1337;
     let mut data = Vec::with_capacity(num_leaves);
     let mut rng = rand::thread_rng();
@@ -149,6 +183,30 @@ fn test_merkle_tree_proof() {
 
     for (index, leaf) in data.iter().enumerate() {
         let proof = tree.generate_inclusion_proof(index);
+        assert!(
+            proof.validate(leaf, index, &tree.root()),
+            "Proof should verify for leaf at index {}",
+            index
+        );
+    }
+}
+
+
+#[test]
+fn test_merkle_tree_generate_all_inclusion_proofs() {
+    let num_leaves = 1337;
+    let mut data = Vec::with_capacity(num_leaves);
+    let mut rng = rand::thread_rng();
+
+    for _ in 0..num_leaves {
+        let leaf: Vec<u8> = (0..32).map(|_| rand::Rng::gen(&mut rng)).collect();
+        data.push(leaf);
+    }
+
+    let tree = MerkleTree::new(data.clone());
+    let proofs = tree.generate_all_inclusion_proofs();
+
+    for (index, (leaf, proof)) in data.iter().zip(proofs).enumerate() {
         assert!(
             proof.validate(leaf, index, &tree.root()),
             "Proof should verify for leaf at index {}",
