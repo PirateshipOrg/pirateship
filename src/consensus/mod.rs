@@ -34,6 +34,8 @@ use staging::{Staging, VoteWithSender};
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
 #[cfg(feature = "channel_monitoring")]
 use channel_monitor::ChannelMonitor;
+#[cfg(feature = "policy_validation")]
+use crate::consensus::app::TxWithValidationAck;
 use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
@@ -197,7 +199,12 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
 impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     pub fn new(config: Config) -> Self {
         let (batch_proposer_tx, batch_proposer_rx) = make_channel(config.rpc_config.channel_depth as usize);
-        Self::mew(config, batch_proposer_tx, batch_proposer_rx)
+        #[cfg(feature = "policy_validation")]
+        let (validator_tx, validator_rx) = make_channel(config.rpc_config.channel_depth as usize);
+        Self::mew(config, batch_proposer_tx, batch_proposer_rx, 
+            #[cfg(feature = "policy_validation")]
+            validator_rx
+        )
     }
     
     /// mew() must be called from within a Tokio context with channel passed in.
@@ -206,7 +213,10 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     ///  /\_/\
     /// ( o.o )
     ///  > ^ < 
-    pub fn mew(config: Config, batch_proposer_tx: Sender<TxWithAckChanTag>, batch_proposer_rx: Receiver<TxWithAckChanTag>) -> Self {
+    pub fn mew(config: Config, batch_proposer_tx: Sender<TxWithAckChanTag>, batch_proposer_rx: Receiver<TxWithAckChanTag>,
+        #[cfg(feature = "policy_validation")]
+        validator_rx: Receiver<TxWithValidationAck>
+    ) -> Self {
         let _chan_depth = config.rpc_config.channel_depth as usize;
         let _num_crypto_tasks = config.consensus_config.num_crypto_workers;
 
@@ -339,6 +349,9 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
 
             #[cfg(feature = "channel_monitoring")]
             channel_monitor.clone(),
+
+            #[cfg(feature = "policy_validation")]
+            validator_rx,
         );
 
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx, issuer_tx);

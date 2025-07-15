@@ -11,7 +11,7 @@ impl std::fmt::Display for NullApp {
     }
 }
 
-impl AppEngine  for NullApp {
+impl AppEngine for NullApp {
     type State = Self;
 
     fn new(_config: crate::config::AtomicConfig) -> Self {
@@ -56,6 +56,11 @@ impl AppEngine  for NullApp {
                     values: vec![],
                 }).collect(),
         }
+    }
+
+    #[cfg(feature = "policy_validation")]
+    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransaction) -> crate::consensus::app::TransactionValidationResult {
+        Ok(())
     }
 
     fn get_current_state(&self) -> Self::State {

@@ -11,6 +11,8 @@ use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTim
 #[cfg(feature = "channel_monitoring")]
 use super::channel_monitor::ChannelMonitor;
 
+pub type TransactionValidationResult = Result<(), String>;
+pub type TxWithValidationAck = (ProtoTransaction, oneshot::Sender<TransactionValidationResult>);
 
 pub enum AppCommand {
     NewRequestBatch(u64 /* block.n */, u64 /* view */, bool /* view_is_stable */, bool /* i_am_leader */, usize /* length of new batch of request */, HashType /* hash of the last block */),
@@ -27,6 +29,8 @@ pub trait AppEngine {
     fn handle_byz_commit(&mut self, blocks: Vec<CachedBlock>) -> Vec<Vec<ProtoByzResponse>>;
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
+    #[cfg(feature = "policy_validation")]
+    fn handle_validation(&mut self, tx: ProtoTransaction) -> TransactionValidationResult;
     fn get_current_state(&self) -> Self::State;
 }
 
@@ -118,6 +122,9 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     client_reply_tx: Sender<ClientReplyCommand>,
     issuer_tx: Sender<IssuerCommand>,
 
+    #[cfg(feature = "policy_validation")]
+    validation_rx: Receiver<TxWithValidationAck>,
+
     checkpoint_timer: Arc<Pin<Box<ResettableTimer>>>,
     log_timer: Arc<Pin<Box<ResettableTimer>>>,
 
@@ -142,6 +149,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         #[cfg(feature = "channel_monitoring")]
         channel_monitor: Arc<Mutex<ChannelMonitor>>,
+        #[cfg(feature = "policy_validation")]
+        validation_rx: Receiver<TxWithValidationAck>,
     ) -> Self {
         let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
         let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
@@ -172,6 +181,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             
             #[cfg(feature = "channel_monitoring")]
             channel_monitor: channel_monitor,
+            #[cfg(feature = "policy_validation")]
+            validation_rx,
         }
     }
 
@@ -194,6 +205,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     }
 
     async fn worker(&mut self) -> Result<(), ()> {
+        #[cfg(not(feature = "policy_validation"))]
         tokio::select! {
             biased;
             cmd = self.staging_rx.recv() => {
@@ -210,6 +222,38 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 let (req, reply_tx) = req.unwrap();
 
                 self.handle_unlogged_request(req, reply_tx).await;
+            },
+            _ = self.checkpoint_timer.wait() => {
+                self.checkpoint().await;
+            },
+            _ = self.log_timer.wait() => {
+                self.log_stats().await;
+            }
+        }
+        #[cfg(feature = "policy_validation")]
+        tokio::select! {
+            biased;
+            cmd = self.staging_rx.recv() => {
+                if cmd.is_none() {
+                    return Err(());
+                }
+                self.handle_staging_command(cmd.unwrap()).await;
+            },
+            req = self.unlogged_rx.recv() => {
+                if req.is_none() {
+                    return Err(());
+                }
+
+                let (req, reply_tx) = req.unwrap();
+
+                self.handle_unlogged_request(req, reply_tx).await;
+            },
+            txwva = self.validation_rx.recv() => {
+                if txwva.is_none() {
+                    return Err(());
+                }
+                let (tx, reply_tx) = txwva.unwrap();
+                reply_tx.send(self.engine.handle_validation(tx)).unwrap();
             },
             _ = self.checkpoint_timer.wait() => {
                 self.checkpoint().await;

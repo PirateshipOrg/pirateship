@@ -364,6 +364,11 @@ impl AppEngine for KVSAppEngine {
         return txn_result;
     }
 
+    #[cfg(feature = "policy_validation")]
+    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransaction) -> crate::consensus::app::TransactionValidationResult {
+        Ok(())
+    }
+
     fn get_current_state(&self) -> Self::State {
         return self.state.clone();
     }

@@ -4,6 +4,9 @@ use std::fmt::Display;
 use log::{error, trace, warn};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "policy_validation")]
+use rquickjs::{Context, Function, Object, Runtime, Value};
+
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
 use crate::proto::execution::{
@@ -16,8 +19,10 @@ use crate::proto::consensus::ProtoBlock;
 
 #[derive(std::fmt:: Debug, Clone, Serialize, Deserialize)]
 pub struct SCITTState {
-    pub ci_state: HashMap<TXID, Vec<(u64, Vec<u8>) /* versions */>>,
-    pub bci_state: HashMap<TXID, Vec<u8>>,
+    pub crash_committed_claims: HashMap<TXID, Vec<(u64, Vec<u8>) /* versions */>>,
+    pub byz_committed_claims: HashMap<TXID, Vec<u8>>,
+    pub crash_committed_policies: Vec<Vec<u8>>,
+    pub byz_committed_policies: Vec<Vec<u8>>,
 }
 
 impl Display for SCITTState {
@@ -25,8 +30,8 @@ impl Display for SCITTState {
         write!(
             f,
             "ci_state size: {}, bci_state size: {}",
-            self.ci_state.len(),
-            self.bci_state.len()
+            self.crash_committed_claims.len(),
+            self.byz_committed_claims.len()
         )
     }
 }
@@ -35,6 +40,30 @@ impl Display for SCITTState {
 pub struct TXID {
     pub block_n: u64,
     pub tx_idx: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub enum SCITTWriteType {
+    Claim,
+    Policy,
+}
+
+impl SCITTWriteType {
+    pub fn from_slice(slice: &[u8]) -> Self {
+        if slice == b"C" {
+            SCITTWriteType::Claim
+        } else if slice == b"P" {
+            SCITTWriteType::Policy
+        } else {
+            panic!("Invalid SCITTWriteType slice");
+        }
+    }
+    pub fn to_slice(&self) -> &[u8] {
+        match self {
+            SCITTWriteType::Claim => b"C",
+            SCITTWriteType::Policy => b"P",
+        }
+    }
 }
 
 impl TXID {
@@ -70,6 +99,11 @@ impl TXID {
     }
 }
 
+#[cfg(feature = "policy_validation")]
+thread_local! {
+    pub static JS_RUNTIME: Runtime = Runtime::new().unwrap();
+}
+
 pub struct SCITTAppEngine {
     config: AtomicConfig,
     pub last_ci: u64,
@@ -86,8 +120,10 @@ impl AppEngine for SCITTAppEngine {
             last_ci: 0,
             last_bci: 0,
             state: SCITTState {
-                ci_state: HashMap::new(),
-                bci_state: HashMap::new(),
+                crash_committed_claims: HashMap::new(),
+                byz_committed_claims: HashMap::new(),
+                crash_committed_policies: Vec::new(),
+                byz_committed_policies: Vec::new(),
             },
         }
     }
@@ -96,14 +132,6 @@ impl AppEngine for SCITTAppEngine {
         &mut self,
         blocks: Vec<crate::crypto::CachedBlock>,
     ) -> Vec<Vec<crate::proto::execution::ProtoTransactionResult>> {
-        // iterate through eac txn in each block
-        // see if that txn on_crash_commit is not none
-        //     iterate through all ops in order, see ops in protobuf
-        //     for every op you have a result
-        //     each txn gives a txn result. Transaction has many ops, prototransaction has many op results
-        //if op type is write --> add to ci_state, if read dont add to ci_state
-
-        //the return value is a list of lists containing transaction results for each block
         let mut block_count = 0;
         let mut txn_count = 0;
 
@@ -126,22 +154,41 @@ impl AppEngine for SCITTAppEngine {
                 for (i, op) in ops.iter().enumerate() {
                     if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
                         if op_type == ProtoTransactionOpType::Write {
-                            if op.operands.len() != 1 {
+                            if op.operands.len() != 2 {
                                 continue;
                             }
-                            let txid = TXID::new(proto_block.n, i);
-                            let val: &Vec<u8> = &op.operands[0];
-                            if self.state.ci_state.contains_key(&txid) {
-                                error!("Invalid ledger write: {} already exists", txid.to_string());
-                            } else {
-                                self.state
-                                    .ci_state
-                                    .insert(txid.clone(), vec![(proto_block.n, val.clone())]);
+
+                            match SCITTWriteType::from_slice(&op.operands[0]) {
+                                SCITTWriteType::Claim => {
+                                    let claim: &Vec<u8> = &op.operands[1];
+                                    let txid = TXID::new(proto_block.n, i);
+                                    if self.state.crash_committed_claims.contains_key(&txid) {
+                                        error!(
+                                            "Invalid ledger write: {} already exists",
+                                            txid.to_string()
+                                        );
+                                    } else {
+                                        self.state.crash_committed_claims.insert(
+                                            txid.clone(),
+                                            vec![(proto_block.n, claim.clone())],
+                                        );
+                                    }
+                                    txn_result.result.push(ProtoTransactionOpResult {
+                                        success: true,
+                                        values: vec![txid.to_string().into_bytes()],
+                                    });
+                                }
+                                SCITTWriteType::Policy => {
+                                    let policy = &op.operands[1];
+
+                                    self.state.crash_committed_policies.push(policy.clone());
+
+                                    txn_result.result.push(ProtoTransactionOpResult {
+                                        success: true,
+                                        values: vec![],
+                                    });
+                                }
                             }
-                            txn_result.result.push(ProtoTransactionOpResult {
-                                success: true,
-                                values: vec![txid.to_string().into_bytes()],
-                            });
                         } else if op_type == ProtoTransactionOpType::Read {
                             if op.operands.len() != 1 {
                                 continue;
@@ -209,7 +256,7 @@ impl AppEngine for SCITTAppEngine {
             let mut block_result: Vec<ProtoByzResponse> = Vec::new();
 
             for (tx_n, tx) in proto_block.tx_list.iter().enumerate() {
-                let mut byz_result = ProtoByzResponse {
+                let byz_result = ProtoByzResponse {
                     block_n: proto_block.n,
                     tx_n: tx_n as u64,
                     client_tag: 0,
@@ -233,7 +280,7 @@ impl AppEngine for SCITTAppEngine {
                                 tx_idx: tx_n,
                             };
                             let val = &op.operands[1];
-                            self.state.bci_state.insert(key, val.clone());
+                            self.state.byz_committed_claims.insert(key, val.clone());
                         }
                     } else {
                         warn!("Invalid operation type: {}", op.op_type);
@@ -250,16 +297,18 @@ impl AppEngine for SCITTAppEngine {
         }
 
         // Then move all Byz committed entries from ci_state to bci_state.
-        for (key, val_versions) in self.state.ci_state.iter_mut() {
+        for (key, val_versions) in self.state.crash_committed_claims.iter_mut() {
             for (pos, val) in &(*val_versions) {
                 if *pos <= self.last_bci {
-                    self.state.bci_state.insert(key.clone(), val.clone());
+                    self.state
+                        .byz_committed_claims
+                        .insert(key.clone(), val.clone());
                 }
             }
 
             val_versions.retain(|v| v.0 > self.last_bci);
         }
-        self.state.ci_state.retain(|_, v| v.len() > 0);
+        self.state.crash_committed_claims.retain(|_, v| v.len() > 0);
         trace!("block count:{}", block_count);
         trace!("transaction count{}", txn_count);
         final_result
@@ -267,11 +316,11 @@ impl AppEngine for SCITTAppEngine {
 
     fn handle_rollback(&mut self, rolled_back_blocks: u64) {
         //roll back ci_state to rolled_back_blocks (block.n)
-        for (_k, v) in self.state.ci_state.iter_mut() {
+        for (_k, v) in self.state.crash_committed_claims.iter_mut() {
             v.retain(|(pos, _)| *pos <= rolled_back_blocks);
         }
 
-        self.state.ci_state.retain(|_, v| v.len() > 0);
+        self.state.crash_committed_claims.retain(|_, v| v.len() > 0);
     }
 
     fn handle_unlogged_request(
@@ -330,6 +379,19 @@ impl AppEngine for SCITTAppEngine {
         return txn_result;
     }
 
+    #[cfg(feature = "policy_validation")]
+    fn handle_validation(
+        &mut self,
+        tx: crate::proto::execution::ProtoTransaction,
+    ) -> crate::consensus::app::TransactionValidationResult {
+        let policy = self.state.crash_committed_policies.last();
+        let Some(policy) = policy else {
+            return Err("No policy found".to_string());
+        };
+        let issuer = ""; // FIXME
+        JS_RUNTIME.with(|runtime| Self::validate_policy(runtime, policy, issuer))
+    }
+
     fn get_current_state(&self) -> Self::State {
         return self.state.clone();
     }
@@ -338,7 +400,7 @@ impl AppEngine for SCITTAppEngine {
 impl SCITTAppEngine {
     fn read(&self, key: &TXID) -> Option<Vec<u8>> {
         //same search logic from old kvs.rs
-        let ci_res = self.state.ci_state.get(key);
+        let ci_res = self.state.crash_committed_claims.get(key);
         if let Some(v) = ci_res {
             // Invariant: v is sorted by ci
             // Invariant: v.len() > 0
@@ -348,7 +410,7 @@ impl SCITTAppEngine {
             //check bci_state
         }
 
-        let bci_res = self.state.bci_state.get(key);
+        let bci_res = self.state.byz_committed_claims.get(key);
         if let Some(v) = bci_res {
             return Some(v.clone());
         } else {
@@ -359,7 +421,7 @@ impl SCITTAppEngine {
     fn scan(&self, from: &Option<TXID>, to: &Option<TXID>) -> Option<Vec<Vec<u8>>> {
         if let (Some(from), Some(to)) = (from, to) {
             let mut scan_result = Vec::new();
-            for (key, versions) in self.state.ci_state.iter() {
+            for (key, versions) in self.state.crash_committed_claims.iter() {
                 if key.block_n >= from.block_n && key.block_n <= to.block_n {
                     for (pos, _) in versions {
                         if *pos >= from.block_n && *pos <= to.block_n {
@@ -368,7 +430,7 @@ impl SCITTAppEngine {
                     }
                 }
             }
-            for (key, _) in self.state.bci_state.iter() {
+            for (key, _) in self.state.byz_committed_claims.iter() {
                 if key.block_n >= from.block_n && key.block_n <= to.block_n {
                     scan_result.push(key.to_vec());
                 }
@@ -377,6 +439,36 @@ impl SCITTAppEngine {
         } else {
             None
         }
+    }
+
+    #[cfg(feature = "policy_validation")]
+    fn validate_policy(runtime: &Runtime, policy: &[u8], issuer: &str) -> Result<(), String> {
+        let ctx = Context::full(runtime).unwrap();
+        ctx.with(|ctx| {
+            match ctx.eval::<(), _>(policy) {
+                Ok(_) => {}
+                Err(e) => return Err(format!("Failed to load script: {}", e)),
+            }
+            let arg = Object::new(ctx.clone()).unwrap();
+            arg.set("issuer", issuer).unwrap();
+            let globals = ctx.globals();
+            let apply_fn: Function = globals.get("apply").unwrap();
+            let result: Result<Value, _> = apply_fn.call((arg,));
+            match result {
+                Ok(value) => match value.type_of() {
+                    rquickjs::Type::Bool => {
+                        if value.as_bool().unwrap() {
+                            Ok(())
+                        } else {
+                            Err("Policy validation failed".to_string())
+                        }
+                    }
+                    rquickjs::Type::String => Err(value.as_string().unwrap().to_string().unwrap()),
+                    _ => Err("Unexpected return type".to_string()),
+                },
+                Err(e) => Err(format!("Failed to call function 'apply': {}", e)),
+            }
+        })
     }
 }
 
