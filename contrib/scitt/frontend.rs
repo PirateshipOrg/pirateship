@@ -5,7 +5,7 @@ use log::warn;
 use pft::config::Config;
 use pft::consensus::app::TxWithValidationAck;
 use pft::consensus::batch_proposal::TxWithAckChanTag;
-use pft::consensus::engines::scitt::{TXID,SCITTWriteType};
+use pft::consensus::engines::scitt::{SCITTWriteType, TXID};
 use pft::proto::client::proto_transaction_receipt::Receipt;
 use pft::proto::client::{self, ProtoClientReply};
 use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
@@ -16,7 +16,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
+use scitt_cose::{COSEHeaders, validate_scitt_cose_signed_statement};
 
 #[derive(Clone, Debug)]
 struct SCITTResponse {
@@ -49,12 +50,26 @@ async fn register_signed_statement(
     cose_signed_statement: web::Bytes,
     state: web::Data<AppState>,
 ) -> impl Responder {
-    // Should we check the statement/policy here? checking the statement is easy enough, the policy involves reading from the ledger
-
     let transaction_op = ProtoTransactionOp {
         op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
-        operands: vec![SCITTWriteType::Claim.to_slice().to_vec(), cose_signed_statement.to_vec()],
+        operands: vec![
+            SCITTWriteType::Claim.to_slice().to_vec(),
+            cose_signed_statement.to_vec(),
+        ],
     };
+
+    let (tx, rx) = oneshot::channel();
+    state
+        .validator_tx
+        .send((transaction_op.clone(), tx))
+        .await
+        .expect("Failed to send validation request");
+    match rx.await.expect("Failed to receive validation response") {
+        Ok(_) => (),
+        Err(err) => {
+            return HttpResponse::BadRequest().body(format!("Claim validation failed: {}", err))
+        }
+    }
 
     let result = match send(vec![transaction_op], &state, true).await {
         Ok(response) => response,

@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "policy_validation")]
 use rquickjs::{Context, Function, Object, Runtime, Value};
 
+#[cfg(feature = "policy_validation")]
+use scitt_cose::{validate_scitt_cose_signed_statement, COSEHeaders, ProtectedHeader, UnprotectedHeader};
+
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
 use crate::proto::execution::{
@@ -382,14 +385,34 @@ impl AppEngine for SCITTAppEngine {
     #[cfg(feature = "policy_validation")]
     fn handle_validation(
         &mut self,
-        tx: crate::proto::execution::ProtoTransaction,
+        tx_op: crate::proto::execution::ProtoTransactionOp,
     ) -> crate::consensus::app::TransactionValidationResult {
+        if tx_op.operands.len() != 2 {
+            error!("Invalid operation operands length: {}", tx_op.operands.len());
+            return Err("Invalid operation operands length".to_string());
+        }
+
+        let op_type = SCITTWriteType::from_slice(&tx_op.operands[0]);
+        let argument = &tx_op.operands[1];
+
+        if op_type == SCITTWriteType::Policy {
+            // as of now, there is no validation for policies
+            return Ok(());
+        }
+
+        let headers: COSEHeaders = match validate_scitt_cose_signed_statement(argument) {
+            Ok(headers) => headers,
+            Err(err) => {
+                return Err(err);
+            }
+        };
+
         let policy = self.state.crash_committed_policies.last();
         let Some(policy) = policy else {
-            return Err("No policy found".to_string());
+            return Err("No currently active policy found".to_string());
         };
-        let issuer = ""; // FIXME
-        JS_RUNTIME.with(|runtime| Self::validate_policy(runtime, policy, issuer))
+
+        JS_RUNTIME.with(|runtime| Self::validate_policy(runtime, policy, &headers.phdr.cwt.unwrap().iss.unwrap()))
     }
 
     fn get_current_state(&self) -> Self::State {

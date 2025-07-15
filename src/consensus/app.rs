@@ -5,14 +5,14 @@ use log::{error, info, trace, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
 use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
 #[cfg(feature = "channel_monitoring")]
 use super::channel_monitor::ChannelMonitor;
 
 pub type TransactionValidationResult = Result<(), String>;
-pub type TxWithValidationAck = (ProtoTransaction, oneshot::Sender<TransactionValidationResult>);
+pub type TxWithValidationAck = (ProtoTransactionOp, oneshot::Sender<TransactionValidationResult>);
 
 pub enum AppCommand {
     NewRequestBatch(u64 /* block.n */, u64 /* view */, bool /* view_is_stable */, bool /* i_am_leader */, usize /* length of new batch of request */, HashType /* hash of the last block */),
@@ -30,7 +30,7 @@ pub trait AppEngine {
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: ProtoTransaction) -> TransactionValidationResult;
+    fn handle_validation(&mut self, tx: ProtoTransactionOp) -> TransactionValidationResult;
     fn get_current_state(&self) -> Self::State;
 }
 

@@ -2,3 +2,7 @@
 	path = autobahn
 	url = https://github.com/grapheo12/autobahn-artifact.git
 	branch = autobahn-pirateship-baseline-2
+[submodule "extras/didx509-sys/didx509cpp"]
+	path = extras/didx509-sys/didx509cpp
+	url = https://github.com/microsoft/didx509cpp
+	branch = main

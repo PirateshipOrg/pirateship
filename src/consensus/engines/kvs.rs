@@ -365,7 +365,7 @@ impl AppEngine for KVSAppEngine {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransaction) -> crate::consensus::app::TransactionValidationResult {
+    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
         Ok(())
     }
 
