@@ -3353,6 +3353,7 @@ dependencies = [
  "actix-web",
  "async-channel",
  "async-recursion",
+ "base64",
  "bincode",
  "bitcode",
  "byteorder",

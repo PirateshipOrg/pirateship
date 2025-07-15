@@ -5,10 +5,15 @@ use log::{error, trace, warn};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "policy_validation")]
-use rquickjs::{Context, Function, Object, Runtime, Value};
+use rquickjs::{
+    Array, CatchResultExt, CaughtError, Context, Ctx, Function, Object, Runtime, Type, Value,
+};
 
 #[cfg(feature = "policy_validation")]
-use scitt_cose::{validate_scitt_cose_signed_statement, COSEHeaders, ProtectedHeader, UnprotectedHeader};
+use scitt_cose::{validate_scitt_cose_signed_statement, CBORType, COSEHeaders, ProtectedHeader};
+
+#[cfg(feature = "policy_validation")]
+use base64::engine::{general_purpose, Engine};
 
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
@@ -388,7 +393,10 @@ impl AppEngine for SCITTAppEngine {
         tx_op: crate::proto::execution::ProtoTransactionOp,
     ) -> crate::consensus::app::TransactionValidationResult {
         if tx_op.operands.len() != 2 {
-            error!("Invalid operation operands length: {}", tx_op.operands.len());
+            error!(
+                "Invalid operation operands length: {}",
+                tx_op.operands.len()
+            );
             return Err("Invalid operation operands length".to_string());
         }
 
@@ -396,8 +404,7 @@ impl AppEngine for SCITTAppEngine {
         let argument = &tx_op.operands[1];
 
         if op_type == SCITTWriteType::Policy {
-            // as of now, there is no validation for policies
-            return Ok(());
+            return JS_RUNTIME.with(|runtime| validate_policy(runtime, argument));
         }
 
         let headers: COSEHeaders = match validate_scitt_cose_signed_statement(argument) {
@@ -412,7 +419,7 @@ impl AppEngine for SCITTAppEngine {
             return Err("No currently active policy found".to_string());
         };
 
-        JS_RUNTIME.with(|runtime| Self::validate_policy(runtime, policy, &headers.phdr.cwt.unwrap().iss.unwrap()))
+        JS_RUNTIME.with(|runtime| apply_policy_to_claim(runtime, policy, headers.phdr))
     }
 
     fn get_current_state(&self) -> Self::State {
@@ -463,36 +470,153 @@ impl SCITTAppEngine {
             None
         }
     }
+}
 
-    #[cfg(feature = "policy_validation")]
-    fn validate_policy(runtime: &Runtime, policy: &[u8], issuer: &str) -> Result<(), String> {
-        let ctx = Context::full(runtime).unwrap();
-        ctx.with(|ctx| {
-            match ctx.eval::<(), _>(policy) {
-                Ok(_) => {}
-                Err(e) => return Err(format!("Failed to load script: {}", e)),
+#[cfg(feature = "policy_validation")]
+fn apply_policy_to_claim(
+    runtime: &Runtime,
+    policy: &[u8],
+    phdr: ProtectedHeader,
+) -> Result<(), String> {
+    let ctx = Context::full(runtime).unwrap();
+    ctx.with::<_, Result<(), String>>(|ctx| {
+        if let Err(err) = ctx.eval::<(), _>(policy).catch(&ctx) {
+            match err {
+                CaughtError::Error(error) => {
+                    return Err(format!("Runtime error loading policy: {}", error));
+                }
+                CaughtError::Exception(exception) => {
+                    return Err(format!("Exception loading policy: {}", exception));
+                }
+                CaughtError::Value(value) => {
+                    return Err(format!("Value error loading policy: {:?}", value));
+                }
             }
-            let arg = Object::new(ctx.clone()).unwrap();
-            arg.set("issuer", issuer).unwrap();
-            let globals = ctx.globals();
-            let apply_fn: Function = globals.get("apply").unwrap();
-            let result: Result<Value, _> = apply_fn.call((arg,));
-            match result {
-                Ok(value) => match value.type_of() {
-                    rquickjs::Type::Bool => {
-                        if value.as_bool().unwrap() {
-                            Ok(())
-                        } else {
-                            Err("Policy validation failed".to_string())
-                        }
+        }
+
+        let phdr_arg = match protected_header_to_js_val(&ctx, &phdr) {
+            Ok(arg) => arg,
+            Err(_) => return Err("Failed to convert ProtectedHeader to JS value".to_string()),
+        };
+
+        let globals = ctx.globals();
+        let apply_fn: Function = globals.get("apply").unwrap();
+        let result: Result<Value, _> = apply_fn.call((phdr_arg,));
+        match result {
+            Ok(value) => match value.type_of() {
+                rquickjs::Type::Bool => {
+                    if value.as_bool().unwrap() {
+                        Ok(())
+                    } else {
+                        Err("Policy validation failed".to_string())
                     }
-                    rquickjs::Type::String => Err(value.as_string().unwrap().to_string().unwrap()),
-                    _ => Err("Unexpected return type".to_string()),
-                },
-                Err(e) => Err(format!("Failed to call function 'apply': {}", e)),
-            }
-        })
+                }
+                rquickjs::Type::String => Err(value.as_string().unwrap().to_string().unwrap()),
+                _ => Err("Unexpected return type".to_string()),
+            },
+            Err(e) => Err(format!("Failed to call function 'apply': {}", e)),
+        }
+    })
+}
+
+#[cfg(feature = "policy_validation")]
+fn protected_header_to_js_val<'a>(
+    ctx: &Ctx<'a>,
+    phdr: &ProtectedHeader,
+) -> Result<Object<'a>, rquickjs::Error> {
+    let obj = Object::new(ctx.clone())?;
+    if let Some(alg) = phdr.alg {
+        obj.set("alg", alg)?;
     }
+
+    if let Some(crit) = &phdr.crit {
+        let crit_array = Array::new(ctx.clone())?;
+        for (i, e) in crit.iter().enumerate() {
+            match e {
+                CBORType::Int(val) => {
+                    crit_array.set(i, *val as i64)?;
+                }
+                CBORType::Text(val) => {
+                    crit_array.set(i, val.as_str())?;
+                }
+            }
+        }
+        obj.set("crit", crit_array)?;
+    }
+
+    if let Some(kid) = &phdr.kid {
+        obj.set("kid", kid.as_str())?;
+    }
+
+    if let Some(feed) = &phdr.feed {
+        obj.set("feed", feed.as_str())?;
+    }
+
+    if let Some(cty) = &phdr.cty {
+        obj.set("cty", cty)?;
+    }
+
+    if let Some(x5chain) = &phdr.x5chain {
+        let x5_array = Array::new(ctx.clone())?;
+        for (i, der_cert) in x5chain.iter().enumerate() {
+            let pem = format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                general_purpose::STANDARD.encode(der_cert)
+            );
+            x5_array.set(i, pem)?;
+        }
+        obj.set("x5chain", x5_array)?;
+    }
+
+    if let Some(cwt) = &phdr.cwt {
+        let cwt_obj = Object::new(ctx.clone())?;
+        if let Some(iss) = &cwt.iss {
+            cwt_obj.set("iss", iss.as_str())?;
+        }
+        if let Some(sub) = &cwt.sub {
+            cwt_obj.set("sub", sub.as_str())?;
+        }
+        if let Some(iat) = cwt.iat {
+            cwt_obj.set("iat", iat as i64)?;
+        }
+        if let Some(svn) = cwt.svn {
+            cwt_obj.set("svn", svn as i64)?;
+        }
+
+        obj.set("cwt", cwt_obj)?;
+    }
+
+    Ok(obj)
+}
+
+#[cfg(feature = "policy_validation")]
+pub fn validate_policy(runtime: &Runtime, policy: &[u8]) -> Result<(), String> {
+    let ctx = Context::full(runtime).unwrap();
+    ctx.with::<_, Result<(), String>>(|ctx| {
+        if let Err(err) = ctx.eval::<(), _>(policy).catch(&ctx) {
+            match err {
+                CaughtError::Error(error) => {
+                    return Err(format!("Runtime error loading policy: {}", error));
+                }
+                CaughtError::Exception(exception) => {
+                    return Err(format!("Exception loading policy: {}", exception));
+                }
+                CaughtError::Value(value) => {
+                    return Err(format!("Value error loading policy: {:?}", value));
+                }
+            }
+        }
+        let globals = ctx.globals();
+        let apply_fn: Function = match globals.get("apply") {
+            Ok(func) => func,
+            Err(_) => return Err("No 'apply' function found in policy".to_string()),
+        };
+        // IDKW but sometimes it tends to return a constructor (not a function) but it works anyway
+        if apply_fn.type_of() != Type::Function && apply_fn.type_of() != Type::Constructor {
+            return Err("'apply' is not a function".to_string());
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]

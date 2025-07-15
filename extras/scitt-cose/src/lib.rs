@@ -7,12 +7,28 @@ use p256::EncodedPoint;
 use serde_json;
 use x509_parser::prelude::*;
 
-const LABEL_X5CHAIN: i64 = 33;
+const CWT_LABEL_ISS: i64 = 1;
+const CWT_LABEL_SUB: i64 = 2;
+const CWT_LABEL_IAT: i64 = 6;
+const CWT_LABEL_SVN: i64 = 7;
+#[allow(dead_code)]
+const LABEL_ALG: i64 = 1;
+const LABEL_CRIT: i64 = 2;
+#[allow(dead_code)]
+const LABEL_CTY: i64 = 3;
+const LABEL_KID: i64 = 4;
+#[allow(dead_code)]
+const LABEL_IV: i64 = 5;
+#[allow(dead_code)]
+const LABEL_PARTIAL_IV: i64 = 6;
+#[allow(dead_code)]
+const LABEL_COUNTER_SIG: i64 = 7;
 const LABEL_CWT: i64 = 15;
-const LABEL_ISS: i128 = 1;
-const LABEL_SUB: i128 = 2;
-const LABEL_IAT: i128 = 6;
-const LABEL_SVN: i128 = 7;
+const LABEL_X5CHAIN: i64 = 33;
+#[allow(dead_code)]
+const LABEL_ISSUER: i64 = 391;
+const LABEL_FEED: i64 = 392;
+const LABEL_SCITT_RECEIPTS: i64 = 394;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -23,12 +39,21 @@ pub struct CWT {
     pub svn: Option<i128>,
 }
 
+pub enum CBORType {
+    Text(String),
+    Int(i128),
+}
+
 #[allow(dead_code)]
 pub struct ProtectedHeader {
-    pub alg: Option<Algorithm>,
-    pub content_type: Option<String>,
+    pub alg: Option<i64>,
+    pub cty: Option<String>,
     pub cwt: Option<CWT>,
     pub x5chain: Option<Vec<Vec<u8>>>,
+    pub feed: Option<String>,
+    pub kid: Option<String>,
+    pub scitt_receipts: Option<Vec<String>>,
+    pub crit: Option<Vec<CBORType>>,
 }
 
 #[allow(dead_code)]
@@ -51,26 +76,26 @@ fn decode_cwt(cwt_map: &Vec<(Value, Value)>) -> Option<CWT> {
     for (label, value) in cwt_map.iter() {
         match label {
             Value::Integer(i) => {
-                match i128::from(*i) {
-                    LABEL_ISS => {
+                match i128::from(*i) as i64 {
+                    CWT_LABEL_ISS => {
                         iss = match value {
                             Value::Text(s) => Some(s.to_string()),
                             _ => None,
                         };
                     }
-                    LABEL_SUB => {
+                    CWT_LABEL_SUB => {
                         sub = match value {
                             Value::Text(s) => Some(s.to_string()),
                             _ => None,
                         };
                     }
-                    LABEL_IAT => {
+                    CWT_LABEL_IAT => {
                         iat = match value {
                             Value::Integer(i) => Some(i128::from(*i)),
                             _ => None,
                         };
                     }
-                    LABEL_SVN => {
+                    CWT_LABEL_SVN => {
                         svn = match value {
                             Value::Integer(i) => Some(i128::from(*i)),
                             _ => None,
@@ -91,6 +116,10 @@ fn decode_cwt(cwt_map: &Vec<(Value, Value)>) -> Option<CWT> {
 fn decode_cose_headers(cose: &CoseSign1) -> COSEHeaders {
     let mut cwt = None;
     let mut x5chain = None;
+    let mut feed = None;
+    let mut kid = None;
+    let mut scitt_receipts = None;
+    let mut crit = None;
     for (label, value) in cose.protected.header.rest.iter() {
         match label {
             Label::Int(LABEL_CWT) => {
@@ -117,16 +146,58 @@ fn decode_cose_headers(cose: &CoseSign1) -> COSEHeaders {
                     _ => None,
                 };
             }
+            Label::Int(LABEL_FEED) => {
+                feed = match value {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_KID) => {
+                kid = match value {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_SCITT_RECEIPTS) => {
+                scitt_receipts = match value {
+                    Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| match v {
+                                Value::Text(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_CRIT) => {
+                crit = match value {
+                    Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| match v {
+                                Value::Integer(i) => Some(CBORType::Int(i128::from(*i))),
+                                Value::Text(s) => Some(CBORType::Text(s.to_string())),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+            }
             _ => {
-                // Note: Removed print statement for library usage
+                println!("Unknown label in protected header: {:?}", label);
                 continue;
             }
         }
     }
 
     let phdr = ProtectedHeader {
-        alg: cose.protected.header.alg.clone(),
-        content_type: match cose.protected.header.content_type.clone() {
+        alg: match cose.protected.header.alg {
+            Some(Algorithm::Assigned(alg)) => Some(alg as i64),
+            _ => None,
+        },
+        cty: match cose.protected.header.content_type.clone() {
             Some(s) => match s {
                 ContentType::Text(t) => Some(t.to_string()),
                 ContentType::Assigned(a) => match a {
@@ -138,6 +209,10 @@ fn decode_cose_headers(cose: &CoseSign1) -> COSEHeaders {
         },
         cwt: cwt,
         x5chain: x5chain,
+        feed: feed,
+        kid: kid,
+        scitt_receipts: scitt_receipts,
+        crit: crit,
     };
 
     let uhdr = UnprotectedHeader { x5chain: None };
@@ -333,7 +408,9 @@ fn verify_statement(signed_statement: &[u8]) -> Result<COSEHeaders, String> {
     Ok(headers)
 }
 
-pub fn validate_scitt_cose_signed_statement(tagged_cose_bytes: &[u8]) -> Result<COSEHeaders, String> {
+pub fn validate_scitt_cose_signed_statement(
+    tagged_cose_bytes: &[u8],
+) -> Result<COSEHeaders, String> {
     let mut dec = Decoder::new(tagged_cose_bytes);
 
     // SCITT uses tagged statements, as such we expect tag 18 (COSE_Sign1)

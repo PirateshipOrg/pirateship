@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use scitt_cose::{COSEHeaders, validate_scitt_cose_signed_statement};
 
 #[derive(Clone, Debug)]
 struct SCITTResponse {
@@ -207,6 +206,8 @@ async fn get_entries_tx_ids(
     }
 }
 
+/// Retrieve Operation with Status
+/// Not part of the spec, provided for compatibility with existing SCITT-CCF
 #[get("/operations/{txid}")]
 async fn get_operation_with_status(
     txid: web::Path<String>,
@@ -231,6 +232,44 @@ async fn get_operation_with_status(
                 .body(cbor_response)
         })
         .unwrap_or_else(|| HttpResponse::NotFound().body("Operation not found"))
+}
+
+/// Policy Registration
+/// The endpoint itself if not part of the spec, this is a simplified solution in comparison with the CCF governance model
+#[post("/policy")]
+async fn register_policy(
+    policy: web::Bytes,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    let transaction_op = ProtoTransactionOp {
+        op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
+        operands: vec![
+            SCITTWriteType::Policy.to_slice().to_vec(),
+            policy.to_vec(),
+        ],
+    };
+
+    let (tx, rx) = oneshot::channel();
+    state
+        .validator_tx
+        .send((transaction_op.clone(), tx))
+        .await
+        .expect("Failed to send validation request");
+    match rx.await.expect("Failed to receive validation response") {
+        Ok(_) => (),
+        Err(err) => {
+            return HttpResponse::BadRequest().body(format!("policy validation failed: {}", err))
+        }
+    }
+
+    let _result = match send(vec![transaction_op], &state, true).await {
+        Ok(response) => response,
+        Err(err) => return err,
+    };
+
+    HttpResponse::Ok()
+        .content_type("application/text")
+        .body("Policy registered successfully.")
 }
 
 async fn send_read(
@@ -432,6 +471,7 @@ pub async fn run_actix_server(
             .service(get_entry_receipt)
             .service(get_entry_statement)
             .service(get_operation_with_status)
+            .service(register_policy)
     })
     .workers(actix_threads)
     .max_connection_rate(batch_size) // Otherwise the server doesn't load consensus properly.
