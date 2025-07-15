@@ -48,11 +48,13 @@ async fn run_main(
     config: Config,
     batch_proposer_tx: Sender<TxWithAckChanTag>,
     batch_proposer_rx: Receiver<TxWithAckChanTag>,
+    validator_rx: Receiver<consensus::app::TxWithValidationAck>,
 ) -> io::Result<()> {
     let mut node = consensus::ConsensusNode::<SCITTAppEngine>::mew(
         config.clone(),
         batch_proposer_tx,
         batch_proposer_rx,
+        validator_rx,
     );
 
     let mut handles = node.run().await;
@@ -105,6 +107,9 @@ fn main() {
     let (batch_proposer_tx, batch_proposer_rx) =
         make_channel(cfg.rpc_config.channel_depth as usize);
 
+    let (validator_tx, validator_rx) =
+        make_channel(cfg.rpc_config.channel_depth as usize);
+
     let start_idx = start_idx * consensus_threads;
 
     let i = Box::pin(AtomicUsize::new(0));
@@ -134,6 +139,7 @@ fn main() {
         cfg.clone(),
         batch_proposer_tx.clone(),
         batch_proposer_rx,
+        validator_rx
     ));
 
     let frontend_runtime = runtime::Builder::new_multi_thread()
@@ -144,6 +150,7 @@ fn main() {
     match frontend_runtime.block_on(frontend::run_actix_server(
         cfg,
         batch_proposer_tx,
+        validator_tx,
         actix_threads,
     )) {
         Ok(_) => println!("Frontend server ran successfully."),

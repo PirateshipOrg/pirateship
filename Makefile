@@ -8,7 +8,10 @@ pirateship_logger:
 
 .PHONY: contrib
 contrib:
-	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/Cargo.toml
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/kms/Cargo.toml
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/smallbank/Cargo.toml
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/svr3/Cargo.toml
 
 .PHONY: pirateship_kvs
 pirateship_kvs:
@@ -78,7 +81,7 @@ chained_pbft_logger:
 
 .PHONY: pirateship_scitt
 pirateship_scitt:
-	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/Cargo.toml --bin scitt
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml
 
 .PHONY: bench
 bench:

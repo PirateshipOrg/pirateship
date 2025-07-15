@@ -3,8 +3,9 @@ use crate::cbor_utils::operation_props_to_cbor;
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use log::warn;
 use pft::config::Config;
+use pft::consensus::app::TxWithValidationAck;
 use pft::consensus::batch_proposal::TxWithAckChanTag;
-use pft::consensus::engines::scitt::TXID;
+use pft::consensus::engines::scitt::{TXID,SCITTWriteType};
 use pft::proto::client::proto_transaction_receipt::Receipt;
 use pft::proto::client::{self, ProtoClientReply};
 use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
@@ -31,6 +32,8 @@ struct AppState {
     curr_client_tag: AtomicU64,
     /// Request cache to store responses for TXID lookups.
     request_cache: Arc<Mutex<HashMap<TXID, SCITTResponse>>>,
+    /// Global channel to validate claims before submission
+    validator_tx: Sender<TxWithValidationAck>,
 }
 
 #[derive(Deserialize)]
@@ -50,7 +53,7 @@ async fn register_signed_statement(
 
     let transaction_op = ProtoTransactionOp {
         op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
-        operands: vec![cose_signed_statement.to_vec()],
+        operands: vec![SCITTWriteType::Claim.to_slice().to_vec(), cose_signed_statement.to_vec()],
     };
 
     let result = match send(vec![transaction_op], &state, true).await {
@@ -387,6 +390,7 @@ async fn base_send(
 pub async fn run_actix_server(
     config: Config,
     batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>,
+    validator_tx: pft::utils::channel::AsyncSenderWrapper<TxWithValidationAck>,
     actix_threads: usize,
 ) -> std::io::Result<()> {
     let addr = config.net_config.addr.clone();
@@ -403,6 +407,7 @@ pub async fn run_actix_server(
             batch_proposer_tx: batch_proposer_tx.clone(),
             curr_client_tag: AtomicU64::new(0),
             request_cache: Arc::new(Mutex::new(HashMap::new())),
+            validator_tx: validator_tx.clone(),
         };
 
         App::new()

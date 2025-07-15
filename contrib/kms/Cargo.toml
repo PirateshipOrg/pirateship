@@ -1,11 +1,10 @@
 [package]
-name = "contrib"
+name = "kms"
 version = "0.1.0"
 edition = "2021"
 
-
 [dependencies]
-pft = { path = "../" }
+pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "fast_path", "platforms"] }
 actix-web = "4"
 reqwest = { version = "0.12", features = ["json"] }
 ed25519-dalek = {version = "2.1.1", features = ["alloc", "fast", "std", "zeroize", "pem", "pkcs8", "batch"]}
@@ -31,16 +30,4 @@ async-recursion = "1.1.1"
 
 [[bin]]
 name = "kms"
-path = "kms/main.rs"
-
-[[bin]]
-name = "svr3"
-path = "svr3/main.rs"
-
-[[bin]]
-name = "smallbank"
-path = "smallbank/main.rs"
-
-[[bin]]
-name = "scitt"
-path = "scitt/main.rs"
+path = "main.rs"

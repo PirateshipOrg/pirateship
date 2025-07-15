@@ -413,7 +413,15 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
     let mut result: Vec<Vec<u8>> = Vec::new();
     let block_n = 
     match decoded_payload.reply.unwrap() {
-        pft::proto::client::proto_client_reply::Reply::Receipt(receipt) => {
+        pft::proto::client::proto_client_reply::Reply::Receipt(receipt_wrapper) => {
+            let receipt = if let Some(pft::proto::client::proto_transaction_receipt::Receipt::CommitReceipt(receipt)) = receipt_wrapper.receipt {
+                receipt
+            } else {
+                return Err(HttpResponse::NotFound().json(serde_json::json!({
+                    "message": "error, no Receipt found",
+                    "result": result,
+                })));
+            };
             if let Some(tx_result) = receipt.results {
                 if tx_result.result.is_empty() {
                     return Ok(result);

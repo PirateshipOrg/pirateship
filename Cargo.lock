@@ -957,35 +957,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
-name = "contrib"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "async-recursion",
- "chrono",
- "core_affinity",
- "ed25519-dalek",
- "futures",
- "hex",
- "iso8601",
- "log",
- "log4rs",
- "pft",
- "prost",
- "prost-types",
- "rand 0.8.5",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_cbor",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "cookie"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2586,6 +2557,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "kms"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-recursion",
+ "chrono",
+ "core_affinity",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "iso8601",
+ "log",
+ "log4rs",
+ "pft",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "language-tags"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3193,6 +3193,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "reqwest",
  "rocksdb",
+ "rquickjs",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -3771,6 +3772,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "rquickjs"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c5227859c4dfc83f428e58f9569bf439e628c8d139020e7faff437e6f5abaa0"
+dependencies = [
+ "rquickjs-core",
+]
+
+[[package]]
+name = "rquickjs-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e82e0ca83028ad5b533b53b96c395bbaab905a5774de4aaf1004eeacafa3d85d"
+dependencies = [
+ "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fed0097b0b4fbb2a87f6dd3b995a7c64ca56de30007eb7e867dfdfc78324ba5"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.37.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3957,6 +3985,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f29ebaa345f945cec9fbbc532eb307f0fdad8161f281b6369539c8d84876b3d"
 dependencies = [
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "scitt"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-recursion",
+ "chrono",
+ "core_affinity",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "iso8601",
+ "log",
+ "log4rs",
+ "pft",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -4181,6 +4238,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "smallbank"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-recursion",
+ "chrono",
+ "core_affinity",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "iso8601",
+ "log",
+ "log4rs",
+ "pft",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4293,6 +4379,35 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svr3"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "async-recursion",
+ "chrono",
+ "core_affinity",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "iso8601",
+ "log",
+ "log4rs",
+ "pft",
+ "prost",
+ "prost-types",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "syn"
