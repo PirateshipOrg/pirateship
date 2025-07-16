@@ -19,6 +19,8 @@ pub enum AppCommand {
     CrashCommit(Vec<CachedBlock> /* all blocks from old_ci + 1 to new_ci */),
     ByzCommit(Vec<CachedBlock> /* all blocks from old_bci + 1 to new_bci */),
     Rollback(u64 /* new last block */),
+    #[cfg(feature = "policy_validation")]
+    Validate(CachedBlock, oneshot::Sender<TransactionValidationResult>),
 }
 
 pub trait AppEngine {
@@ -30,7 +32,7 @@ pub trait AppEngine {
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: ProtoTransactionOp) -> TransactionValidationResult;
+    fn handle_validation(&mut self, tx: &ProtoTransactionOp) -> TransactionValidationResult;
     fn get_current_state(&self) -> Self::State;
 }
 
@@ -254,7 +256,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     return Err(());
                 }
                 let (tx, reply_tx) = txwva.unwrap();
-                reply_tx.send(self.engine.handle_validation(tx)).unwrap();
+                reply_tx.send(self.engine.handle_validation(&tx)).unwrap();
             },
             _ = self.checkpoint_timer.wait() => {
                 self.checkpoint().await;
@@ -430,6 +432,22 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 self.stats.last_n = new_last_block;
                 let _ = self.issuer_tx.send(IssuerCommand::Rollback(new_last_block)).await;
                 self.engine.handle_rollback(new_last_block);
+            }
+            #[cfg(feature = "policy_validation")]
+            AppCommand::Validate(block, reply_tx) => {
+                for tx in &block.block.tx_list {
+                    let Some(phase) = &tx.on_crash_commit else {
+                        continue;
+                    };
+                    for op in &phase.ops {
+                        let result = self.engine.handle_validation(op);
+                        if result.is_err() {
+                            reply_tx.send(result).unwrap();
+                            return;
+                        }
+                    }
+                }
+                reply_tx.send(Ok(())).unwrap();
             }
         }
     }

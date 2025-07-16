@@ -226,9 +226,6 @@ impl AppEngine for SCITTAppEngine {
                                     values: scan_result,
                                 });
                             }
-                        } else {
-                            warn!("Invalid operation type: {}", op.op_type);
-                            continue;
                         }
                     }
                 }
@@ -275,6 +272,7 @@ impl AppEngine for SCITTAppEngine {
                 };
 
                 for op in ops.iter() {
+                    error!("Not expected: {} {}", op.op_type, block.block.n);
                     if op.operands.len() != 2 {
                         continue;
                     }
@@ -382,7 +380,7 @@ impl AppEngine for SCITTAppEngine {
     #[cfg(feature = "policy_validation")]
     fn handle_validation(
         &mut self,
-        tx_op: crate::proto::execution::ProtoTransactionOp,
+        tx_op: &crate::proto::execution::ProtoTransactionOp,
     ) -> crate::consensus::app::TransactionValidationResult {
         if tx_op.operands.len() != 2 {
             error!(

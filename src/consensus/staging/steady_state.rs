@@ -673,6 +673,24 @@ impl Staging {
                     .await;
             }
         }
+        #[cfg(feature = "policy_validation")] {
+            // When using validation, we need to guarantee that we check using the most up-to-date policy
+            // if we only do `do_crash_commit` after validation, then the policy write and claim check will race
+            // and that can lead to failing validations and consequently to unnecessary view changes.
+            // This might be suboptimal because we end up crash committing one block at a time instead of processing
+            // chunks of the chain, and because of that we only enable this for policy validation.
+            self.do_crash_commit(self.ci, ae_stats.ci).await;
+            let (tx, rx) = oneshot::channel();
+            self.app_tx
+                .send(AppCommand::Validate(block.clone(), tx))
+                .await
+                .unwrap();
+            let res = rx.await.unwrap();
+            if let Err(err) = res {
+                error!("Policy validation failed for block {}, not voting in favor of it: {}", block.block.n, err);
+                return Ok(());
+            }
+        }
 
         self.logserver_tx.send(LogServerCommand::NewBlock(block.clone())).await.unwrap();
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
@@ -688,8 +706,10 @@ impl Staging {
         self.pending_blocks.push_back(block_with_votes);
 
         // Now crash commit blindly
-        if this_is_final_block {
-            self.do_crash_commit(self.ci, ae_stats.ci).await;
+        #[cfg(not(feature = "policy_validation"))] {
+            if this_is_final_block {
+                self.do_crash_commit(self.ci, ae_stats.ci).await;
+            }
         }
 
         let old_view_is_stable = self.view_is_stable;
