@@ -6,8 +6,7 @@ use pft::config::Config;
 use pft::consensus::app::TxWithValidationAck;
 use pft::consensus::batch_proposal::TxWithAckChanTag;
 use pft::consensus::engines::scitt::{SCITTWriteType, TXID};
-use pft::proto::client::proto_transaction_receipt::Receipt;
-use pft::proto::client::{self, ProtoClientReply};
+use pft::proto::client::{self, ProtoClientReply, ProtoTransactionResponse};
 use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
 use pft::rpc::SenderType;
 use pft::utils::channel::Sender;
@@ -18,20 +17,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-#[derive(Clone, Debug)]
-struct SCITTResponse {
-    block_n: u64,
-    tx_n: u64,
-    results: Option<Vec<(bool, Vec<Vec<u8>>)>>,
-}
-
 struct AppState {
     /// Global channel to feed into the consensusNode.
     batch_proposer_tx: Sender<TxWithAckChanTag>,
     /// Per-thread client tag counter remains.
     curr_client_tag: AtomicU64,
     /// Request cache to store responses for TXID lookups.
-    request_cache: Arc<Mutex<HashMap<TXID, SCITTResponse>>>,
+    request_cache: Arc<Mutex<HashMap<TXID, ProtoTransactionResponse>>>,
     /// Global channel to validate claims before submission
     validator_tx: Sender<TxWithValidationAck>,
 }
@@ -100,9 +92,8 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
         None => return HttpResponse::BadRequest().body("Invalid txid"),
     };
 
-    // TODO not probe, this needs to be some sort of "get receipt" operation.
     let transaction_op = ProtoTransactionOp {
-        op_type: pft::proto::execution::ProtoTransactionOpType::Probe.into(),
+        op_type: pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into(),
         operands: vec![txid.to_vec()],
     };
 
@@ -113,7 +104,7 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
 
     HttpResponse::Ok()
         .content_type("application/cose")
-        .body(result.results.unwrap()[0].1[0].clone())
+        .body(result.results.unwrap().result[0].values[0].clone())
 }
 
 /// Retrieve Statement with Embedded Receipt
@@ -138,14 +129,14 @@ async fn get_entry_statement(
         Err(err) => return err,
     };
 
-    let results = result.results.unwrap();
-    if results[0].1.is_empty() {
+    let results = result.results.unwrap().result;
+    if results[0].values.is_empty() {
         return HttpResponse::NotFound().body("No results found for the given txid");
     }
 
     HttpResponse::Ok()
         .content_type("application/cose")
-        .body(results[0].1[0].clone())
+        .body(results[0].values[0].clone())
 }
 
 /// Retrieve IDs for all entries within a range
@@ -179,15 +170,15 @@ async fn get_entries_tx_ids(
             operands: vec![from_txid.to_vec(), to_txid.to_vec()],
         };
 
-        let result = match send_read(vec![transaction_op], &state).await {
+        let response = match send_read(vec![transaction_op], &state).await {
             Ok(response) => response,
             Err(err) => return err,
         };
 
         let mut tx_ids = Vec::new();
-        let (success, values) = &result.results.unwrap()[0];
-        if *success {
-            for value in values {
+        let proto_result = &response.results.unwrap().result[0];
+        if proto_result.success {
+            for value in proto_result.values.iter() {
                 if let Some(txid) = TXID::from_vec(&value) {
                     tx_ids.push(txid.to_string());
                 } else {
@@ -275,7 +266,7 @@ async fn register_policy(
 async fn send_read(
     transaction_ops: Vec<ProtoTransactionOp>,
     state: &AppState,
-) -> Result<SCITTResponse, HttpResponse> {
+) -> Result<ProtoTransactionResponse, HttpResponse> {
     let transaction_phase = ProtoTransactionPhase {
         ops: transaction_ops,
     };
@@ -288,32 +279,14 @@ async fn send_read(
         is_2pc: false,
     };
 
-    let receipt = base_send(transaction, state).await?;
-
-    match receipt {
-        Receipt::UnloggedReceipt(unlogged_receipt) => Ok(SCITTResponse {
-            block_n: 0,
-            tx_n: 0,
-            results: Some(
-                unlogged_receipt
-                    .results
-                    .unwrap()
-                    .result
-                    .into_iter()
-                    .map(|tx| (tx.success, tx.values))
-                    .collect(),
-            ),
-        }),
-        _ => Err(HttpResponse::InternalServerError()
-            .body("Only an unlogged receipt is expected in this context")),
-    }
+    base_send(transaction, state).await
 }
 
 async fn send(
     transaction_ops: Vec<ProtoTransactionOp>,
     state: &AppState,
     byz_commit_probe: bool,
-) -> Result<SCITTResponse, HttpResponse> {
+) -> Result<ProtoTransactionResponse, HttpResponse> {
     let transaction_phase = ProtoTransactionPhase {
         ops: transaction_ops,
     };
@@ -326,38 +299,18 @@ async fn send(
         is_2pc: false,
     };
 
-    let receipt = base_send(transaction, state).await?;
+    let response = base_send(transaction, state).await?;
 
-    let req_receipt: SCITTResponse = match receipt {
-        Receipt::CommitReceipt(commit_receipt) => SCITTResponse {
-            block_n: commit_receipt.block_n,
-            tx_n: commit_receipt.tx_n,
-            results: Some(
-                commit_receipt
-                    .results
-                    .unwrap()
-                    .result
-                    .into_iter()
-                    .map(|tx| (tx.success, tx.values))
-                    .collect(),
-            ),
-        },
-        _ => {
-            return Err(HttpResponse::InternalServerError()
-                .body("Only a commit receipt is expected in this context"));
-        }
-    };
-
-    if req_receipt.block_n != 0 && byz_commit_probe {
+    if response.block_n != 0 && byz_commit_probe {
         let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
 
         let probe_transaction = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
-                    op_type: pft::proto::execution::ProtoTransactionOpType::Probe.into(),
+                    op_type: pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into(),
                     operands: vec![
-                        req_receipt.block_n.to_be_bytes().to_vec(),
-                        req_receipt.tx_n.to_be_bytes().to_vec(),
+                        response.block_n.to_be_bytes().to_vec(),
+                        response.tx_n.to_be_bytes().to_vec(),
                     ],
                 }],
             }),
@@ -380,13 +333,13 @@ async fn send(
 
         // Probe replies only after Byz commit
     }
-    Ok(req_receipt)
+    Ok(response)
 }
 
 async fn base_send(
     transaction: ProtoTransaction,
     state: &AppState,
-) -> Result<Receipt, HttpResponse> {
+) -> Result<ProtoTransactionResponse, HttpResponse> {
     let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
 
     let (tx, mut rx) = mpsc::channel(1);
@@ -415,14 +368,7 @@ async fn base_send(
         }
     };
     match decoded_payload.reply.unwrap() {
-        client::proto_client_reply::Reply::Receipt(receipt) => {
-            if let Some(unwrapped_receipt) = receipt.receipt {
-                Ok(unwrapped_receipt)
-            } else {
-                Err(HttpResponse::InternalServerError()
-                    .body("Transaction receipt does not contain results"))
-            }
-        }
+        client::proto_client_reply::Reply::Response(response) => Ok(response),
         client::proto_client_reply::Reply::TryAgain(ta) => Err(HttpResponse::ServiceUnavailable()
             .body(format!(
                 "Service temporarily unavailable, please try again: {}",
@@ -433,11 +379,14 @@ async fn base_send(
                 "Request should be sent to the leader node {}",
                 l.name
             ))),
-        client::proto_client_reply::Reply::TentativeReceipt(tr) => Err(HttpResponse::Accepted()
+        client::proto_client_reply::Reply::TentativeResponse(tr) => Err(HttpResponse::Accepted()
             .body(format!(
                 "Transaction accepted but not yet committed: {} {}",
                 tr.block_n, tr.tx_n
             ))),
+        client::proto_client_reply::Reply::CommitReceipt(_) =>
+            Err(HttpResponse::InternalServerError().body("Commit receipt not expected in this context")),
+        client::proto_client_reply::Reply::AuditReceipt(_) => Err(HttpResponse::InternalServerError().body("Audit receipt not expected in this context")),
     }
 }
 

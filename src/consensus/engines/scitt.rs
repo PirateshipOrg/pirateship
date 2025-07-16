@@ -230,9 +230,6 @@ impl AppEngine for SCITTAppEngine {
                             warn!("Invalid operation type: {}", op.op_type);
                             continue;
                         }
-                    } else {
-                        warn!("Invalid operation type: {}", op.op_type);
-                        continue;
                     }
                 }
                 block_result.push(txn_result);
@@ -290,9 +287,6 @@ impl AppEngine for SCITTAppEngine {
                             let val = &op.operands[1];
                             self.state.byz_committed_claims.insert(key, val.clone());
                         }
-                    } else {
-                        warn!("Invalid operation type: {}", op.op_type);
-                        continue;
                     }
                 }
                 block_result.push(byz_result);
@@ -378,8 +372,6 @@ impl AppEngine for SCITTAppEngine {
                         op_result.values = scan_result;
                     }
                     txn_result.result.push(op_result);
-                } else {
-                    warn!("Invalid operation type: {}", op_type.as_str_name());
                 }
             }
         }

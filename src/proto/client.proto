@@ -22,34 +22,23 @@ message ProtoByzResponse {
     // bytes req_digest = 3;
 }
 
-message ProtoTransactionReceipt {
-    oneof receipt {
-        ProtoAuditReceipt audit_receipt = 1;
-        ProtoUnloggedReceipt unlogged_receipt = 2;
-        ProtoCommitReceipt commit_receipt = 3;
-    }
-    repeated ProtoByzResponse byz_responses = 4;
-}
-
-message ProtoAuditReceipt {
-    repeated proto.consensus.ProtoBlock chain = 1;
-    repeated bytes proof = 2;
-}
-
-message ProtoCommitReceipt {
+message ProtoTransactionResponse {
+    // this became a `response` as opposed to a `receipt` because it is not transmissible
+    // i.e. this proves to the client that the transaction was crash committed (TLS connection)
+    // but it not signed and thus cannot be used by the client to prove the transaction was crash committed to a third party
     bytes req_digest = 1;
     uint64 block_n = 2;
     uint64 tx_n = 3;
     proto.execution.ProtoTransactionResult results = 4;
-    repeated proto.consensus.ProtoBlock chain = 5;
-    repeated bytes proof = 6;
+    repeated ProtoByzResponse byz_responses = 5;
 }
 
-message ProtoUnloggedReceipt {
-    proto.execution.ProtoTransactionResult results = 1;
+message ProtoTransactionReceipt {
+    repeated proto.consensus.ProtoBlock chain = 1;
+    repeated bytes proof = 2;
 }
 
-message ProtoTentativeReceipt {
+message ProtoTentativeResponse {
     uint64 block_n = 1;
     uint64 tx_n = 2;
 }
@@ -65,12 +54,14 @@ message ProtoCurrentLeader {
 
 message ProtoClientReply {
     oneof reply {
-        ProtoTransactionReceipt receipt = 1;
+        ProtoTransactionResponse response = 1;
         ProtoTryAgain try_again = 2;
         ProtoCurrentLeader leader = 3;
-        ProtoTentativeReceipt tentative_receipt = 4; 
+        ProtoTentativeResponse tentative_response = 4; 
+        ProtoTransactionReceipt commit_receipt = 5;
+        ProtoTransactionReceipt audit_receipt = 6;
     }
-    uint64 client_tag = 5;
+    uint64 client_tag = 7;
 }
 
 message ProtoByzPollRequest {

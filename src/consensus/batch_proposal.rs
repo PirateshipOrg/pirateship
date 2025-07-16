@@ -288,13 +288,13 @@ impl BatchProposer {
 
             let (res_tx, res_rx) = oneshot::channel();
 
-            let (is_probe, block_n, tx_n) = self.is_probe_tx(&tx);
+            let (is_probe, block_n, tx_n, is_audit) = self.is_probe_tx(&tx);
 
             if !is_probe {
                 self.unlogged_tx.send((tx, res_tx)).await.unwrap();
                 self.reply_tx.send(ClientReplyCommand::UnloggedRequestAck(res_rx, ack_chan)).await.unwrap();
             } else {
-                self.reply_tx.send(ClientReplyCommand::ProbeRequestAck(block_n, tx_n, ack_chan)).await.unwrap();
+                self.reply_tx.send(ClientReplyCommand::ProbeRequestAck(block_n, tx_n, is_audit, ack_chan)).await.unwrap();
             }
                 
 
@@ -307,35 +307,41 @@ impl BatchProposer {
 
     }
 
-    fn is_probe_tx(&self, tx: &ProtoTransaction) -> (bool, u64, u64) {
+    fn is_probe_tx(&self, tx: &ProtoTransaction) -> (bool, u64, u64, bool) { // Returns (is_probe, block_n, tx_n, is_audit)
         if tx.on_receive.is_none() {
-            return (false, 0, 0);
+            return (false, 0, 0, false);
         }
 
         if tx.on_receive.as_ref().unwrap().ops.len() != 1 {
-            return (false, 0, 0);
+            return (false, 0, 0, false);
         }
 
-        if tx.on_receive.as_ref().unwrap().ops[0].op_type != crate::proto::execution::ProtoTransactionOpType::Probe as i32 {
-            return (false, 0, 0);
+        let op = &tx.on_receive.as_ref().unwrap().ops[0];
+
+        let is_audit = if op.op_type == crate::proto::execution::ProtoTransactionOpType::ProbeAudit as i32 {
+            true
+        } else if op.op_type == crate::proto::execution::ProtoTransactionOpType::ProbeCommit as i32 {
+            false
+        } else {
+            return (false, 0, 0, false);
+        };
+
+        if op.operands.len() != 1 {
+            return (false, 0, 0, false);
         }
 
-        if tx.on_receive.as_ref().unwrap().ops[0].operands.len() != 1 {
-            return (false, 0, 0);
-        }
-
-        let block_n = tx.on_receive.as_ref().unwrap().ops[0].operands[0].clone();
+        let block_n = op.operands[0].clone();
         let block_n = match block_n.as_slice().try_into() {
             Ok(arr) => u64::from_be_bytes(arr),
-            Err(_) => return (false, 0, 0),
+            Err(_) => return (false, 0, 0, false),
         };
-        let tx_n = tx.on_receive.as_ref().unwrap().ops[0].operands[1].clone();
+        let tx_n = op.operands[1].clone();
         let tx_n = match tx_n.as_slice().try_into() {
             Ok(arr) => u64::from_be_bytes(arr),
-            Err(_) => return (false, 0, 0),
+            Err(_) => return (false, 0, 0, false),
         };
 
-        (true, block_n, tx_n)
+        (true, block_n, tx_n, is_audit)
     }
 
 }

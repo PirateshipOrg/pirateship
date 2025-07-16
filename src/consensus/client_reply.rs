@@ -4,25 +4,25 @@ use log::{error, info, trace};
 use prost::Message as _;
 use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
 
-use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoAuditReceipt, ProtoByzResponse, ProtoClientReply, ProtoCommitReceipt, ProtoTransactionReceipt, ProtoTryAgain, ProtoUnloggedReceipt}, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
+use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoTransactionReceipt, ProtoByzResponse, ProtoClientReply, ProtoTryAgain, ProtoTransactionResponse}, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
 
 use super::batch_proposal::MsgAckChanWithTag;
 
 pub enum ClientReplyCommand {
     CancelAllRequests,
     StopCancelling,
-    CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>),
+    CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>, u64 /* last_qc */),
     ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>),
     UnloggedRequestAck(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
-    ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, MsgAckChanWithTag),
+    ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, bool /* is_audit */, MsgAckChanWithTag),
 }
 
 #[allow(dead_code)]
 enum ReplyProcessorCommand {
-    CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>, ProofChain, MerkleInclusionProof),
+    CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>),
     ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
-    Probe(u64 /* block_n */, ProofChain, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
+    Probe(bool /* is_audit */, u64 /* block_n */, ProofChain, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
 }
 pub struct ClientReplyHandler {
     config: AtomicConfig,
@@ -42,8 +42,10 @@ pub struct ClientReplyHandler {
     reply_processors: JoinSet<()>,
     reply_processor_queue: (async_channel::Sender<ReplyProcessorCommand>, async_channel::Receiver<ReplyProcessorCommand>),
 
-    probe_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
+    probe_audit_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
+    probe_commit_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
     acked_bci: u64,
+    last_qc: u64,
 
     must_cancel: bool,
 }
@@ -68,8 +70,10 @@ impl ClientReplyHandler {
             reply_processors: JoinSet::new(),
             reply_processor_queue: async_channel::unbounded(),
             byz_response_store: HashMap::new(),
-            probe_buffer: BTreeMap::new(),
+            probe_audit_buffer: BTreeMap::new(),
+            probe_commit_buffer: BTreeMap::new(),
             acked_bci: 0,
+            last_qc: 0,
             must_cancel: false,
         }
     }
@@ -81,23 +85,17 @@ impl ClientReplyHandler {
             client_reply_handler.reply_processors.spawn(async move {
                 while let Ok(cmd) = rx.recv().await {
                     match cmd {
-                        ReplyProcessorCommand::CrashCommit(block_n, tx_n, hsh, reply, (reply_chan, client_tag, _), byz_responses, proof_chain, inclusion_proof) => {
+                        ReplyProcessorCommand::CrashCommit(block_n, tx_n, hsh, reply, (reply_chan, client_tag, _), byz_responses) => {
                             let reply = ProtoClientReply {
                                 reply: Some(
-                                    crate::proto::client::proto_client_reply::Reply::Receipt(
-                                        ProtoTransactionReceipt {
-                                            receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::CommitReceipt(
-                                                ProtoCommitReceipt {
-                                                    req_digest: hsh,
-                                                    block_n,
-                                                    tx_n,
-                                                    results: Some(reply),
-                                                    chain: proof_chain,
-                                                    proof: inclusion_proof.as_vec(),
-                                                }
-                                            )),
+                                   crate::proto::client::proto_client_reply::Reply::Response(
+                                     ProtoTransactionResponse {
+                                            req_digest: hsh,
+                                            block_n,
+                                            tx_n,
+                                            results: Some(reply),
                                             byz_responses,
-                                        },
+                                     }
                                 )),
                                 client_tag
                             };
@@ -114,23 +112,20 @@ impl ClientReplyHandler {
                         },
 
                         ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, _sender)) => {
-                            let reply = res_rx.await.unwrap();
+                            let results = res_rx.await.unwrap();
                             let reply = ProtoClientReply {
                                 reply: Some(
-                                    crate::proto::client::proto_client_reply::Reply::Receipt(
-                                        ProtoTransactionReceipt {
-                                            receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::UnloggedReceipt(
-                                                ProtoUnloggedReceipt {
-                                                    results: Some(reply),
-                                                }
-                                            )),
+                                   crate::proto::client::proto_client_reply::Reply::Response(
+                                     ProtoTransactionResponse {
+                                            req_digest: vec![],
+                                            block_n: 0,
+                                            tx_n: 0,
+                                            results: Some(results),
                                             byz_responses: vec![],
-                                        }
-                                    ),
-                                ),
+                                     }
+                                )),
                                 client_tag: tag,
                             };
-
 
                             let reply_ser = reply.encode_to_vec();
                             let _sz = reply_ser.len();
@@ -140,22 +135,27 @@ impl ClientReplyHandler {
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         },
 
-                        ReplyProcessorCommand::Probe(_block_n, proof_chain, reply_vec) => {
+                        ReplyProcessorCommand::Probe(is_audit, _block_n, proof_chain, reply_vec) => {
                             for ((reply_chan, client_tag, _sender), _tx_n, inclusion_proof) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
                                 let reply = ProtoClientReply {
                                     reply: Some(
-                                        crate::proto::client::proto_client_reply::Reply::Receipt(
-                                            ProtoTransactionReceipt {
-                                                receipt: Some(crate::proto::client::proto_transaction_receipt::Receipt::AuditReceipt(
-                                                    ProtoAuditReceipt {
-                                                        chain: proof_chain.clone(),
-                                                        proof: inclusion_proof.as_vec(),
-                                                    }
-                                                )),
-                                                byz_responses: vec![],
-                                            },
-                                        ),
+                                        // this is just syntax sugar for the proto. both are chains and a proof, but the chain validation should be different (1 vs 2 QCs/fastQC)
+                                        if is_audit { 
+                                            crate::proto::client::proto_client_reply::Reply::AuditReceipt(
+                                                ProtoTransactionReceipt {
+                                                    chain: proof_chain.clone(),
+                                                    proof: inclusion_proof.as_vec(),
+                                                }
+                                            )
+                                        } else {
+                                            crate::proto::client::proto_client_reply::Reply::CommitReceipt(
+                                                ProtoTransactionReceipt {
+                                                    chain: proof_chain.clone(),
+                                                    proof: inclusion_proof.as_vec(),
+                                                }
+                                            )
+                                        }
                                     ),
                                     client_tag,
                                 };
@@ -227,21 +227,11 @@ impl ClientReplyHandler {
     }
 
     async fn do_crash_commit_reply(&mut self, reply_sender_vec: Vec<MsgAckChanWithTag>, hash: HashType, n: u64, reply_vec: Vec<ProtoTransactionResult>) {
-        let (tx, rx) = oneshot::channel();
-        self.issuer_tx.send(IssuerCommand::IssueCommitReceipt(n,  (0..reply_vec.len()).map(|i| i as u64).collect(), tx)).await.unwrap();
-        let builder = rx.await.unwrap().unwrap_or_else(|| {
-            error!("Failed to build commit receipt for block {}", n);
-            crate::consensus::issuer::ReceiptBuilder {
-                chain: vec![],
-                proofs: vec![MerkleInclusionProof::default(); reply_vec.len()],
-            }
-        });
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        assert_eq!(reply_sender_vec.len(), builder.proofs.len());
-        for (tx_n, (((reply_chan, client_tag, sender), reply), proof)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).zip(builder.proofs).enumerate() {
+        for (tx_n, ((reply_chan, client_tag, sender), reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
             let byz_responses = self.byz_response_store.remove(&sender).unwrap_or_default();
-
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses, builder.chain.clone(), proof)).await.unwrap();
+            
+            self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses)).await.unwrap();
         }
     }
 
@@ -285,7 +275,8 @@ impl ClientReplyHandler {
                 self.must_cancel = true;
                 
             },
-            ClientReplyCommand::CrashCommitAck(crash_commit_ack) => {
+            ClientReplyCommand::CrashCommitAck(crash_commit_ack, last_qc) => {
+                self.last_qc = last_qc; // just assume this is correct. it might get rolled back, but that should be fine if generating commit receipts fails gracefully.
                 for (hash, (n, reply_vec)) in crash_commit_ack {
                     if let Some(reply_sender_vec) = self.reply_map.remove(&hash) {
                         self.do_crash_commit_reply(reply_sender_vec, hash, n, reply_vec).await;
@@ -313,11 +304,16 @@ impl ClientReplyHandler {
                 let sender = sender.2;
                 self.reply_processor_queue.0.send(ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, client_tag, sender))).await.unwrap();
             },
-            ClientReplyCommand::ProbeRequestAck(block_n, tx_n, sender) => {
-                if let Some(vec) = self.probe_buffer.get_mut(&block_n) {
+            ClientReplyCommand::ProbeRequestAck(block_n, tx_n, is_audit, sender) => {
+                let buffer = if is_audit {
+                    &mut self.probe_audit_buffer
+                } else {
+                    &mut self.probe_commit_buffer
+                };
+                if let Some(vec) = buffer.get_mut(&block_n) {
                     vec.push((sender, tx_n));
                 } else {
-                    self.probe_buffer.insert(block_n, vec![(sender, tx_n)]);
+                    buffer.insert(block_n, vec![(sender, tx_n)]);
                 }
 
                 self.maybe_clear_probe_buf().await;
@@ -326,20 +322,30 @@ impl ClientReplyHandler {
     }
 
     async fn maybe_clear_probe_buf(&mut self) {
-        let mut remove_vec = vec![];
+        let mut ready_for_audit_receipt = vec![];
+        let mut ready_for_commit_receipt = vec![];
         
-        self.probe_buffer.retain(|block_n, reply_vec| {
+        self.probe_audit_buffer.retain(|block_n, reply_vec| {
             if *block_n <= self.acked_bci {
-                trace!("Clearing probe tx buffer of size {} for block {}", reply_vec.len(), block_n);
-
-                remove_vec.push((*block_n, reply_vec.drain(..).collect::<Vec<_>>()));
+                trace!("Clearing probe audit tx buffer of size {} for block {}", reply_vec.len(), block_n);
+                ready_for_audit_receipt.push((*block_n, reply_vec.drain(..).collect::<Vec<_>>()));
                 false
             } else {
                 true
             }
         });
 
-        for (block_n, reply_vec) in remove_vec {
+        self.probe_commit_buffer.retain(|block_n, reply_vec| {
+            if *block_n <= self.last_qc {
+                trace!("Clearing probe commit tx buffer of size {} for block {}", reply_vec.len(), block_n);
+                ready_for_commit_receipt.push((*block_n, reply_vec.drain(..).collect::<Vec<_>>()));
+                false
+            } else {
+                true
+            }
+        });
+
+        for (block_n, reply_vec) in ready_for_audit_receipt {
             let (tx, rx) = oneshot::channel();
             self.issuer_tx.send(IssuerCommand::IssueAuditReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
             let Some(builder) = rx.await.unwrap() else {
@@ -347,7 +353,18 @@ impl ClientReplyHandler {
                 continue;
             };
             assert_eq!(reply_vec.len(), builder.proofs.len());
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+        }
+
+        for (block_n, reply_vec) in ready_for_commit_receipt {
+            let (tx, rx) = oneshot::channel();
+            self.issuer_tx.send(IssuerCommand::IssueCommitReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
+            let Some(builder) = rx.await.unwrap() else {
+                error!("Failed to build commit receipt for block {}", block_n);
+                continue;
+            };
+            assert_eq!(reply_vec.len(), builder.proofs.len());
+            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
         }
     }
 

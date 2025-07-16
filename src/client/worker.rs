@@ -172,7 +172,7 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
                     let resp = resp.unwrap();
 
                     match resp.reply {
-                        Some(client::proto_client_reply::Reply::Receipt(receipt)) => {
+                        Some(client::proto_client_reply::Reply::Response(response)) => {
                             // Only send backpressure signal in closed-loop mode
                             if let LoopType::Closed = loop_type {
                                 let _ = backpressure_tx.send(CheckerResponse::Success(req.id)).await;
@@ -182,7 +182,7 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
                                 trace!("Got reply for read request from {}!", req.wait_from);
                             }
 
-                            for byz_resp in receipt.byz_responses.iter() {
+                            for byz_resp in response.byz_responses.iter() {
                                 if let Some(task) = waiting_for_byz_response.remove(&byz_resp.client_tag) {
                                     let _ = stat_tx.send(ClientWorkerStat::ByzCommitLatency(task.start_time.elapsed())).await;
                                 } else {
@@ -195,8 +195,8 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
                                 let _ = backpressure_tx.send(CheckerResponse::TryAgain(req, None, None)).await;
                             }
                         },
-                        Some(client::proto_client_reply::Reply::TentativeReceipt(_tentative_receipt)) => {
-                            // We treat tentative receipt as a success.
+                        Some(client::proto_client_reply::Reply::TentativeResponse(_tentative_response)) => {
+                            // We treat tentative response as a success.
                             if let LoopType::Closed = loop_type {
                                 let _ = backpressure_tx.send(CheckerResponse::Success(req.id)).await;
                             }
@@ -239,7 +239,9 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
                                 let _ = backpressure_tx.send(CheckerResponse::TryAgain(req, Some(node_list_vec), new_leader_id)).await;
                             }
                         },
-                        
+                        Some(_) => { // Catch-all for commit/audit receipts (not expected in this context)
+                            error!("Unexpected response type in checker task: {:?}", resp.reply);
+                        }
                         None => {
                             // We need to try again.
                             if let LoopType::Closed = loop_type {

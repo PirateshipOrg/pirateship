@@ -26,8 +26,10 @@ enum ProtoTransactionOpType {
     // For SQL and other operations
     CUSTOM = 10;
 
-    // To check for byz commit
-    PROBE = 11;
+    // To get commit receipt
+    PROBE_COMMIT = 11;
+    // To get audit receipt
+    PROBE_AUDIT = 12;
 }
 
 message ProtoTransactionOp {
@@ -54,12 +56,4 @@ message ProtoTransactionOpResult {
 
 message ProtoTransactionResult {
     repeated ProtoTransactionOpResult result = 1;
-}
-
-message ProtoReceipt {
-
-}
-
-message ProtoReceiptRequest {
-
 }

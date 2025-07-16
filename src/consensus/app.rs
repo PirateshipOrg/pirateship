@@ -384,7 +384,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoTransactionResult>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
                     block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoTransactionResult>)
                 ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::CrashCommitAck(result_map)).await.unwrap();
+                self.client_reply_tx.send(ClientReplyCommand::CrashCommitAck(result_map, new_last_qc)).await.unwrap();
                 for n in block_ns_cp {
                     self.perf_add_event(n, "Send Reply");
                 }

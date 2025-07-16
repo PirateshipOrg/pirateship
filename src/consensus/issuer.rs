@@ -74,7 +74,7 @@ impl Issuer {
                         self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 2).await;
                     },
                     Some(IssuerCommand::IssueCommitReceipt(block_n, tx_n_list, reply_tx)) => {
-                        self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 0).await; // commit receipts do not need auditQCs
+                        self.generate_receipt_builder(block_n, tx_n_list, reply_tx, 1).await;
                     },
                     Some(IssuerCommand::NewChunk(cached_blocks)) => {
                         self.handle_new_chunk(cached_blocks).await;
