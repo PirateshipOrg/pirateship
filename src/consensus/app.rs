@@ -1,11 +1,11 @@
-use std::{cell::RefCell, collections::{BTreeMap, HashMap, VecDeque}, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
+use std::{cell::RefCell, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
 
 use hex::ToHex;
-use log::{error, info, trace, warn};
+use log::{info, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
 use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
 #[cfg(feature = "channel_monitoring")]
@@ -54,6 +54,7 @@ struct LogStats {
 
 impl LogStats {
     fn new() -> Self {
+        #[allow(unused_mut)]
         let mut res = Self {
             ci: 0,
             bci: 0,
@@ -108,7 +109,7 @@ impl LogStats {
 }
 
 pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
-    config: AtomicConfig,
+    _config: AtomicConfig,
 
     engine: E,
     stats: LogStats,
@@ -162,7 +163,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         ];
         let perf_counter = RefCell::new(PerfCounter::new("Application", &event_order));
         Self {
-            config,
+            _config: config,
             engine,
             stats: LogStats::new(),
             staging_rx,

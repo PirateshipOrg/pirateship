@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use crate::crypto::{default_hash, FutureHash};
+use crate::crypto::FutureHash;
 use crate::utils::channel::{Receiver, Sender};
-use log::{debug, info, trace, warn};
+use log::{trace, warn};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, Mutex};
 
@@ -87,6 +87,7 @@ impl BlockSequencer {
         let perf_counter_unsigned =
             RefCell::new(PerfCounter::new("BlockSequencerUnsigned", &event_order));
 
+        #[allow(unused_mut)]
         let mut ret = Self {
             config,
             control_command_rx,
@@ -146,53 +147,53 @@ impl BlockSequencer {
         leader == config.net_config.name
     }
 
-    fn perf_register(&mut self, entry: u64) {
+    fn perf_register(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
         {
             self.perf_counter_signed
                 .borrow_mut()
-                .register_new_entry(entry);
+                .register_new_entry(_entry);
             self.perf_counter_unsigned
                 .borrow_mut()
-                .register_new_entry(entry);
+                .register_new_entry(_entry);
         }
     }
 
-    fn perf_fix_signature(&mut self, entry: u64, signed: bool) {
+    fn perf_fix_signature(&mut self, _entry: u64, _signed: bool) {
         #[cfg(feature = "perf")]
-        if signed {
+        if _signed {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         } else {
             self.perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         }
     }
 
-    fn perf_add_event(&mut self, entry: u64, event: &str, signed: bool) {
+    fn perf_add_event(&mut self, _entry: u64, _event: &str, _signed: bool) {
         #[cfg(feature = "perf")]
-        if signed {
+        if _signed {
             self.perf_counter_signed
                 .borrow_mut()
-                .new_event(event, &entry);
+                .new_event(_event, &_entry);
         } else {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .new_event(event, &entry);
+                .new_event(_event, &_entry);
         }
     }
 
-    fn perf_deregister(&mut self, entry: u64) {
+    fn perf_deregister(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
         {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
             self.perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         }
     }
 
@@ -205,12 +206,15 @@ impl BlockSequencer {
         // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
         // This limits the depth of pipeline (ie, max number of inflight blocks).
 
+        #[allow(unused_mut)]
         let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
+        #[allow(unused_mut)]
         let mut blocked_for_qc_pass = false;
 
         #[cfg(not(feature = "no_qc"))]
         {
             // Is there a QC I can get?
+            #[allow(unused_mut)]
             let mut qc_check_cond = self.qc_rx.len() > 0;
             #[cfg(feature = "no_pipeline")]
             {

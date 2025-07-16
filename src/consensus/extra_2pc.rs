@@ -1,11 +1,11 @@
 use std::{collections::HashMap, future::Future, sync::Arc};
 
 use bytes::{BufMut as _, BytesMut};
-use log::{error, info, trace, warn};
+use log::{error, trace, warn};
 use prost::Message;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::{config::AtomicConfig, proto::{client::{proto_transaction_receipt, ProtoClientReply, ProtoClientRequest, ProtoTransactionReceipt}, consensus::ProtoVote, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}, rpc::ProtoPayload}, rpc::{client::PinnedClient, PinnedMessage}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
+use crate::{config::AtomicConfig, proto::{client::{proto_transaction_receipt, ProtoClientReply, ProtoClientRequest}, consensus::ProtoVote, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}, rpc::ProtoPayload}, rpc::{client::PinnedClient, PinnedMessage}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
 
 pub struct TwoPCCommand {
     key: String,
@@ -178,7 +178,7 @@ impl TwoPCHandler {
 
         let val = op.operands[1].clone();
 
-        let op_type = ProtoTransactionOpType::from_i32(op.op_type);
+        let op_type = ProtoTransactionOpType::try_from(op.op_type).ok();
 
         match op_type {
             Some(ProtoTransactionOpType::Write) => {

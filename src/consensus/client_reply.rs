@@ -4,7 +4,7 @@ use log::{error, info, trace};
 use prost::Message as _;
 use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
 
-use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoAuditReceipt, ProtoByzResponse, ProtoClientReply, ProtoCommitReceipt, ProtoTransactionReceipt, ProtoTryAgain, ProtoUnloggedReceipt}, execution::ProtoTransactionResult, rpc::ProtoPayload}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{make_channel, Receiver, Sender}};
+use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoAuditReceipt, ProtoByzResponse, ProtoClientReply, ProtoCommitReceipt, ProtoTransactionReceipt, ProtoTryAgain, ProtoUnloggedReceipt}, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
 
 use super::batch_proposal::MsgAckChanWithTag;
 
@@ -17,6 +17,7 @@ pub enum ClientReplyCommand {
     ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, MsgAckChanWithTag),
 }
 
+#[allow(dead_code)]
 enum ReplyProcessorCommand {
     CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>, ProofChain, MerkleInclusionProof),
     ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
@@ -108,11 +109,11 @@ impl ClientReplyHandler {
                             
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         },
-                        ReplyProcessorCommand::ByzCommit(_, _, result, sender) => {
+                        ReplyProcessorCommand::ByzCommit(_, _, _result, _sender) => {
 
                         },
 
-                        ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, sender)) => {
+                        ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, _sender)) => {
                             let reply = res_rx.await.unwrap();
                             let reply = ProtoClientReply {
                                 reply: Some(
@@ -244,9 +245,9 @@ impl ClientReplyHandler {
         }
     }
 
-    async fn do_byz_commit_reply(&mut self, reply_sender_vec: Vec<(u64, SenderType)>, hash: HashType, n: u64, reply_vec: Vec<ProtoByzResponse>) {
+    async fn do_byz_commit_reply(&mut self, reply_sender_vec: Vec<(u64, SenderType)>, _hash: HashType, n: u64, reply_vec: Vec<ProtoByzResponse>) {
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        for (tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
+        for (_tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
             reply.client_tag = client_tag;
             match self.byz_response_store.get_mut(&sender) {
                 Some(byz_responses) => {

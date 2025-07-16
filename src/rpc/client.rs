@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, KeyStore}, utils::{channel::make_channel, AtomicStruct}};
-use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
+#[allow(unused_imports)]
 use log::{debug, info, trace, warn};
 use rustls::{crypto::aws_lc_rs, pki_types, RootCertStore};
-use serde_cbor::ser::SliceWrite;
 use std::{
-    collections::{HashMap, HashSet}, fs::File, future::Future, io::{self, BufReader, Cursor, Error, ErrorKind}, ops::{Deref, DerefMut}, path, pin::Pin, sync::{atomic::{AtomicUsize, Ordering}, Arc}, time::Duration
+    collections::{HashMap, HashSet}, fs::File, io::{self, BufReader, Cursor, Error, ErrorKind}, ops::{Deref, DerefMut}, path, pin::Pin, sync::{atomic::{AtomicUsize, Ordering}, Arc}, time::Duration
 };
+#[allow(unused_imports)]
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -191,6 +192,7 @@ pub struct Client {
     pub worker_ready: PinnedHashSet<String>,
     pub key_store: AtomicKeyStore,
     do_auth: bool,
+    #[allow(dead_code)]
     graveyard_tx: Mutex<Option<UnboundedSender<BoxFuture<'static, ()>>>>,
     slowest_peer: AtomicString,
 }
@@ -574,7 +576,7 @@ impl PinnedClient {
         let is_readable = {
             // Is there a partial message in the buffer?
             let sock = Self::get_sock(client, name, client.0.full_duplex).await?;
-            let mut lsock = sock.0.lock().await;
+            let lsock = sock.0.lock().await;
 
             if lsock.bound != lsock.offset {
                 true
@@ -847,7 +849,7 @@ impl PinnedClient {
                 };
                 
                 while rx.recv_many(&mut msgs, 10).await > 0 {
-                    let mut should_print_flush_time = false;
+                    // let mut should_print_flush_time = false;
                     let mut combined_prefix = String::from("");
                     let mut should_die = false;
                     for (msg, profile) in &mut msgs {
@@ -872,7 +874,7 @@ impl PinnedClient {
                 
                         profile.prefix += &String::from(format!(" to {} ", _name));
                         if profile.should_print {
-                            should_print_flush_time = true;
+                            // should_print_flush_time = true;
                             combined_prefix += &profile.prefix.clone();
                         }
 

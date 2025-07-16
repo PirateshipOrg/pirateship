@@ -2,10 +2,11 @@ use std::{cell::RefCell, io::{Error, ErrorKind}, sync::Arc};
 
 use log::{debug, error, info, trace};
 use prost::Message;
-use rustls::crypto;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{AtomicKeyStore, CachedBlock, CryptoServiceConnector, FutureHash, HashType}, proto::{consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork}, execution::ProtoTransaction, rpc::ProtoPayload}, rpc::{client::{Client, PinnedClient}, server::LatencyProfile, PinnedMessage, SenderType}, utils::{channel::{Receiver, Sender}, PerfCounter, StorageAck, StorageServiceConnector}};
+use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::{consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork}, rpc::ProtoPayload}, rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType}, utils::{channel::{Receiver, Sender}, PerfCounter, StorageAck, StorageServiceConnector}};
+#[cfg(feature = "evil")]
+use crate::{crypto::FutureHash, proto::execution::ProtoTransaction};
 
 use super::{app::AppCommand, fork_receiver::{AppendEntriesStats, ForkReceiverCommand, MultipartFork}};
 
@@ -16,6 +17,7 @@ pub enum BlockBroadcasterCommand {
 
 pub struct BlockBroadcaster {
     config: AtomicConfig,
+    #[allow(dead_code)]
     crypto: CryptoServiceConnector,
 
     ci: u64,
@@ -40,6 +42,7 @@ pub struct BlockBroadcaster {
 
 
     // For evil purposes
+    #[cfg(feature = "evil")]
     evil_last_hash: FutureHash,
 
 }
@@ -83,6 +86,7 @@ impl BlockBroadcaster {
             fork_receiver_command_tx,
             app_command_tx,
             my_block_perf_counter,
+            #[cfg(feature = "evil")]
             evil_last_hash: FutureHash::None,
         }
     }
@@ -106,19 +110,19 @@ impl BlockBroadcaster {
         info!("Broadcasting worker exited.");
     }
 
-    fn perf_register(&mut self, entry: u64) {
+    fn perf_register(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
-        self.my_block_perf_counter.borrow_mut().register_new_entry(entry);
+        self.my_block_perf_counter.borrow_mut().register_new_entry(_entry);
     }
 
-    fn perf_add_event(&mut self, entry: u64, event: &str) {
+    fn perf_add_event(&mut self, _entry: u64, _event: &str) {
         #[cfg(feature = "perf")]
-        self.my_block_perf_counter.borrow_mut().new_event(event, &entry);
+        self.my_block_perf_counter.borrow_mut().new_event(_event, &_entry);
     }
 
-    fn perf_deregister(&mut self, entry: u64) {
+    fn perf_deregister(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
-        self.my_block_perf_counter.borrow_mut().deregister_entry(&entry);
+        self.my_block_perf_counter.borrow_mut().deregister_entry(&_entry);
     }
 
     async fn worker(&mut self) -> Result<(), Error> {
@@ -286,6 +290,7 @@ impl BlockBroadcaster {
             return byzantine_threshold - 1;
         }
 
+        #[allow(unreachable_code)]
         let f = node_list_len / 3;
         return 2 * f;
 
@@ -326,76 +331,69 @@ impl BlockBroadcaster {
     } 
 
 
+    #[cfg(feature = "evil")]
     async fn maybe_act_evil(&mut self, names: Vec<String>, ae_fork: &Vec<CachedBlock>, view: u64, view_is_stable: bool, config_num: u64) -> Vec<String> {
-        #[cfg(not(feature = "evil"))]
-        return names;
+        let (should_be_evil, byz_start_block) = {
+            let config = &self.config.get();
+            let am_i_first_leader = config.consensus_config.node_list[0] == config.net_config.name;
+            
+            let byz_start_block = config.evil_config.byzantine_start_block;
+            let be_evil = config.evil_config.simulate_byzantine_behavior;
 
-        #[cfg(feature = "evil")]
-        {
+            (am_i_first_leader && be_evil, byz_start_block)
+            
+        };
 
-            let (should_be_evil, byz_start_block) = {
-                let config = &self.config.get();
-                let am_i_first_leader = config.consensus_config.node_list[0] == config.net_config.name;
-                
-                let byz_start_block = config.evil_config.byzantine_start_block;
-                let be_evil = config.evil_config.simulate_byzantine_behavior;
-    
-                (am_i_first_leader && be_evil, byz_start_block)
-                
-            };
-    
-            if !should_be_evil {
-                return names;
-            }
-    
-            if ae_fork.last().unwrap().block.n < byz_start_block {
-                return names;
-            }
-    
-            if let FutureHash::None = self.evil_last_hash {
-                self.evil_last_hash = FutureHash::Immediate(ae_fork.last().unwrap().block.parent.clone());
-                info!("Equivocation starting on {}", ae_fork.last().unwrap().block.n);
-            }
-    
-            let parent_hash_rx = self.evil_last_hash.take();
-            let must_sign = match &ae_fork.last().unwrap().block.sig {
-                Some(crate::proto::consensus::proto_block::Sig::ProposerSig(_)) => true,
-                _ => false,
-            };
-    
-            let mut ae_fork = ae_fork.clone();
-            let block = ae_fork.pop().unwrap();
-            let mut block = block.block.clone();
-    
-            block.tx_list.push(ProtoTransaction {
-                on_receive: None,
-                on_crash_commit: None,
-                on_byzantine_commit: None,
-                is_reconfiguration: false,
-                is_2pc: false,
-            });
-    
-            trace!("Equivocating on block seq num {}", block.n);
-    
-    
-            let (block, hash_rx, _hash_rx_2) = self.crypto.prepare_block(block, must_sign, parent_hash_rx).await;
-            self.evil_last_hash = FutureHash::Future(hash_rx);
-    
-            let block = block.await.unwrap();
-            ae_fork.push(block);
-    
-            let partition_1_size = names.len() / 2;
-    
-            let (partition1, partition2) = names.split_at(partition_1_size);
-            trace!("Partition 1: {:?}, Partition 2: {:?}", partition1, partition2);
-    
-            self.broadcast_ae_fork(partition2.to_vec(), ae_fork, view, view_is_stable, config_num, None).await;
-    
-            // Equivocation logic: Add 1 extra dummy tx to the end of the last block.
-    
-            partition1.to_vec()
+        if !should_be_evil {
+            return names;
         }
 
+        if ae_fork.last().unwrap().block.n < byz_start_block {
+            return names;
+        }
+
+        if let FutureHash::None = self.evil_last_hash {
+            self.evil_last_hash = FutureHash::Immediate(ae_fork.last().unwrap().block.parent.clone());
+            info!("Equivocation starting on {}", ae_fork.last().unwrap().block.n);
+        }
+
+        let parent_hash_rx = self.evil_last_hash.take();
+        let must_sign = match &ae_fork.last().unwrap().block.sig {
+            Some(crate::proto::consensus::proto_block::Sig::ProposerSig(_)) => true,
+            _ => false,
+        };
+
+        let mut ae_fork = ae_fork.clone();
+        let block = ae_fork.pop().unwrap();
+        let mut block = block.block.clone();
+
+        block.tx_list.push(ProtoTransaction {
+            on_receive: None,
+            on_crash_commit: None,
+            on_byzantine_commit: None,
+            is_reconfiguration: false,
+            is_2pc: false,
+        });
+
+        trace!("Equivocating on block seq num {}", block.n);
+
+
+        let (block, hash_rx, _hash_rx_2) = self.crypto.prepare_block(block, must_sign, parent_hash_rx).await;
+        self.evil_last_hash = FutureHash::Future(hash_rx);
+
+        let block = block.await.unwrap();
+        ae_fork.push(block);
+
+        let partition_1_size = names.len() / 2;
+
+        let (partition1, partition2) = names.split_at(partition_1_size);
+        trace!("Partition 1: {:?}, Partition 2: {:?}", partition1, partition2);
+
+        self.broadcast_ae_fork(partition2.to_vec(), ae_fork, view, view_is_stable, config_num, None).await;
+
+        // Equivocation logic: Add 1 extra dummy tx to the end of the last block.
+
+        partition1.to_vec()
     }
 
     async fn broadcast_ae_fork(&mut self, names: Vec<String>, mut ae_fork: Vec<CachedBlock>, view: u64, view_is_stable: bool, config_num: u64, perf_entry: Option<u64>) {

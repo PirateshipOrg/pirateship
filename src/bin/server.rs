@@ -1,12 +1,14 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
+#[allow(unused_imports)]
 use log::{debug, error, info, warn};
 use pft::config::{self, Config};
 use pft::consensus;
 use tokio::{runtime, signal};
 use std::process::exit;
 use std::{env, fs, io, path, sync::{atomic::AtomicUsize, Arc, Mutex}};
+#[allow(unused_imports)]
 use pft::consensus::engines::{null_app::NullApp, kvs::KVSAppEngine, scitt::SCITTAppEngine};
 use std::io::Write;
 

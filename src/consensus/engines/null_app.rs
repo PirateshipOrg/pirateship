@@ -34,7 +34,7 @@ impl AppEngine for NullApp {
 
     fn handle_byz_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::client::ProtoByzResponse>> {
         blocks.iter().map(|block| {
-            block.block.tx_list.iter().enumerate().map(|(tx_n, tx)| {
+            block.block.tx_list.iter().enumerate().map(|(tx_n, _tx)| {
                 ProtoByzResponse {
                     block_n: block.block.n,
                     tx_n: tx_n as u64,
@@ -59,7 +59,7 @@ impl AppEngine for NullApp {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
+    fn handle_validation(&mut self, _tx: crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
         Ok(())
     }
 

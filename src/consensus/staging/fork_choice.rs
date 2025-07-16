@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{crypto::{default_hash, hash_proto_block_ser}, proto::consensus::{ProtoFork, ProtoViewChange}, rpc::SenderType, utils::get_parent_hash_in_proto_block_ser};
+use crate::{crypto::{default_hash, hash_proto_block_ser}, proto::consensus::ProtoViewChange, rpc::SenderType, utils::get_parent_hash_in_proto_block_ser};
 
 use super::{view_change::ForkStat, Staging};
 

@@ -1,11 +1,11 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-use std::{collections::HashMap, fs::File, future::Future, io::{self, Cursor, Error}, path, sync::{atomic::AtomicBool, Arc}, time::{Duration, Instant}};
+use std::{collections::HashMap, fs::File, future::Future, io::{self, Cursor, Error}, path, sync::Arc, time::{Duration, Instant}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, KeyStore}, rpc::auth, utils::AtomicStruct};
 use indexmap::IndexMap;
-use tokio::{io::{BufWriter, ReadHalf}, sync::{mpsc, oneshot}};
+use tokio::{io::{BufWriter, ReadHalf}, sync::mpsc};
 use log::{debug, info, trace, warn};
 use rustls::{
     crypto::aws_lc_rs,
@@ -284,7 +284,7 @@ where
     pub async fn handle_auth(
         server: Arc<Self>,
         stream: &mut TlsStream<TcpStream>,
-        addr: core::net::SocketAddr
+        _addr: core::net::SocketAddr
     ) -> io::Result<(SenderType, bool, u64)> {
         let mut sender = SenderType::Anon;
         let mut reply_chan = false;
@@ -477,15 +477,11 @@ where
             let mut stream = match tls_stream {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
-                    //TODO(natacha): Make error printing consistent with rest
-                    // of code
-                     println!("Client TLS connect fail: {:?}", e);
+                    warn!("Client TLS connect fail: {:?}", e);
                     continue;
                 }
-                Err(e) => {
-                    //TODO(natacha): Make error printing consistent with rest
-                    // of code
-                    println!("Client TLS handshake timeout after {} seconds", tls_handshake_timeout_seconds);
+                Err(_) => {
+                    warn!("Client TLS handshake timeout after {} seconds", tls_handshake_timeout_seconds);
                     continue;
                 }
             };

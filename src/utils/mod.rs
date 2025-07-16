@@ -23,6 +23,7 @@ pub mod timer;
 
 
 pub mod channel {
+    #[allow(dead_code)]
     mod channel_tokio {
         pub type Sender<T> = tokio::sync::mpsc::Sender<T>;
         pub type Receiver<T> = tokio::sync::mpsc::Receiver<T>;
@@ -120,6 +121,7 @@ pub mod channel {
 
 
     /// Kanal doesn't seem to have ordered delivery sometimes.
+    #[allow(dead_code)]
     mod channel_kanal {
         pub struct AsyncReceiverWrapper<T>(kanal::AsyncReceiver<T>);
         impl<T> AsyncReceiverWrapper<T> {

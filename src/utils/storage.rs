@@ -1,4 +1,4 @@
-use rocksdb::{DBCompactionStyle, FifoCompactOptions, Options, UniversalCompactOptions, WriteBatchWithTransaction, WriteOptions, DB};
+use rocksdb::{DBCompactionStyle, Options, WriteBatchWithTransaction, WriteOptions, DB};
 
 use crate::config::{RocksDBConfig, StorageConfig};
 use std::{fmt::Debug, io::{Error, ErrorKind}};

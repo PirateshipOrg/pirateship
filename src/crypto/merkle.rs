@@ -1,12 +1,12 @@
 use bytes::BytesMut;
 use prost::Message;
-use rand_chacha::rand_core::le;
 
 use crate::{
     crypto::{default_hash, hash, HashType, Sha},
     proto::consensus::ProtoBlock,
 };
 
+#[allow(unused_imports)]
 use sha2::{Digest, Sha256, Sha512};
 
 #[derive(Clone, Debug)]

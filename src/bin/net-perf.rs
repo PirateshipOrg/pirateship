@@ -50,7 +50,7 @@ fn process_args() -> (Config, usize) {
 }
 
 
-struct ProfilerContext {
+pub struct ProfilerContext {
     pub bytes_completed_bcasts: AtomicUsize,
     pub bytes_received_msgs: AtomicUsize,
     pub key_store: AtomicKeyStore,
@@ -161,6 +161,7 @@ impl ProfilerNode
             let mut last = 0;
             loop {
                 sleep(Duration::from_secs(1)).await;
+                #[allow(unused_assignments)]
                 let mut now = last;
                 if node3.ctx.0.config.net_config.name == "node1" {
                     now = node3.ctx.0.bytes_completed_bcasts.load(Ordering::SeqCst);

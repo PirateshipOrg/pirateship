@@ -6,7 +6,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{join, time::sleep};
 
-use crate::config::{AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, EvilConfig, KVReadWriteUniform, LoopType, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig, RequestConfig};
+use crate::config::{AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, KVReadWriteUniform, LoopType, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig, RequestConfig};
+
+#[cfg(feature = "evil")]
+use crate::config::EvilConfig;
 
 use super::AtomicConfig;
 
@@ -72,6 +75,7 @@ fn test_nodeconfig_serialize() {
         checkpoint_interval_ms: 60000,
     };
 
+    #[cfg(feature = "evil")]
     let evil_config = EvilConfig {
         simulate_byzantine_behavior: true,
         byzantine_start_block: 20000,
@@ -137,7 +141,7 @@ fn test_clientconfig_serialize() {
             duration: 60,
             max_concurrent_requests: 10,
             loop_type: LoopType::Closed,
-            request_config: crate::config::RequestConfig::KVReadWriteUniform(KVReadWriteUniform {
+            request_config: RequestConfig::KVReadWriteUniform(KVReadWriteUniform {
                 num_keys: 1000,
                 val_size: 10000,
                 read_ratio: 0.1,
@@ -229,6 +233,7 @@ async fn test_atomic_config_access() {
         checkpoint_interval_ms: 60000,
     };
 
+    #[cfg(feature = "evil")]
     let evil_config = EvilConfig {
         simulate_byzantine_behavior: true,
         byzantine_start_block: 20000,

@@ -23,6 +23,7 @@ use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
 use block_sequencer::BlockSequencer;
 use client_reply::ClientReplyHandler;
+#[cfg(feature = "extra_2pc")]
 use extra_2pc::TwoPCHandler;
 use fork_receiver::{ForkReceiver, ForkReceiverCommand};
 use log::{debug, info, warn};
@@ -41,7 +42,7 @@ use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntrie
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
 
 pub struct ConsensusServerContext {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     keystore: AtomicKeyStore,
     batch_proposal_tx: Sender<TxWithAckChanTag>,
     fork_receiver_tx: Sender<(ProtoAppendEntries, SenderType)>,
@@ -66,7 +67,7 @@ impl PinnedConsensusServerContext {
         backfill_request_tx: Sender<ProtoBackfillNack>,
     ) -> Self {
         Self(Arc::new(Box::pin(ConsensusServerContext {
-            config, keystore, batch_proposal_tx,
+            _config: config, keystore, batch_proposal_tx,
             fork_receiver_tx, fork_receiver_command_tx,
             vote_receiver_tx, view_change_receiver_tx,
             backfill_request_tx,
@@ -144,8 +145,8 @@ impl ServerContextType for PinnedConsensusServerContext {
 
                         return Ok(RespType::Resp);
                     },
-            crate::proto::rpc::proto_payload::Message::BackfillRequest(proto_back_fill_request) => {},
-            crate::proto::rpc::proto_payload::Message::BackfillResponse(proto_back_fill_response) => {},
+            crate::proto::rpc::proto_payload::Message::BackfillRequest(_proto_back_fill_request) => {},
+            crate::proto::rpc::proto_payload::Message::BackfillResponse(_proto_back_fill_response) => {},
             crate::proto::rpc::proto_payload::Message::BackfillNack(proto_backfill_nack) => {
                         self.backfill_request_tx.send(proto_backfill_nack).await
                             .expect("Channel send error");
@@ -160,12 +161,12 @@ impl ServerContextType for PinnedConsensusServerContext {
 }
 
 pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
-    config: AtomicConfig,
-    keystore: AtomicKeyStore,
+    _config: AtomicConfig,
+    _keystore: AtomicKeyStore,
 
     server: Arc<Server<PinnedConsensusServerContext>>,
     storage: Arc<Mutex<StorageService<RocksDBStorageEngine>>>,
-    crypto: CryptoService,
+    _crypto: CryptoService,
 
 
     /// This will be owned by the task that runs batch_proposer
@@ -200,7 +201,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     pub fn new(config: Config) -> Self {
         let (batch_proposer_tx, batch_proposer_rx) = make_channel(config.rpc_config.channel_depth as usize);
         #[cfg(feature = "policy_validation")]
-        let (validator_tx, validator_rx) = make_channel(config.rpc_config.channel_depth as usize);
+        let (_, validator_rx) = make_channel(config.rpc_config.channel_depth as usize);
         Self::mew(config, batch_proposer_tx, batch_proposer_rx, 
             #[cfg(feature = "policy_validation")]
             validator_rx
@@ -361,12 +362,12 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "extra_2pc")]
         let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
 
-        let mut handles = JoinSet::new();
+        let handles = JoinSet::new();
 
 
         Self {
-            config: config.clone(),
-            keystore: keystore.clone(),
+            _config: config.clone(),
+            _keystore: keystore.clone(),
             server: Arc::new(Server::new_atomic(config.clone(), ctx, keystore.clone())),
             batch_proposer: Arc::new(Mutex::new(batch_proposer)),
             block_sequencer: Arc::new(Mutex::new(block_sequencer)),
@@ -384,7 +385,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             #[cfg(feature = "channel_monitoring")]
             channel_monitor,
 
-            crypto,
+            _crypto: crypto,
             storage: Arc::new(Mutex::new(storage)),
             __sink_handles: handles,
 

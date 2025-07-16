@@ -1,15 +1,15 @@
-use std::{collections::{HashMap, HashSet}, sync::atomic::fence};
+use std::{collections::HashMap, sync::atomic::fence};
 
-use log::{error, info, trace, warn};
+use log::{info, trace, warn};
 use prost::Message as _;
 
 use crate::{
     consensus::{
         block_broadcaster::BlockBroadcasterCommand, block_sequencer::BlockSequencerControlCommand, client_reply::ClientReplyCommand, fork_receiver::ForkReceiverCommand, pacemaker::PacemakerCommand
-    }, crypto::{default_hash, CachedBlock, HashType}, proto::{consensus::{HalfSerializedBlock, ProtoFork, ProtoForkValidation, ProtoQuorumCertificate, ProtoViewChange}, rpc::ProtoPayload}, rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType}, utils::{deserialize_proto_block, get_parent_hash_in_proto_block_ser}
+    }, crypto::{default_hash, HashType}, proto::{consensus::{HalfSerializedBlock, ProtoFork, ProtoForkValidation, ProtoQuorumCertificate, ProtoViewChange}, rpc::ProtoPayload}, rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType}, utils::get_parent_hash_in_proto_block_ser
 };
 
-use super::{CachedBlockWithVotes, Staging};
+use super::Staging;
 
 #[derive(Clone, Debug)]
 pub struct ForkStat {
@@ -173,7 +173,7 @@ impl Staging {
     pub(super) async fn maybe_stabilize_view(&mut self, qc: &ProtoQuorumCertificate) {
         // The new view message must be the VERY LAST block in pending now.
         // The QC present here must on that last block.
-        let last_n = self.pending_blocks.back().as_ref().unwrap().block.block.n;
+        // let last_n = self.pending_blocks.back().as_ref().unwrap().block.block.n;
         // if qc.n < last_n {
         //     info!("Fail 1");
         //     return;

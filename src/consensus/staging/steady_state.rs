@@ -1,19 +1,24 @@
 use std::collections::{HashMap, HashSet};
 use async_recursion::async_recursion;
+#[cfg(feature = "extra_2pc")]
 use bytes::{BufMut as _, BytesMut};
-use futures::{future::try_join_all, FutureExt};
+use futures::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use prost::Message;
-use tokio::{sync::oneshot, task::spawn_local};
+use tokio::sync::oneshot;
 
 use crate::{
-    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
+    consensus::{logserver::LogServerCommand, pacemaker::PacemakerCommand},
+    crypto::CachedBlock,
+    proto::{
         consensus::{
             proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
             ProtoSignatureArrayEntry, ProtoVote,
         },
         rpc::ProtoPayload,
-    }, rpc::{client::PinnedClient, PinnedMessage, SenderType}, utils::StorageAck
+    },
+    rpc::{client::PinnedClient, PinnedMessage, SenderType},
+    utils::StorageAck
 };
 
 use super::{
@@ -27,6 +32,12 @@ use super::{
     CachedBlockWithVotes, Staging,
 };
 
+#[cfg(feature = "extra_2pc")]
+use crate::{
+    consensus::extra_2pc::{EngraftTwoPCFuture, EngraftActionAfterFutureDone, TwoPCCommand},
+    crypto::DIGEST_LENGTH
+};
+
 impl Staging {
     pub(super) fn i_am_leader(&self) -> bool {
         let config = self.config.get();
@@ -34,29 +45,29 @@ impl Staging {
         leader == config.net_config.name
     }
 
-    fn perf_register_block(&self, block: &CachedBlock) {
+    fn perf_register_block(&self, _block: &CachedBlock) {
         #[cfg(feature = "perf")]
-        if let Some(Sig::ProposerSig(_)) = block.block.sig {
+        if let Some(Sig::ProposerSig(_)) = _block.block.sig {
             self.leader_perf_counter_signed
                 .borrow_mut()
-                .register_new_entry(block.block.n);
+                .register_new_entry(_block.block.n);
         } else {
             self.leader_perf_counter_unsigned
                 .borrow_mut()
-                .register_new_entry(block.block.n);
+                .register_new_entry(_block.block.n);
         }
     }
 
-    fn perf_deregister_block(&self, block: &CachedBlock) {
+    fn perf_deregister_block(&self, _block: &CachedBlock) {
         #[cfg(feature = "perf")]
-        if let Some(Sig::ProposerSig(_)) = block.block.sig {
+        if let Some(Sig::ProposerSig(_)) = _block.block.sig {
             self.leader_perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&block.block.n);
+                .deregister_entry(&_block.block.n);
         } else {
             self.leader_perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&block.block.n);
+                .deregister_entry(&_block.block.n);
         }
     }
 
@@ -82,6 +93,7 @@ impl Staging {
     #[cfg(not(feature = "perf"))]
     fn perf_add_event(&self, _block: &CachedBlock, _event: &str) {}
 
+    #[cfg(feature = "perf")]
     fn perf_add_event_from_perf_stats(&self, signed: bool, block_n: u64, event: &str) {
         #[cfg(feature = "perf")]
         if signed {
@@ -519,8 +531,8 @@ impl Staging {
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && i_am_leader
-        let block_view_is_stable = block.block.view_is_stable;
-        let block_view = block.block.view;
+        // let block_view_is_stable = block.block.view_is_stable;
+        // let block_view = block.block.view;
 
         let block_with_votes = CachedBlockWithVotes {
             block,
@@ -1004,6 +1016,7 @@ impl Staging {
         };
 
         // Slow path: 2-hop rule
+        #[allow(unused_mut)]
         let mut new_bci_slow_path = self
             .pending_blocks
             .iter()
@@ -1080,6 +1093,7 @@ impl Staging {
         self.logserver_tx.send(LogServerCommand::Rollback(n)).await.unwrap();
     }
 
+    #[cfg(feature = "extra_2pc")]
     pub(crate) async fn process_2pc_result(&mut self, cmd: EngraftActionAfterFutureDone) -> Result<(), ()> {
         match cmd {
             EngraftActionAfterFutureDone::None => {},

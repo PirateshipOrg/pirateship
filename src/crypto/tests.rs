@@ -1,8 +1,6 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-use std::path;
-
 use prost::Message;
 
 use crate::config::{AtomicConfig, Config};

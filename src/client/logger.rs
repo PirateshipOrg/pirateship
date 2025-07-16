@@ -1,7 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, pin::Pin, sync::Arc, time::{Duration, Instant}};
 
 use log::info;
-use nix::libc::exit;
 
 use crate::utils::{channel::Receiver, timer::ResettableTimer};
 

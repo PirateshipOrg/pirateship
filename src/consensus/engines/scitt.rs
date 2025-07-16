@@ -113,7 +113,7 @@ thread_local! {
 }
 
 pub struct SCITTAppEngine {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     pub last_ci: u64,
     pub last_bci: u64,
     state: SCITTState,
@@ -124,7 +124,7 @@ impl AppEngine for SCITTAppEngine {
 
     fn new(config: AtomicConfig) -> Self {
         Self {
-            config,
+            _config: config,
             last_ci: 0,
             last_bci: 0,
             state: SCITTState {
@@ -160,7 +160,7 @@ impl AppEngine for SCITTAppEngine {
                 };
 
                 for (i, op) in ops.iter().enumerate() {
-                    if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+                    if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
                         if op_type == ProtoTransactionOpType::Write {
                             if op.operands.len() != 2 {
                                 continue;
@@ -281,7 +281,7 @@ impl AppEngine for SCITTAppEngine {
                     if op.operands.len() != 2 {
                         continue;
                     }
-                    if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+                    if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
                         if op_type == ProtoTransactionOpType::Write {
                             let key = TXID {
                                 block_n: proto_block.n,
@@ -343,7 +343,7 @@ impl AppEngine for SCITTAppEngine {
         };
 
         for op in ops {
-            if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+            if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
                 if op_type == ProtoTransactionOpType::Read {
                     if op.operands.len() != 1 {
                         continue;

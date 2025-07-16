@@ -1,12 +1,11 @@
-use std::{io::{BufReader, Error, ErrorKind}, ops::Deref, pin::Pin, sync::{atomic::fence, Arc}};
+use std::{io::{Error, ErrorKind}, ops::Deref, pin::Pin, sync::{atomic::fence, Arc}};
 
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{verify_batch, Signature, SIGNATURE_LENGTH};
-use futures::SinkExt;
-use itertools::min;
-use log::{info, trace, warn};
+use log::{trace, warn};
 use prost::Message;
 use rand::{thread_rng, Rng};
+#[allow(unused_imports)]
 use sha2::{Digest, Sha256, Sha512};
 use tokio::{sync::{mpsc::{channel, Receiver, Sender}, oneshot}, task::JoinSet};
 
@@ -119,6 +118,7 @@ fn verify_qc(keystore: &KeyStore, qc: &ProtoQuorumCertificate, min_len: usize) -
 
 }
 
+#[allow(dead_code)]
 enum CryptoServiceCommand {
     Hash(Vec<u8>, oneshot::Sender<Vec<u8>>),
     Sign(Vec<u8>, oneshot::Sender<[u8; SIGNATURE_LENGTH]>),
@@ -232,7 +232,10 @@ impl CryptoService {
                     macro_rules! perf_event {
                         () => {
                             perf_counter.new_event(&event_order[event_num], &perf_entry);
-                            event_num += 1;
+                            #[allow(unused_assignments)]
+                            {
+                                event_num += 1;
+                            }
                         };
                     }
 

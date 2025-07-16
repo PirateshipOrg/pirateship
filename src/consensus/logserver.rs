@@ -2,9 +2,9 @@ use std::{collections::{BTreeMap, HashMap, VecDeque}, sync::Arc};
 
 use log::{error, info, trace, warn};
 use prost::Message as _;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
-use crate::{config::AtomicConfig, crypto::CachedBlock, proto::{checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint}, consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange}, rpc::{proto_payload::Message, ProtoPayload}}, rpc::{client::PinnedClient, MessageRef, PinnedMessage}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser, StorageServiceConnector}};
+use crate::{config::AtomicConfig, crypto::CachedBlock, proto::{checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint}, consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange}, rpc::{proto_payload::Message, ProtoPayload}}, rpc::{client::PinnedClient, MessageRef}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
 
 
 /// Deletes older blocks in favor of newer ones.
@@ -80,7 +80,7 @@ pub enum LogServerCommand {
 }
 
 pub struct LogServer {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     client: PinnedClient,
     bci: u64,
 
@@ -107,7 +107,7 @@ impl LogServer {
         gc_rx: Receiver<u64>, query_rx: Receiver<LogServerQuery>,
         storage: StorageServiceConnector) -> Self {
         LogServer {
-            config,
+            _config: config,
             client,
             logserver_rx,
             backfill_request_rx,

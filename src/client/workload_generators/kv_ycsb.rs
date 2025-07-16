@@ -1,5 +1,3 @@
-use std::{process::exit, time::Instant};
-
 use log::info;
 use rand::distributions::{Uniform, WeightedIndex};
 use rand_chacha::ChaCha20Rng;
@@ -324,7 +322,6 @@ impl PerWorkerWorkloadGenerator for KVReadWriteYCSBGenerator {
 
         if self.config.load_phase && self.load_phase_cnt >= self.config.num_keys {
             info!("End of Load phase");
-            // exit(0);
             self.config.load_phase = false;
         }
 

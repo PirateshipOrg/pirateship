@@ -3,12 +3,11 @@ use std::time::Instant;
 use std::{io::Error, pin::Pin, sync::Arc, time::Duration};
 
 use std::io::ErrorKind;
-use log::{info, warn};
+use log::warn;
 use prost::Message as _;
 use crate::config::NodeInfo;
 use crate::proto::client::{ProtoClientReply, ProtoCurrentLeader};
 use crate::proto::execution::ProtoTransactionResult;
-use crate::proto::rpc::ProtoPayload;
 use crate::rpc::server::LatencyProfile;
 use crate::rpc::{PinnedMessage, SenderType};
 use crate::utils::channel::{Sender, Receiver};
@@ -17,7 +16,6 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{config::AtomicConfig, utils::timer::ResettableTimer, proto::execution::ProtoTransaction, rpc::server::MsgAckChan};
 
-use super::app::AppCommand;
 use super::client_reply::ClientReplyCommand;
 
 pub type RawBatch = Vec<ProtoTransaction>;
@@ -120,7 +118,7 @@ impl BatchProposer {
         batch_timer_handle.abort();
     }
 
-    fn perf_register_random(&mut self, entry: usize) {
+    fn perf_register_random(&mut self, _entry: usize) {
         #[cfg(not(feature = "perf"))]
         return;
 
@@ -142,21 +140,21 @@ impl BatchProposer {
             if !should_register {
                 return;
             }
-            self.perf_counter.borrow_mut().register_new_entry(entry);
+            self.perf_counter.borrow_mut().register_new_entry(_entry);
 
         }
     }
 
-    fn perf_add_event(&mut self, entry: usize, event: &str) {
+    fn perf_add_event(&mut self, _entry: usize, _event: &str) {
 
         #[cfg(feature = "perf")]
-        self.perf_counter.borrow_mut().new_event(event, &entry);
+        self.perf_counter.borrow_mut().new_event(_event, &_entry);
     }
 
-    fn perf_event_and_deregister_all(&mut self, event: &str) {
+    fn perf_event_and_deregister_all(&mut self, _event: &str) {
         #[cfg(feature = "perf")]
         {
-            self.perf_counter.borrow_mut().new_event_for_all(event);
+            self.perf_counter.borrow_mut().new_event_for_all(_event);
             self.perf_counter.borrow_mut().deregister_all();
         }
     }
@@ -233,8 +231,8 @@ impl BatchProposer {
         Ok(())
     }
 
-    async fn register_reply_malformed(&mut self, ack_chan: MsgAckChanWithTag) {
-        // TODO
+    async fn register_reply_malformed(&mut self, _ack_chan: MsgAckChanWithTag) {
+        todo!()
     }
 
     async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) { // TODO

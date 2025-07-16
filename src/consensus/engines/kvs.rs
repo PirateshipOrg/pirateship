@@ -1,24 +1,26 @@
 // use std::collections::{BTreeMap, HashMap};
 use hashbrown::HashMap;
-use rustls::crypto::hash::Hash;
 use std::fmt::Display;
 
-use log::{error, info, trace, warn};
+use log::{trace, warn};
 use serde::{Serialize, Deserialize};
 
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
-use crate::proto::execution::{
-    ProtoTransaction, ProtoTransactionPhase, ProtoTransactionOp, ProtoTransactionOpType,
-    ProtoTransactionResult, ProtoTransactionOpResult,
+#[allow(unused_imports)]
+use crate::proto::{
+    execution::{
+        ProtoTransaction, ProtoTransactionPhase, ProtoTransactionOp, ProtoTransactionOpType,
+        ProtoTransactionResult, ProtoTransactionOpResult,
+    },
+    consensus::{
+        ProtoBlock, ProtoQuorumCertificate, ProtoForkValidation, ProtoVote, ProtoSignatureArrayEntry,
+        ProtoNameWithSignature, proto_block::Sig, DefferedSignature,
+    }
 };
 
 use crate::proto::client::{ProtoByzResponse,};
 
-use crate::proto::consensus::{
-    ProtoBlock, ProtoQuorumCertificate, ProtoForkValidation, ProtoVote, ProtoSignatureArrayEntry,
-    ProtoNameWithSignature, proto_block::Sig, DefferedSignature,
-};
 
 #[derive(std::fmt:: Debug, Clone, Serialize, Deserialize)]
 pub struct KVSState {
@@ -33,10 +35,10 @@ impl Display for KVSState {
 }
 
 pub struct KVSAppEngine {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     pub last_ci: u64,
     pub last_bci: u64,
-    quit_signal: bool,
+    _quit_signal: bool,
     state: KVSState,
     
 }
@@ -46,10 +48,10 @@ impl AppEngine for KVSAppEngine {
 
     fn new(config: AtomicConfig) -> Self {
         Self {
-            config,
+            _config: config,
             last_ci: 0,
             last_bci: 0,
-            quit_signal: false,
+            _quit_signal: false,
             state: KVSState {
                 ci_state: HashMap::new(),
                 bci_state: HashMap::new(),
@@ -89,7 +91,7 @@ impl AppEngine for KVSAppEngine {
 
                 for op in ops.iter() {
                     
-                    if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+                    if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
                         if op_type == ProtoTransactionOpType::Write {
                             if op.operands.len() != 2 {
                                 continue;
@@ -273,7 +275,7 @@ impl AppEngine for KVSAppEngine {
             let mut block_result: Vec<ProtoByzResponse> = Vec::new(); 
 
             for (tx_n, tx) in proto_block.tx_list.iter().enumerate() {
-                let mut byz_result = ProtoByzResponse {
+                let byz_result = ProtoByzResponse {
                     block_n: proto_block.n,
                     tx_n: tx_n as u64,
                     client_tag: 0,
@@ -290,7 +292,7 @@ impl AppEngine for KVSAppEngine {
                     if op.operands.len() != 2 {
                         continue;
                     }
-                    if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
+                    if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
                         if op_type == ProtoTransactionOpType::Write {
                             let key = &op.operands[0];
                             let val = &op.operands[1];
@@ -365,7 +367,7 @@ impl AppEngine for KVSAppEngine {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
+    fn handle_validation(&mut self, _tx: crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
         Ok(())
     }
 
