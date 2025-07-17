@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod rpc;
 // pub mod execution;
 pub mod proto;
+pub mod peerreview;
 
 pub mod client;
 

@@ -14,7 +14,7 @@ use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats,
 
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
 
-type Sha = Sha512;
+pub type Sha = Sha512;
 
 #[derive(Clone, Debug)]
 pub struct __CachedBlock {

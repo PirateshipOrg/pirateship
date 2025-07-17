@@ -1,6 +1,8 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
+use serde::Deserialize;
+use serde::Serialize;
 use std::{ops::Deref, pin::Pin, sync::Arc};
 
 pub mod auth;
@@ -13,7 +15,7 @@ pub mod server;
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum SenderType {
     Anon,
     Auth(String, u64 /* client_sub_id */),

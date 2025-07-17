@@ -117,7 +117,7 @@ jolteon = ["round_robin_leader", "always_sign", "view_change", "no_pipeline"]
 hotstuff = ["round_robin_leader", "always_sign", "view_change", "no_pipeline", "extra_qc_check"]
 pirateship = ["round_robin_leader", "dynamic_sign", "view_change"]
 
-default = ["pirateship", "app_logger", "storage", "fast_path", "platforms"]
+default = ["signed_raft", "app_logger", "storage", "fast_path", "platforms"]
 # default = ["jolteon", "app_logger", "storage"]
 # default = ["engraft", "app_kvs", "storage", "fast_path", "platforms"]
 
