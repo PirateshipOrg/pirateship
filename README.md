@@ -1,3 +1,15 @@
+# PeerReview branch
+
+This branch implements PeerReview on top of out usual system.
+The plan is to use PeerReview with Signed Raft (for PirateShip comparison)
+or no-sequencer baseline for PSL.
+
+> DO NOT MERGE IT WITH THE MAIN BRANCH!!!!!!
+
+This branch will have significant code changes that will affect common-case PirateShip/PSL performance.
+
+
+
 # PirateShip
 
 This is a prototype implementation of the PirateShip consensus protocol for VM-based TEEs (eg, AMD SEV-SNP and Intel TDX).
