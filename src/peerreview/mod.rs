@@ -1,7 +1,7 @@
-use std::{collections::VecDeque, ops::{Deref, DerefMut}, sync::Arc};
+use std::{collections::{HashMap, VecDeque}, ops::Deref, sync::Arc};
 
 use ed25519_dalek::{Signer, SigningKey, SIGNATURE_LENGTH};
-use futures::SinkExt;
+use log::error;
 use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
@@ -98,6 +98,43 @@ impl PRLogEntry {
             ) }),
             signature: self.__cached_signature.to_vec(),
         }
+    }
+
+    pub fn from_proto(proto_pr_log_entry: ProtoPeerReviewLogEntry) -> Self {
+        let content = match proto_pr_log_entry.content.unwrap().content.unwrap() {
+            proto_peer_review_log_entry_content::Content::Send(proto_pr_log_entry_content_send) => {
+                PRLogEntryContent::Send {
+                    receiver: SenderType::Auth(proto_pr_log_entry_content_send.receiver, 0),
+                    message: proto_pr_log_entry_content_send.message,
+                }
+            }
+            proto_peer_review_log_entry_content::Content::Recv(proto_pr_log_entry_content_recv) => {
+                PRLogEntryContent::Recv {
+                    sender: SenderType::Auth(proto_pr_log_entry_content_recv.sender, 0),
+                    sender_seq_num: proto_pr_log_entry_content_recv.sender_seq_num,
+                    message: proto_pr_log_entry_content_recv.message,
+                }
+            }
+        };
+
+
+        let mut ret = Self {
+            seq_num: proto_pr_log_entry.seq_num,
+            parent_hash: proto_pr_log_entry.parent_hash.try_into().unwrap(),
+            content,
+            __cached_hash: default_hash(),
+            __cached_signature: proto_pr_log_entry.signature.try_into().unwrap(),
+        };
+
+        // This follows the same logic as PRLogEntry::new
+        let mut hasher = Sha::new();
+        hasher.update(&ret.seq_num.to_le_bytes());
+        hasher.update(ret.content.hash());
+        hasher.update(&ret.parent_hash);
+        let __cached_hash = hasher.finalize().to_vec();
+        ret.__cached_hash = __cached_hash;
+
+        ret
     }
 }
 
@@ -272,6 +309,69 @@ impl PRLogBroadcaster {
             self.witness_list.len(),
         ).await;
 
+        Ok(())
+    }
+}
+
+pub struct PRLogReceiver {
+    config: AtomicConfig,
+    logs: HashMap<SenderType, VecDeque<PRLogEntry>>,
+
+    log_entry_rx: Receiver<(SenderType, ProtoPeerReviewLogEntry)>,
+}
+
+impl PRLogReceiver {
+    pub fn new(config: AtomicConfig, log_entry_rx: Receiver<(SenderType, ProtoPeerReviewLogEntry)>) -> Self {
+        Self { config, logs: HashMap::new(), log_entry_rx }
+    }
+
+    pub async fn run(pr_log_receiver: Arc<Mutex<Self>>) -> Result<(), ()> {
+        let mut pr_log_receiver = pr_log_receiver.lock().await;
+
+        loop {
+            pr_log_receiver.worker().await?;
+        }
+    }
+
+    async fn worker(&mut self) -> Result<(), ()> {
+        if let Some((sender_type, proto_pr_log_entry)) = self.log_entry_rx.recv().await {
+            self.handle_log_entry(sender_type, proto_pr_log_entry).await?;
+        } else {
+            return Err(());
+        }
+
+        self.check_log_consistency().await?;
+
+        Ok(())
+    }
+
+    async fn handle_log_entry(&mut self, sender: SenderType, proto_pr_log_entry: ProtoPeerReviewLogEntry) -> Result<(), ()> {  
+        let log_entry = PRLogEntry::from_proto(proto_pr_log_entry);
+
+        let _name = sender.to_name_and_sub_id().0;
+
+        let log_entry_map = self.logs.entry(sender).or_insert(VecDeque::new());
+        let last_n = if log_entry_map.len() > 0 {
+            log_entry_map.back().unwrap().seq_num
+        } else {
+            0
+        };
+        
+        if log_entry.seq_num != last_n + 1 {
+            error!("PR Log Continuity Violation for {}: Expected seq_num {} but got {}", _name, last_n + 1, log_entry.seq_num);
+            return Err(());
+        }
+
+        log_entry_map.push_back(log_entry);
+
+        Ok(())
+    }
+
+    async fn check_log_consistency(&mut self) -> Result<(), ()> {
+        // This is the most important part of the protocol.
+        // Ensure that all the logs received are consistent with the underlying protocol.
+        // TODO: Find all the invariants that must be satisfied.
+        
         Ok(())
     }
 }
