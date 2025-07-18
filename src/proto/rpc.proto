@@ -7,6 +7,7 @@ package proto.rpc;
 import "consensus.proto";
 import "client.proto";
 import "checkpoint.proto";
+import "peerreview.proto";
 
 
 message ProtoPayload {
@@ -22,6 +23,7 @@ message ProtoPayload {
         ////////////////////
 
         proto.checkpoint.ProtoBackfillNack backfill_nack = 7;
+        proto.peerreview.ProtoPeerReviewLogEntry pr_log_entry = 8;
 
     }
 }

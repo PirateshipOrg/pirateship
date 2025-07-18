@@ -1,11 +1,17 @@
 use std::{collections::VecDeque, ops::{Deref, DerefMut}, sync::Arc};
 
 use ed25519_dalek::{Signer, SigningKey, SIGNATURE_LENGTH};
+use futures::SinkExt;
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use tokio::{sync::Mutex, sync::oneshot};
+use crate::{proto::{peerreview::{proto_peer_review_log_entry_content, ProtoPeerReviewLogEntry, ProtoPeerReviewLogEntryContent, ProtoPeerReviewLogEntryContentRecv, ProtoPeerReviewLogEntryContentSend}, rpc::{proto_payload, ProtoPayload}}, rpc::{server::LatencyProfile, MessageRef, PinnedMessage}};
 
-use crate::{config::AtomicConfig, crypto::{default_hash, AtomicKeyStore, FutureHash, HashType, Sha, DIGEST_LENGTH}, rpc::SenderType, utils::channel::{Receiver, Sender}};
+use rand::prelude::*;
+use rand_chacha::ChaCha8Rng;
+
+use crate::{config::{AtomicConfig, ConsensusConfig}, crypto::{default_hash, hash, AtomicKeyStore, FutureHash, HashType, Sha, DIGEST_LENGTH}, rpc::{client::PinnedClient, SenderType}, utils::channel::{Receiver, Sender}};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum PRLogEntryContent {
@@ -42,6 +48,8 @@ impl PRLogEntry {
         hasher.update(&seq_num.to_le_bytes());
         hasher.update(content.hash());
 
+        // ^ Must be done before the parent hash is awaited below. v
+
         let parent_hash = match parent_hash {
             FutureHash::None => panic!("Parent hash cannot be None"),
             FutureHash::Immediate(val) => val,
@@ -69,8 +77,31 @@ impl PRLogEntry {
     pub fn hash(&self) -> HashType {
         return self.__cached_hash.clone();
     }
+
+    pub fn to_proto(&self) -> ProtoPeerReviewLogEntry {
+        ProtoPeerReviewLogEntry {
+            seq_num: self.seq_num,
+            parent_hash: self.parent_hash.to_vec(),
+            content: Some(ProtoPeerReviewLogEntryContent { content: Some(
+                match &self.content {
+                    PRLogEntryContent::Send { receiver, message } => {
+                        proto_peer_review_log_entry_content::Content::Send(
+                            ProtoPeerReviewLogEntryContentSend { receiver: receiver.to_name_and_sub_id().0, message: message.clone() }
+                        )
+                    }
+                    PRLogEntryContent::Recv { sender, sender_seq_num, message } => {
+                        proto_peer_review_log_entry_content::Content::Recv(
+                            ProtoPeerReviewLogEntryContentRecv { sender: sender.to_name_and_sub_id().0, sender_seq_num: *sender_seq_num, message: message.clone() }
+                        )
+                    }
+                }
+            ) }),
+            signature: self.__cached_signature.to_vec(),
+        }
+    }
 }
 
+#[derive(Clone)]
 pub struct CachedPRLogEntry(Arc<Box<PRLogEntry>>);
 
 impl Deref for CachedPRLogEntry {
@@ -80,7 +111,7 @@ impl Deref for CachedPRLogEntry {
     }
 }
 
-type ContentWithSeqNum = (u64, FutureHash, PRLogEntryContent, oneshot::Sender<HashType>);
+type ContentWithSeqNum = (u64, FutureHash, PRLogEntryContent, oneshot::Sender<HashType>, oneshot::Sender<CachedPRLogEntry>);
 
 pub struct PRLogSequencer {
     config: AtomicConfig,
@@ -90,14 +121,14 @@ pub struct PRLogSequencer {
     parent_hash: FutureHash,
 
     log_entry_rx: Receiver<PRLogEntryContent>,
-    log_broadcaster_tx: Sender<CachedPRLogEntry>,
+    log_broadcaster_tx: Sender<oneshot::Receiver<CachedPRLogEntry>>,
 
     content_with_seq_num_tx: async_channel::Sender<ContentWithSeqNum>,
     content_with_seq_num_rx: async_channel::Receiver<ContentWithSeqNum>,
 }
 
 impl PRLogSequencer {
-    pub fn new(config: AtomicConfig, keystore: AtomicKeyStore, log_entry_rx: Receiver<PRLogEntryContent>, log_broadcaster_tx: Sender<CachedPRLogEntry>) -> Self {
+    pub fn new(config: AtomicConfig, keystore: AtomicKeyStore, log_entry_rx: Receiver<PRLogEntryContent>, log_broadcaster_tx: Sender<oneshot::Receiver<CachedPRLogEntry>>) -> Self {
         let (content_with_seq_num_tx, content_with_seq_num_rx) = async_channel::bounded(config.get().rpc_config.channel_depth as usize);
         
         Self {
@@ -118,7 +149,7 @@ impl PRLogSequencer {
             let content_with_seq_num_rx = pr_log_sequencer.content_with_seq_num_rx.clone();
             let log_broadcaster_tx = pr_log_sequencer.log_broadcaster_tx.clone();
 
-            tokio::spawn(Self::crypto_worker(content_with_seq_num_rx, log_broadcaster_tx, signing_key.clone()));
+            tokio::spawn(Self::crypto_worker(content_with_seq_num_rx, signing_key.clone()));
         }
 
         loop {
@@ -139,21 +170,108 @@ impl PRLogSequencer {
         self.seq_num += 1;
         let parent_hash = self.parent_hash.take();
         let (hash_tx, hash_rx) = oneshot::channel();
-        let content_with_seq_num = (self.seq_num, parent_hash, log_entry_content, hash_tx);
+        let (block_tx, block_rx) = oneshot::channel();
+        let content_with_seq_num = (self.seq_num, parent_hash, log_entry_content, hash_tx, block_tx);
         self.content_with_seq_num_tx.send(content_with_seq_num).await.unwrap();
         self.parent_hash = FutureHash::Future(hash_rx);
+        self.log_broadcaster_tx.send(block_rx).await.unwrap();
         Ok(())
     }
 
-    async fn crypto_worker(content_with_seq_num_rx: async_channel::Receiver<ContentWithSeqNum>, log_broadcaster_tx: Sender<CachedPRLogEntry>, signing_key: SigningKey) {
-        while let Ok((seq_num, parent_hash, content, hash_tx)) = content_with_seq_num_rx.recv().await {
+    /// These crypto workers are isolated from the crypto workers for the main protocol.
+    /// They only process PeerReview Log Entries.
+    /// But the logic is the same.
+    async fn crypto_worker(content_with_seq_num_rx: async_channel::Receiver<ContentWithSeqNum>, signing_key: SigningKey) {
+        while let Ok((seq_num, parent_hash, content, hash_tx, block_tx)) = content_with_seq_num_rx.recv().await {
             let log_entry = PRLogEntry::new(seq_num, parent_hash, content, &signing_key).await;
             let log_entry_hash = log_entry.hash();
-            hash_tx.send(log_entry_hash).unwrap();
-            log_broadcaster_tx.send(CachedPRLogEntry(Arc::new(Box::new(log_entry)))).await.unwrap();
+            let _ = hash_tx.send(log_entry_hash);
+            let _ = block_tx.send(CachedPRLogEntry(Arc::new(Box::new(log_entry))));
         }
     }
 }
 
 
+impl ConsensusConfig {
+    /// Deterministic pseudo-random way to generate the witness list:
+    /// 1. Remove the name from the node_list
+    /// 2. Sort the rest of the names.
+    /// 3. Seed the random number generator with the name.
+    /// 4. Sample (rsafe + 1) names from all names.
+    /// rsafe + 1 = N - 2 * u
+    pub fn get_witness_list(&self, name: &String) -> Vec<String> {
+        let seed = hash(name.as_bytes());
+        
+        let mut rng = ChaCha8Rng::from_seed(seed.try_into().unwrap());
+        let mut witness_list = self.node_list.clone();
+        witness_list.retain(|x| x != name);
+        witness_list.sort();
 
+        let witness_count = self.node_list.len() - 2 * self.liveness_u as usize;
+
+        witness_list.iter()
+            .choose_multiple(&mut rng, witness_count)
+            .into_iter()
+            .map(|x| x.clone())
+            .collect()
+    }
+}
+
+pub struct PRLogBroadcaster {
+    config: AtomicConfig,
+    client: PinnedClient,
+    witness_list: Vec<String>,
+
+    log_broadcaster_rx: Receiver<oneshot::Receiver<CachedPRLogEntry>>,
+}
+
+impl PRLogBroadcaster {
+    pub fn new(config: AtomicConfig, client: PinnedClient, log_broadcaster_rx: Receiver<oneshot::Receiver<CachedPRLogEntry>>) -> Self {
+        let my_name = &config.get().net_config.name;
+        let witness_list = config.get().consensus_config.get_witness_list(my_name);
+        Self { config, client, witness_list, log_broadcaster_rx }
+    }
+
+    pub async fn run(pr_log_broadcaster: Arc<Mutex<Self>>) -> Result<(), ()> {
+        let mut pr_log_broadcaster = pr_log_broadcaster.lock().await;
+
+        loop {
+            pr_log_broadcaster.worker().await?;
+        }
+    }
+
+    async fn worker(&mut self) -> Result<(), ()> {
+        if let Some(log_entry) = self.log_broadcaster_rx.recv().await {
+            self.handle_log_entry(log_entry).await?;
+        } else {
+            return Err(());
+        }
+
+        Ok(())
+    }
+
+    async fn handle_log_entry(&mut self, log_entry: oneshot::Receiver<CachedPRLogEntry>) -> Result<(), ()> {
+        let log_entry = log_entry.await.map_err(|_| ())?;
+
+        let log_entry_proto = log_entry.to_proto();
+        let payload = ProtoPayload {
+            message: Some(proto_payload::Message::PrLogEntry(log_entry_proto))
+        };
+
+        let buf = payload.encode_to_vec();
+        let sz = buf.len();
+
+        let sender_type = SenderType::Anon;
+        let message = PinnedMessage::from(buf, sz, sender_type);
+
+        let _ = PinnedClient::broadcast(
+            &self.client,
+            &self.witness_list,
+            &message,
+            &mut LatencyProfile::new(),
+            self.witness_list.len(),
+        ).await;
+
+        Ok(())
+    }
+}

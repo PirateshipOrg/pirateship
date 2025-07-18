@@ -14,6 +14,7 @@ fn main() -> Result<()> {
             "src/proto/rpc.proto",
             "src/proto/checkpoint.proto",
             "src/proto/execution.proto",
+            "src/proto/peerreview.proto",
         ],
         &["src/proto"],
     )?;

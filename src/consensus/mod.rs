@@ -143,6 +143,10 @@ impl ServerContextType for PinnedConsensusServerContext {
                             .expect("Channel send error");
                         return Ok(RespType::NoResp);
             },
+            crate::proto::rpc::proto_payload::Message::PrLogEntry(proto_pr_log_entry) => {
+                // TODO: Handover the log entry to PR log storage.
+                unimplemented!()
+            }
         }
 
 
