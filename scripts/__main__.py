@@ -22,7 +22,7 @@ import tqdm
 from crypto import *
 from app_experiments import AppExperiment
 from ssh_utils import *
-from deployment import Deployment
+from deployment import Deployment, AWSDeployment
 from experiments import Experiment
 from autobahn_experiments import AutobahnExperiment
 from results import *
@@ -116,7 +116,16 @@ def parse_config(path, workdir=None, existing_experiments=None):
         curr_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
         workdir = os.path.join(toml_dict["workdir"], curr_time)
 
-    deployment = Deployment(toml_dict["deployment_config"], workdir)
+    deployment_klass = Deployment
+    if "provider" in toml_dict["deployment_config"]:
+        if toml_dict["deployment_config"]["provider"] == "aws":
+            deployment_klass = AWSDeployment
+        elif toml_dict["deployment_config"]["provider"] == "azure":
+            deployment_klass = Deployment
+        else:
+            raise ValueError(f"Unknown provider: {toml_dict['deployment_config']['provider']}. Valid providers are: aws, azure")
+
+    deployment = deployment_klass(toml_dict["deployment_config"], workdir)
 
     base_node_config = toml_dict["node_config"]
     base_client_config = toml_dict["client_config"]

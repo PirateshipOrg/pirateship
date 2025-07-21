@@ -147,7 +147,7 @@ class Deployment:
         ])
 
 
-    def deploy(self):
+    def deploy(self, tf_dir=None):
         run_local([
             f"mkdir -p {self.workdir}",
             f"mkdir -p {self.workdir}/deployment",
@@ -163,12 +163,15 @@ class Deployment:
         # Terraform deploy
 
         # Find the azure-tf directory relative to where the script is being called from
-        found_path = self.find_azure_tf_dir()
+        if tf_dir is None:
+            found_path = self.find_azure_tf_dir()
+        else:
+            found_path = tf_dir
 
         if found_path is None:
-            raise FileNotFoundError("Azure Terraform directory not found")
+            raise FileNotFoundError("Terraform directory not found")
         else:
-            print(f"Found Azure Terraform directory at {found_path}")
+            print(f"Found Terraform directory at {found_path}")
 
         # There must exist a var-file in azure-tf/setups for the deployment mode
         var_file = os.path.join(found_path, "setups", f"{self.mode}.tfvars")
@@ -194,11 +197,13 @@ class Deployment:
             f"terraform -chdir={found_path} apply -no-color -auto-approve -state={tfstate_path} {plan_path} > {tf_output_dir}/apply.log 2>&1",
         ])
 
-        # Populate nodelist
-        self.populate_nodelist()
-
         # Store the SSH key
         self.get_ssh_key()
+
+        # It is important to get the SSH key first.
+
+        # Populate nodelist
+        self.populate_nodelist()
 
         # Install dev dependencies on dev VM
         self.prepare_dev_vm()
@@ -314,7 +319,8 @@ class Deployment:
         for name, info in self.raw_config["node_list"].items():
             public_ip = info["public_ip"]
             private_ip = info["private_ip"]
-            is_client = name.startswith("client")
+            # is_client = name.startswith("client")
+            is_client = "client" in name
             dev_vm = False
             if is_client and not(first_client):
                 is_coordinator = True
@@ -486,4 +492,169 @@ echo "Done {job_file}" >> status.txt
 
         if wait_till_end:
             self.wait_till_end(len(cmds))
+
+
+class AWSDeployment(Deployment):
+    def __init__(self, config, workdir):
+        super().__init__(config, workdir)
+
+    def find_aws_tf_dir(self):
+        search_paths = [
+            os.path.join("deployment", "aws-tf"),
+            os.path.join("scripts_v2", "deployment", "aws-tf"),
+        ]
+
+        found_path = None
+        for path in search_paths:
+            if os.path.exists(path):
+                found_path = os.path.abspath(path)
+                break
+
+        if found_path is None:
+            raise FileNotFoundError("AWS Terraform directory not found")
+        else:
+            print(f"Found AWS Terraform directory at {found_path}")
+
+        return found_path
+        
+    def populate_raw_node_list_from_terraform(self):
+        found_path = self.find_aws_tf_dir()
+        if found_path is None:
+            raise FileNotFoundError("AWS Terraform directory not found")
+        else:
+            print(f"Found AWS Terraform directory at {found_path}")
+        
+        tf_output_dir = os.path.abspath(os.path.join(self.workdir, "deployment"))
+
+        tfstate_path = os.path.join(tf_output_dir, "terraform.tfstate")
+
+        machine_list = run_local([
+            f"terraform output -state={tfstate_path} --json machine_list"
+        ])[0]
+
+        machine_list = json.loads(machine_list)
+
+        # The format is: [[name, private_ip, public_ip]]
+
+        node_list = {}
+        for name, private_ip, public_ip in machine_list:
+            
+            if "tdx" in name:
+                tee_type = "tdx"
+            elif "sev" in name:
+                tee_type = "sev"
+            else:
+                tee_type = "nontee"
+            
+            if "loc" in name:
+                # Find the _locX_ part
+                region_id = int(re.findall(r"loc(\d+)", name)[0])
+            else:
+                region_id = 0
+
+            node_list[name] = {
+                "private_ip": private_ip,
+                "public_ip": public_ip,
+                "tee_type": tee_type,
+                "region_id": region_id
+            }
+
+        self.raw_config["node_list"] = node_list
+
+        pprint(node_list)
+
+        # Terraform returns early while the init script is still running in the VM.
+        # Finishing is demarcated by the presence of the file /home/psladmin/ready.txt in the VMs.
+        # Wait for the file to be present in the VMs.
+        self.wait_till_all_ready()
+        # In the deploy order, this needs to be called before prepare_dev_vm(), so this is the only place to inject this call.
+
+
+
+    def wait_till_all_ready(self, init_timeout=60):
+        print("Waiting for all VMs to be ready...")
+        print("Initial sleep for", init_timeout, "seconds")
+        sleep(init_timeout)
+
+        total_count = 0
+
+        while total_count < len(self.raw_config["node_list"]):
+            total_count = 0
+            for node, info in self.raw_config["node_list"].items():
+                public_ip = info["public_ip"]
+                try:
+                    res = run_remote_public_ip([
+                        f"cat /home/{self.ssh_user}/ready.txt 2>/dev/null"
+                    ], self.ssh_user, self.ssh_key, public_ip, hide=False, timeout=5)
+                    print("Output from", node, ":", res)
+                    if res[0].strip() == "VM Ready":
+                        total_count += 1
+                except Exception as e:
+                    print(f"Error while waiting for {node} to be ready: {e}")
+                    continue
+            print("Total VMs ready:", total_count)
+
+        print("All VMs ready")
+
+
+
+    def deploy(self, _tf_dir=None):
+        found_path = self.find_aws_tf_dir()
+        if found_path is None:
+            raise FileNotFoundError("AWS Terraform directory not found")
+        else:
+            print(f"Found AWS Terraform directory at {found_path}")
+
+        super().deploy(tf_dir=found_path)
+
+        
+
+    def teardown(self):
+        if self.mode == "manual":
+            return
+        
+        found_path = self.find_aws_tf_dir()
+        if found_path is None:
+            raise FileNotFoundError("AWS Terraform directory not found")
+        else:
+            print(f"Found AWS Terraform directory at {found_path}")
+
+        tf_output_dir = os.path.abspath(os.path.join(self.workdir, "deployment"))
+        tfstate_path = os.path.join(tf_output_dir, "terraform.tfstate")
+
+
+        while True:
+            try:
+                run_local([
+                    f"terraform -chdir={found_path} apply -destroy -no-color -auto-approve -state={tfstate_path}",
+                ], hide=False)
+                break
+            except Exception as e:
+                print("Error while destroying VMs. Retrying...")
+                print(e)
+
+    def get_all_node_vms(self):
+        # Node VMs are named sevpool, tdxpool etc.
+        # Logic: Find nodes that are not client or storage
+        return list(set(self.nodelist) - set(self.get_all_client_vms()) - set(self.get_all_storage_vms()))
+    
+    def get_all_client_vms(self):
+        return [
+            vm for vm in self.nodelist if "client" in vm.name
+        ]
+    
+    def get_all_storage_vms(self):
+        return [
+            vm for vm in self.nodelist if "storage" in vm.name
+        ]
+    
+    def get_all_client_vms_in_region(self, loc: int):
+        return [
+            vm for vm in self.get_all_client_vms() if vm.region_id == loc
+        ]
+    
+    def get_nodes_with_tee(self, tee):
+        return [
+            vm for vm in self.get_all_node_vms() if tee in vm.tee_type
+        ]
             
