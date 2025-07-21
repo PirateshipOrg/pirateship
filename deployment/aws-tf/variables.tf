@@ -29,6 +29,12 @@ variable "clientpool_count" {
   default = 1
 }
 
+variable "username" {
+  type = string
+  default = "pftadmin" # This is kept for backward compatibility. AWS doesn't let you change the username from terraform.
+  # Username will be changed in the init.sh script to psladmin.
+}
+
 locals {
   project_name = random_pet.rg_name.id
   vpc_name = "${local.project_name}-vpc"
