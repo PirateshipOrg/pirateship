@@ -71,6 +71,10 @@
             {
               "protocol": "TCP",
               "port": "[parameters('port')]"
+            },
+            {
+              "protocol": "TCP",
+              "port": "[add(int(parameters('port')), 1000)]"
             }
           ],
           "type": "Public"
@@ -101,6 +105,10 @@
                 {
                   "protocol": "TCP",
                   "port": "22"
+                },
+                {
+                  "protocol": "TCP",
+                  "port": "[add(int(parameters('port')), 1000)]"
                 }
               ],
               "environmentVariables": [

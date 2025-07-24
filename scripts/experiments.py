@@ -237,6 +237,10 @@ class PirateShipExperiment(BaseExperiment):
         else:
             client_vms = deployment.get_all_client_vms_in_region(self.client_region)
 
+
+        self.num_clients_per_vm = [self.num_clients // len(client_vms) for _ in range(len(client_vms))]
+        self.num_clients_per_vm[-1] += (self.num_clients - sum(self.num_clients_per_vm))
+
         crypto_info = self.gen_crypto(config_dir, node_list_for_crypto, len(client_vms))
 
 
@@ -261,9 +265,6 @@ class PirateShipExperiment(BaseExperiment):
             with open(os.path.join(config_dir, f"{k}_config.json"), "w") as f:
                 json.dump(v, f, indent=4)
 
-        num_clients_per_vm = [self.num_clients // len(client_vms) for _ in range(len(client_vms))]
-        num_clients_per_vm[-1] += (self.num_clients - sum(num_clients_per_vm))
-
         for client_num in range(len(client_vms)):
             config = deepcopy(self.base_client_config)
             client = "client" + str(client_num + 1)
@@ -276,7 +277,7 @@ class PirateShipExperiment(BaseExperiment):
             config["net_config"]["tls_root_ca_cert_path"] = tls_root_ca_cert_path
             config["rpc_config"] = {"signing_priv_key_path": signing_priv_key_path}
 
-            config["workload_config"]["num_clients"] = num_clients_per_vm[client_num]
+            config["workload_config"]["num_clients"] = self.num_clients_per_vm[client_num]
             config["workload_config"]["duration"] = self.duration
 
             self.binary_mapping[client_vms[client_num]].append(client)

@@ -6,6 +6,8 @@ services:
       - "4001:4001"
     volumes:
       - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
     entrypoint: ["/usr/local/bin/${TARGET}",  "/configs/node1_config_docker.json"]
     networks:
       cluster:
@@ -18,6 +20,8 @@ services:
       - "4002:4002"
     volumes:
       - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
     entrypoint: ["/usr/local/bin/${TARGET}", "/configs/node2_config_docker.json"]
     networks:
       cluster:
@@ -30,6 +34,8 @@ services:
       - "4003:4003"
     volumes:
       - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
     entrypoint: ["/usr/local/bin/${TARGET}", "/configs/node3_config_docker.json"]
     networks:
       cluster:
@@ -42,6 +48,8 @@ services:
       - "4004:4004"
     volumes:
       - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
     entrypoint: ["/usr/local/bin/${TARGET}",  "/configs/node4_config_docker.json"]
     networks:
       cluster:

@@ -2,8 +2,10 @@
 import collections
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import os
 import pickle
+from statistics import mean
 from typing import Callable, Dict, List, OrderedDict, Tuple
 
 from experiments import BaseExperiment
@@ -592,7 +594,7 @@ class Result:
                     axes[ycoord, xcoord].set_ylim(ylim)
 
 
-    def tput_latency_sweep_plot(self, plot_dict: Dict[str, List[Stats]], output: str | None):
+    def tput_latency_sweep_plot(self, plot_dict: Dict[str, List[Stats]], output: str | None, logscale: bool = False, xlabel: str = "Throughput (k req/s)", ylabel: str = "Latency (ms)") -> None:
         # Find how many subfigures we need.
 
         bounding_boxes = {
@@ -758,14 +760,17 @@ class Result:
                     #         axes.annotate(labels[i], (tputs[i], latencies[i]), textcoords="offset points", xytext=(0,10), ha='center', fontsize=50)
 
 
-                plt.xlabel("Throughput (k req/s)", fontsize=70)
-                plt.ylabel("Latency (ms)", fontsize=70)
+                plt.xlabel(xlabel, fontsize=70)
+                plt.ylabel(ylabel, fontsize=70)
 
                 y_range_total = max([v[3] for v in bounding_boxes.values()]) - min([v[2] for v in bounding_boxes.values()])
                 # if y_range_total > 200:
                 # plt.yscale("log")
                 # plt.ylim((0, 125))
                 # plt.xlim((50, 550))
+                if logscale:
+                    plt.yscale("log")
+
                 plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.4), ncol=legends_ncols, fontsize=70)
                 plt.xticks(fontsize=70)
                 plt.yticks(fontsize=70)
@@ -1190,3 +1195,193 @@ class Result:
 
     def output(self):
         self.plotter_func()
+
+    # SCITT
+
+    def tput_latency_sweep_locust(self):
+        '''
+        ***** Mimic tput_latency_sweep but using locust results *****
+
+        Considers each sub-experiment in a group as a separate data point on a line graph
+        and plots in the order of the experiment seq num.
+        Each group is a separate line on the graph and len(legends) == len(experiment_groups)
+        This expects Locust json output format.
+        '''
+
+        # Parse args
+        ramp_up = self.kwargs.get('ramp_up', 0)
+        ramp_down = self.kwargs.get('ramp_down', 0)
+        legends = self.kwargs.get('legends', {})
+        force_parse = self.kwargs.get('force_parse', False)
+
+        # Try retreive plot dict from cache
+        try:
+            if force_parse:
+                raise Exception("Force parse")
+
+            with open(os.path.join(self.workdir, "plot_dict.pkl"), "rb") as f:
+                plot_dict = pickle.load(f)
+        except:
+            plot_dict = self.tput_latency_sweep_parse_locust(ramp_up, ramp_down, legends)
+
+        # Save plot dict
+        with open(os.path.join(self.workdir, "plot_dict.pkl"), "wb") as f:
+            pickle.dump(plot_dict, f)
+        # Print a summary of the results
+        with open(os.path.join(self.workdir, "summary.txt"), "w") as f:
+            for legend, stats in plot_dict.items():
+                f.write(f"{legend}\n")
+                for stat in stats:
+                    f.write(f"=============Num Nodes: {stat.num_nodes}, Num Clients: {stat.num_clients}================\n")
+                    f.write(f"Mean Tput: {stat.mean_tput} claims/s, Mean Latency: {stat.mean_latency} ms\n")
+                    f.write(f"Median Latency: {stat.median_latency} ms, 99th Percentile Latency: {stat.p99_latency} ms\n")
+                    f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
+                    f.write(f"Stdev Tput: {stat.stdev_tput} claims/s, Stdev Latency: {stat.stdev_latency} ms\n")
+                    f.write("==================================\n")
+
+        output = self.kwargs.get('output', None)
+        self.tput_latency_sweep_plot(plot_dict, output, xlabel="Throughput (claims/s)", ylabel="Latency (ms)", logscale=True)
+
+    def tput_latency_sweep_parse_locust(self, ramp_up, ramp_down, legends) -> Dict[str, List[Stats]]:
+        plot_dict = {}
+
+        # Which indices do I skip?
+        skip_indices = self.kwargs.get('skip_indices', [])
+
+        # Find parsing log files for each group
+        for group_name, experiments in self.experiment_groups.items():
+            print("========", group_name, "========")
+            experiments.sort(key=lambda x: x.seq_num)
+            crash_legend = None
+            byz_legend = None
+            legend = legends.get(group_name, None)
+            if legend is None:
+                print("\x1b[31;1mNo legend found for", group_name, ". Skipping...\x1b[0m")
+                continue
+
+            final_stats = []
+
+            for idx, experiment in enumerate(experiments):
+                if idx in skip_indices:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "for crash commit\x1b[0m")
+                    continue
+                stats = self.process_locust_experiment(experiment, ramp_up, ramp_down)
+                if stats is not None:
+                    final_stats.append(stats)
+                else:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "for crash commit\x1b[0m")
+
+                plot_dict[legend] = final_stats
+
+        pprint(plot_dict)
+        return plot_dict
+
+
+    def parse_locust_client_logs(self, log_dir, logs, duration, ramp_up, ramp_down):
+        latencies = {}
+        tput = {}
+        for log_name in logs:
+            fname = os.path.join(log_dir, log_name)
+            try:
+                with open(fname, "r") as f:
+                    result = json.load(f)[0]
+                    num_reqs_per_sec = result.get("num_reqs_per_sec", {})
+                    if len(num_reqs_per_sec) == 0:
+                        print(f"\x1b[31;1mNo requests per second data found in {fname}. Skipping...\x1b[0m")
+                        continue
+                    for key, value in num_reqs_per_sec.items():
+                        key = int(key)
+                        if key not in tput:
+                            tput[key] = 0
+                        tput[key] += int(value)
+                    reponse_times = result.get("response_times", {})
+                    if len(reponse_times) == 0:
+                        print(f"\x1b[31;1mNo response times data found in {fname}. Skipping...\x1b[0m")
+                        continue
+                    for key, value in reponse_times.items():
+                        key = float(key)
+                        if key not in latencies:
+                            latencies[key] = 0
+                        latencies[key] += int(value)
+                    if result.get("num_fails_per_sec" ,{}) != {}:
+                        print(f"\x1b[31;1mFound failures in {fname}. Skipping...\x1b[0m")
+            except Exception as e:
+                print(f"\x1b[31;1mError reading {fname}. Skipping...\x1b[0m")
+                print(f"\x1b[31;1mError details: {e}\x1b[0m")
+                pass
+        start = min(tput.keys())
+        end = max(tput.keys())
+        start_time = start + ramp_up
+        end_time = end + duration - ramp_down
+
+        for key in list(tput.keys()):
+            if key < start_time or key > end_time:
+                del tput[key]
+        tput = [tput[ts] for ts in sorted(tput.keys())]
+
+        latencies = [latency for latency in latencies for _ in range(latencies[latency])]
+
+        return tput, latencies
+
+    def process_locust_experiment(self, experiment, ramp_up, ramp_down, tput_scale=1000.0, latency_scale=1000.0) -> Stats | None:
+        tputs = []
+        latencies = []
+        duration = experiment.duration
+        for repeat_num in range(experiment.repeats):
+            log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
+            # Find the first node log file and all client log files in log_dir
+            # node_log_files = list(sorted([f for f in os.listdir(log_dir) if f.startswith("node") and f.endswith(".log")]))
+            client_log_files = [f for f in os.listdir(log_dir) if f.startswith("client") and f.endswith(".log")]
+
+            # self.parse_node_logs(log_dir, node_log_files, duration, ramp_up, ramp_down, tputs, tputs_unbatched, byz=byz)
+            t, l = self.parse_locust_client_logs(log_dir, client_log_files, duration, ramp_up, ramp_down)
+            tputs.extend(t)
+            latencies.extend(l)
+
+        print(len(tputs), len(latencies))
+        if len(latencies) == 0:
+            return None
+        latency_prob_dist = np.array(latencies)
+        latency_prob_dist.sort()
+        try:
+            stdev_tput = np.std(tputs)
+        except:
+            stdev_tput = 0
+        
+        try:
+            stdev_latency = np.std(latencies)
+        except:
+            stdev_latency = 0
+
+        mean_latency = np.mean(latencies)
+
+        try:
+            median_latency = np.median(latencies)
+            p25_latency=np.percentile(latencies, 25),
+            p75_latency=np.percentile(latencies, 75),
+            p99_latency=np.percentile(latencies, 99),
+        except:
+            median_latency = mean_latency
+            p25_latency = mean_latency
+            p75_latency = mean_latency
+            p99_latency = mean_latency
+
+        ret = Stats(
+            num_nodes=experiment.num_nodes,
+            num_clients=experiment.num_clients,
+            mean_tput=np.mean(tputs),
+            stdev_tput=stdev_tput,
+            mean_tput_unbatched=0,
+            stdev_tput_unbatched=0,
+            latency_prob_dist=latency_prob_dist,
+            mean_latency=mean_latency,
+            median_latency=median_latency,
+            p25_latency=p25_latency,
+            p75_latency=p75_latency,
+            p99_latency=p99_latency,
+            max_latency=np.max(latencies),
+            min_latency=np.min(latencies),
+            stdev_latency=stdev_latency
+        )
+
+        return ret

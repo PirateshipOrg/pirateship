@@ -26,6 +26,7 @@ from deployment import Deployment
 from deployment_aci import AciDeployment
 from experiments import BaseExperiment, PirateShipExperiment
 from autobahn_experiments import AutobahnExperiment
+from scitt_experiments import ScittExperiment
 from ccf_experiments import CCFExperiment
 from results import *
 import pickle
@@ -145,6 +146,8 @@ def parse_config(path, workdir=None, existing_experiments=None):
             klass = AppExperiment
         elif experiment_type == "autobahn":
             klass = AutobahnExperiment
+        elif experiment_type == "scitt":
+            klass = ScittExperiment
         elif experiment_type == "ccf":
             klass = CCFExperiment
         project_home = toml_dict["project_home"]
@@ -400,6 +403,7 @@ def deploy(config, workdir):
     deployment, _, _ = parse_config(config, workdir)
     pprint(deployment)
     deployment.deploy()
+    print("Deployment done. Working directory:", deployment.workdir)
 
 
 @main.command()

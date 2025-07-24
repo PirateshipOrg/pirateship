@@ -53,7 +53,12 @@ RUN apt-get update && apt-get install -y \
     curl -LO https://apache.jfrog.io/artifactory/arrow/ubuntu/apache-arrow-apt-source-latest-$(lsb_release -cs).deb && \
     dpkg -i apache-arrow-apt-source-latest-$(lsb_release -cs).deb && \
     apt update && \
-    apt install -y libarrow-dev libparquet-dev
+    apt install -y libarrow-dev libparquet-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    rm -rf /usr/share/doc /usr/share/man /usr/share/info /usr/share/lintian /usr/share/linda && \
+    rm -rf /usr/share/locale/*
+
 
 RUN curl -L "https://github.com/microsoft/CCF/releases/download/ccf-${CCF_VERSION}/ccf_${CCF_PLATFORM}_devel_${CCF_VERSION}_x86_64.rpm" -o ccf.rpm && \
     alien --to-deb ccf.rpm && \
@@ -80,8 +85,9 @@ RUN git clone https://github.com/scottchiefbaker/dool /opt/dool && \
     git checkout v1.3.4 && \
     make install
 
+# DISABLED: we are not using this atm and it adds more than 1GB to the image size
 # Install Azure CLI
-RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+# RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 
 # Create a new user
 RUN useradd -ms /bin/bash ${USER}
@@ -112,10 +118,12 @@ EXPOSE 22
 ## Export Ports For Nodes. TODO(natacha): this is a hack. Currently, opening 50 ports and
 ## assuming that is enough. 3000 is also currently hardcoded. Will need to fix this. 
 EXPOSE 3000-3050
+EXPOSE 4000-4050
 
+# DISABLED: same as with azure-cli. we actually install rust in the dev container afterwards
 # Get Rust
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+# RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 # Place Rust in PATH
-ENV PATH = "/home/${USER}/.cargo/bin:${PATH}"
+# ENV PATH = "/home/${USER}/.cargo/bin:${PATH}"
 
 CMD ["/usr/sbin/sshd", "-D"]

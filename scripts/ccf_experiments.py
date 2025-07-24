@@ -19,11 +19,7 @@ from pyscitt import crypto
 from cryptography.hazmat.primitives import hashes
 
 
-DEFAULT_CA_NAME = "CCF"
-CCF_VERSION = "ccf-6.0.5"
 PLATFORM = "virtual" # "virtual", "snp"
-NUM_CLIENTS = 100
-RUNTIME = "60s"
 SPAWN_RATE = 5
 CUSTOM_EKU = "1.3.6.1.5.5.7.3.36"
 KEY_TYPE = "ec"
@@ -152,7 +148,7 @@ class CCFExperiment(BaseExperiment):
         ])
         claim_payload = {"claim": "This is a test claim"}
         json_payload = json.dumps(claim_payload).encode('utf-8')
-        for c in range(NUM_CLIENTS):
+        for c in range(self.num_clients):
             key = identity.private_key
             signer = crypto.Signer(
                 key, issuer=issuer, x5c=identity.x5c
@@ -195,16 +191,19 @@ class CCFExperiment(BaseExperiment):
         self.binary_mapping = defaultdict(list)
         self.getRequestHosts = []
 
-        self.leader_addr = None
+        self.leader_listen_addr = None
         for node_num in range(1, self.num_nodes + 1):
             port = deployment.node_port_base + node_num
-            node_port = deployment.node_port_base + node_num + self.num_nodes
+            node_port = deployment.node_port_base + node_num + 1000
             _vm = vms[rr_cnt % len(vms)]
-            listen_addr = f"{_vm.private_ip}:{port}"
-            node_to_node_addr = f"{_vm.private_ip}:{node_port}"
-            if self.leader_addr is None:
+            listen_addr_public = f"{_vm.private_ip}:{port}"
+            node_to_node_addr_public = f"{_vm.private_ip}:{node_port}"
+            listen_addr = f"0.0.0.0:{port}"
+            node_to_node_addr = f"0.0.0.0:{node_port}"
+            if self.leader_listen_addr is None:
                 name = "leader"
-                self.leader_addr = listen_addr
+                self.leader_listen_addr = listen_addr_public
+                leader_node_to_node_addr_public = node_to_node_addr_public
                 self.leader = _vm
             else:
                 name = f"node{node_num}"
@@ -232,11 +231,13 @@ class CCFExperiment(BaseExperiment):
                 },
                 "network": {
                     "node_to_node_interface": {
-                        "bind_address": node_to_node_addr
+                        "bind_address": node_to_node_addr,
+                        "published_address": node_to_node_addr_public,
                     },
                     "rpc_interfaces": {
                         "interface_name": {
-                            "bind_address": listen_addr
+                            "bind_address": listen_addr,
+                            "published_address": listen_addr_public,
                         }
                     }
                 },
@@ -263,12 +264,12 @@ class CCFExperiment(BaseExperiment):
                     }
                 }
             else:
-                assert self.leader_addr is not None, "Leader address should be set before joining nodes"
+                assert self.leader_listen_addr is not None, "Leader address should be set before joining nodes"
                 ccf_config["command"] = {
                     "type": "Join",
                     "service_certificate_file": "/tmp/service_cert.pem",
                     "join": {
-                        "target_rpc_address": self.leader_addr,
+                        "target_rpc_address": self.leader_listen_addr,
                         "retry_timeout": "1s"
                     }
                 }
@@ -284,9 +285,14 @@ class CCFExperiment(BaseExperiment):
 
         self.gen_crypto(config_dir)
 
+        self.num_clients_per_vm = [self.num_clients // len(client_vms) for _ in range(len(client_vms))]
+        self.num_clients_per_vm[-1] += (self.num_clients - sum(self.num_clients_per_vm))
         for client_vm_num in range(len(client_vms)):
             self.binary_mapping[client_vms[client_vm_num]].append(f"client{client_vm_num}")
 
+        run_local([
+            f"cp {os.path.join(os.path.dirname(__file__), 'locustfile.py')} {config_dir}/locustfile.py"
+        ])
 
 
     def generate_arbiter_script(self):
@@ -308,7 +314,13 @@ SCP_CMD="scp -o StrictHostKeyChecking=no -i {self.dev_ssh_key}"
             
             # start leader
             _script += f"""
-$SSH_CMD {self.dev_ssh_user}@{self.leader.private_ip} 'rm -f cchost.pid; /opt/ccf_{PLATFORM}/bin/cchost --config {self.remote_workdir}/configs/leader_ccf_config.json > {self.remote_workdir}/logs/{repeat_num}/leader.log 2> {self.remote_workdir}/logs/{repeat_num}/leader.err' &
+$SSH_CMD {self.dev_ssh_user}@{self.leader.private_ip} <<'EOF' &
+rm -f cchost.pid
+rm -rf snapshots/
+rm -rf ledger/
+rm -f nodecert.pem
+/opt/ccf_{PLATFORM}/bin/cchost --config {self.remote_workdir}/configs/leader_ccf_config.json > {self.remote_workdir}/logs/{repeat_num}/leader.log 2> {self.remote_workdir}/logs/{repeat_num}/leader.err
+EOF
 PID="$PID $!"
 sleep 5
 """
@@ -320,8 +332,11 @@ sleep 5
             # join leader
                     _script += f"""
 $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} <<'EOF' &
-curl -k https://{self.leader_addr}/node/network | jq -r .service_certificate | head -n -1 > /tmp/service_cert.pem
+curl -k https://{self.leader_listen_addr}/node/network | jq -r .service_certificate | head -n -1 > /tmp/service_cert.pem
 rm -f cchost.pid
+rm -rf snapshots/
+rm -rf ledger/
+rm -f nodecert.pem
 /opt/ccf_{PLATFORM}/bin/cchost --config {self.remote_workdir}/configs/{bin}_ccf_config.json > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err
 EOF
 PID="$PID $!"
@@ -329,21 +344,22 @@ PID="$PID $!"
 
             # setup/open cluster
             _script += f"""
+sleep 30
 $SSH_CMD {self.dev_ssh_user}@{self.leader.private_ip} <<EOF
 . /opt/scitt-ccf-ledger/venv/bin/activate
 scitt governance activate_member \
-    --url https://{self.leader_addr} \
+    --url https://{self.leader_listen_addr} \
     --member-key {self.remote_workdir}/configs/keys/member0_privk.pem \
     --member-cert {self.remote_workdir}/configs/keys/member0_cert.pem \
     --development
 scitt governance propose_configuration \
     --configuration {self.remote_workdir}/configs/cts_policy.json \
-    --url https://{self.leader_addr} \
+    --url https://{self.leader_listen_addr} \
     --member-key {self.remote_workdir}/configs/keys/member0_privk.pem \
     --member-cert {self.remote_workdir}/configs/keys/member0_cert.pem \
     --development
 scitt governance propose_open_service \
-    --url https://{self.leader_addr} \
+    --url https://{self.leader_listen_addr} \
     --member-key {self.remote_workdir}/configs/keys/member0_privk.pem \
     --member-cert {self.remote_workdir}/configs/keys/member0_cert.pem \
     --next-service-certificate /tmp/service_cert.pem \
@@ -351,30 +367,34 @@ scitt governance propose_open_service \
 EOF
 """
             # run clients
+            client_n = 0
             for vm, bin_list in self.binary_mapping.items():
                 for bin in bin_list:
-                    if "node" in bin: continue
+                    if not "client" in bin: continue
                     _script += f"""
 $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} <<'EOF' &
 . /opt/scitt-ccf-ledger/venv/bin/activate
-locust -f /opt/scitt-ccf-ledger/test/load_test/locustfile.py \
+locust -f {self.remote_workdir}/configs/locustfile.py \
     --headless \
     --skip-log \
     --json \
-    --host https://{self.leader_addr} \
-    --users {NUM_CLIENTS} \
-    --spawn-rate {SPAWN_RATE} \
-    --run-time {RUNTIME} \
+    --host https://{self.leader_listen_addr} \
+    --users {self.num_clients_per_vm[client_n]} \
+    --spawn-rate {self.num_clients_per_vm[client_n]} \
+    --run-time {self.duration} \
+    --csv {self.remote_workdir}/logs/{repeat_num}/{bin} \
+    --csv-full-history \
     --scitt-statements {self.remote_workdir}/configs/cose  > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err
 EOF
 
 CLIENT_PIDS="$CLIENT_PIDS $!"
 """
+                    client_n += 1
 
             # kill cluster
             _script += f"""
 for pid in $CLIENT_PIDS; do
-    wait $pid
+    wait $pid || true
 done
 
 # Kill the binaries. First with a SIGINT, then with a SIGTERM, then with a SIGKILL
@@ -389,10 +409,10 @@ sleep 10
 """
             for vm, bin_list in self.binary_mapping.items():
                 for bin in bin_list:
-                    if "node" in bin:
+                    if "node" in bin or "leader" in bin:
                         binary_name = "cchost"
                     else:
-                        continue
+                        binary_name = "client"
                 # Copy the logs back
                     _script += f"""
 echo "Trying to kill things"

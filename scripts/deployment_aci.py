@@ -243,15 +243,17 @@ class AciDeployment(Deployment):
         # Get token that will allow connectiong to the Azure Container Registry
         token = cu.get_acr_token(self.registry_name) if not self.local else None
 
+        full_image_name = cu.get_full_image_name(self.registry_name, self.image_name) if not self.local else self.image_name
+
         # Build containers
-        cu.build_image(cu.get_full_image_name(self.registry_name, self.image_name) if not self.local else self.image_name, found_path, self.ssh_pub_key)
-        if not self.local: cu.push_image(self.registry_name, cu.get_full_image_name(self.registry_name, self.image_name))
+        cu.build_image(full_image_name, found_path, self.ssh_pub_key)
+        if not self.local: cu.push_image(self.registry_name, full_image_name)
 
         raw_ssh_key = execute_command("cat " + self.ssh_pub_key) if not self.local else None
         if not self.local and self.confidential:
             # Update the ARM template to include the CCE policy
             # we only need to do this once for the image
-            self.node_template = cu.update_sku(self.template, self.image_name)
+            self.node_template = cu.update_sku(self.template, full_image_name)
         else:
             # For non-confidential deployments, we can use the original template
             self.node_template = self.template
