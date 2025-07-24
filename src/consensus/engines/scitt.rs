@@ -149,7 +149,7 @@ impl AppEngine for SCITTAppEngine {
             let proto_block: &ProtoBlock = &block.block;
             self.last_ci = proto_block.n;
             let mut block_result: Vec<ProtoTransactionResult> = Vec::new();
-            for tx in proto_block.tx_list.iter() {
+            for (i, tx) in proto_block.tx_list.iter().enumerate() {
                 let mut txn_result = ProtoTransactionResult { result: Vec::new() };
                 let ops = match &tx.on_crash_commit {
                     Some(ops) => &ops.ops,
@@ -159,73 +159,72 @@ impl AppEngine for SCITTAppEngine {
                     }
                 };
 
-                for (i, op) in ops.iter().enumerate() {
-                    if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
-                        if op_type == ProtoTransactionOpType::Write {
-                            if op.operands.len() != 2 {
-                                continue;
-                            }
+                let op = &ops[0]; // TODO: guarantee we actually have a single op?
 
-                            match SCITTWriteType::from_slice(&op.operands[0]) {
-                                SCITTWriteType::Claim => {
-                                    let claim: &Vec<u8> = &op.operands[1];
-                                    let txid = TXID::new(proto_block.n, i);
-                                    if self.state.crash_committed_claims.contains_key(&txid) {
-                                        error!(
-                                            "Invalid ledger write: {} already exists",
-                                            txid.to_string()
-                                        );
-                                    } else {
-                                        self.state.crash_committed_claims.insert(
-                                            txid.clone(),
-                                            vec![(proto_block.n, claim.clone())],
-                                        );
-                                    }
-                                    txn_result.result.push(ProtoTransactionOpResult {
-                                        success: true,
-                                        values: vec![txid.to_string().into_bytes()],
-                                    });
+                if let Some(op_type) = ProtoTransactionOpType::try_from(op.op_type).ok() {
+                    if op_type == ProtoTransactionOpType::Write {
+                        if op.operands.len() != 2 {
+                            continue;
+                        }
+
+                        match SCITTWriteType::from_slice(&op.operands[0]) {
+                            SCITTWriteType::Claim => {
+                                let claim: &Vec<u8> = &op.operands[1];
+                                let txid = TXID::new(proto_block.n, i);
+                                if self.state.crash_committed_claims.contains_key(&txid) {
+                                    error!(
+                                        "Invalid ledger write: {} already exists",
+                                        txid.to_string()
+                                    );
+                                } else {
+                                    self.state
+                                        .crash_committed_claims
+                                        .insert(txid.clone(), vec![(proto_block.n, claim.clone())]);
                                 }
-                                SCITTWriteType::Policy => {
-                                    let policy = &op.operands[1];
-
-                                    self.state.crash_committed_policies.push(policy.clone());
-
-                                    txn_result.result.push(ProtoTransactionOpResult {
-                                        success: true,
-                                        values: vec![],
-                                    });
-                                }
-                            }
-                        } else if op_type == ProtoTransactionOpType::Read {
-                            if op.operands.len() != 1 {
-                                continue;
-                            }
-                            let key = TXID::from_vec(&op.operands[0]);
-                            let mut result = None;
-                            if let Some(txid) = key {
-                                result = self.read(&txid);
-                            }
-                            if let Some(value) = result {
                                 txn_result.result.push(ProtoTransactionOpResult {
                                     success: true,
-                                    values: vec![value],
+                                    values: vec![txid.to_string().into_bytes()],
                                 });
                             }
-                        } else if op_type == ProtoTransactionOpType::Scan {
-                            if op.operands.len() != 2 {
-                                continue;
-                            }
-                            let from = TXID::from_vec(&op.operands[0]);
-                            let to = TXID::from_vec(&op.operands[1]);
+                            SCITTWriteType::Policy => {
+                                let policy = &op.operands[1];
 
-                            let scan_result = self.scan(&from, &to);
-                            if let Some(scan_result) = scan_result {
+                                self.state.crash_committed_policies.push(policy.clone());
+
                                 txn_result.result.push(ProtoTransactionOpResult {
                                     success: true,
-                                    values: scan_result,
+                                    values: vec![],
                                 });
                             }
+                        }
+                    } else if op_type == ProtoTransactionOpType::Read {
+                        if op.operands.len() != 1 {
+                            continue;
+                        }
+                        let key = TXID::from_vec(&op.operands[0]);
+                        let mut result = None;
+                        if let Some(txid) = key {
+                            result = self.read(&txid);
+                        }
+                        if let Some(value) = result {
+                            txn_result.result.push(ProtoTransactionOpResult {
+                                success: true,
+                                values: vec![value],
+                            });
+                        }
+                    } else if op_type == ProtoTransactionOpType::Scan {
+                        if op.operands.len() != 2 {
+                            continue;
+                        }
+                        let from = TXID::from_vec(&op.operands[0]);
+                        let to = TXID::from_vec(&op.operands[1]);
+
+                        let scan_result = self.scan(&from, &to);
+                        if let Some(scan_result) = scan_result {
+                            txn_result.result.push(ProtoTransactionOpResult {
+                                success: true,
+                                values: scan_result,
+                            });
                         }
                     }
                 }

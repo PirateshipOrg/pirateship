@@ -256,7 +256,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     return Err(());
                 }
                 let (tx, reply_tx) = txwva.unwrap();
-                reply_tx.send(self.engine.handle_validation(&tx)).unwrap();
+                let res = reply_tx.send(self.engine.handle_validation(&tx));
+                if res.is_err() {
+                    warn!("Validation reply channel closed, skipping validation for tx: {:?}\n{:?}", tx, res.err().unwrap());
+                }
             },
             _ = self.checkpoint_timer.wait() => {
                 self.checkpoint().await;

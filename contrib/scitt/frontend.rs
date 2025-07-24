@@ -1,6 +1,9 @@
 use crate::cbor_utils::operation_props_to_cbor;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+
+use rustls::{ServerConfig, Certificate, PrivateKey};
+use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use log::warn;
 use pft::config::Config;
 use pft::consensus::app::TxWithValidationAck;
@@ -12,7 +15,7 @@ use pft::rpc::SenderType;
 use pft::utils::channel::Sender;
 use prost::Message;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, fs::File, io::BufReader};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -62,21 +65,21 @@ async fn register_signed_statement(
         }
     }
 
-    let result = match send(vec![transaction_op], &state, true).await {
+    let response = match send(vec![transaction_op], &state, true).await {
         Ok(response) => response,
         Err(err) => return err,
     };
 
     let txid = TXID {
-        block_n: result.block_n,
-        tx_idx: TryFrom::try_from(result.tx_n).unwrap(),
+        block_n: response.block_n,
+        tx_idx: TryFrom::try_from(response.tx_n).unwrap(),
     };
 
     state
         .request_cache
         .lock()
         .await
-        .insert(txid.clone(), result);
+        .insert(txid.clone(), response);
 
     HttpResponse::Ok()
         .content_type("application/cbor")
@@ -93,18 +96,29 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
     };
 
     let transaction_op = ProtoTransactionOp {
-        op_type: pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into(),
+        op_type: {
+            if cfg!(feature = "commit_receipts") {
+                pft::proto::execution::ProtoTransactionOpType::ProbeCommit.into()
+            } else {
+                pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into()
+            }
+        },
         operands: vec![txid.to_vec()],
     };
 
-    let result = match send_read(vec![transaction_op], &state).await {
+    let response = match send_read(vec![transaction_op], &state).await {
         Ok(response) => response,
         Err(err) => return err,
     };
 
+    let results = response.results.unwrap().result;
+    if results[0].values.is_empty() {
+        return HttpResponse::NotFound().body("No results found for the given txid");
+    }
+
     HttpResponse::Ok()
         .content_type("application/cose")
-        .body(result.results.unwrap().result[0].values[0].clone())
+        .body(results[0].values[0].clone())
 }
 
 /// Retrieve Statement with Embedded Receipt
@@ -124,12 +138,12 @@ async fn get_entry_statement(
         operands: vec![txid.to_vec()],
     };
 
-    let result = match send_read(vec![transaction_op], &state).await {
+    let response = match send_read(vec![transaction_op], &state).await {
         Ok(response) => response,
         Err(err) => return err,
     };
 
-    let results = result.results.unwrap().result;
+    let results = response.results.unwrap().result;
     if results[0].values.is_empty() {
         return HttpResponse::NotFound().body("No results found for the given txid");
     }
@@ -307,7 +321,13 @@ async fn send(
         let probe_transaction = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
-                    op_type: pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into(),
+                    op_type: {
+                        if cfg!(feature = "commit_receipts") {
+                            pft::proto::execution::ProtoTransactionOpType::ProbeCommit.into()
+                        } else {
+                            pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into()
+                        }
+                    },
                     operands: vec![
                         response.block_n.to_be_bytes().to_vec(),
                         response.tx_n.to_be_bytes().to_vec(),
@@ -405,6 +425,39 @@ pub async fn run_actix_server(
 
     let batch_size = config.consensus_config.max_backlog_batch_size.max(256);
 
+    let cert_file = &mut BufReader::new(File::open(&config.net_config.tls_cert_path).expect("Invalid TLS cert file path"));
+    let key_file = &mut BufReader::new(File::open(&config.net_config.tls_key_path).expect("Invalid TLS key file path"));
+
+    let cert_chain: Vec<Certificate> = certs(cert_file)
+        .expect("Invalid TLS cert file format")
+        .into_iter()
+        .map(Certificate)
+        .collect();
+    
+    let mut keys: Vec<PrivateKey> = rsa_private_keys(key_file)
+        .unwrap_or_else(|_| Vec::new())
+        .into_iter()
+        .map(PrivateKey)
+        .collect();
+    if keys.is_empty() {
+        let key_file = &mut BufReader::new(File::open(&config.net_config.tls_key_path).expect("Invalid TLS key file path"));
+        keys = pkcs8_private_keys(key_file)
+            .expect("Invalid TLS key file format - not RSA or PKCS8")
+            .into_iter()
+            .map(PrivateKey)
+            .collect();
+    }
+    if keys.is_empty() {
+        panic!("Could not locate RSA or PKCS 8 private keys.");
+    }
+    let key = keys.remove(0);
+
+    let tls_config = ServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, key)
+        .expect("Invalid TLS configuration");
+
     HttpServer::new(move || {
         let state = AppState {
             batch_proposer_tx: batch_proposer_tx.clone(),
@@ -424,7 +477,7 @@ pub async fn run_actix_server(
     })
     .workers(actix_threads)
     .max_connection_rate(batch_size) // Otherwise the server doesn't load consensus properly.
-    .bind(addr)?
+    .bind_rustls(addr, tls_config)?
     .run()
     .await?;
     Ok(())

@@ -83,6 +83,10 @@ chained_pbft_logger:
 pirateship_scitt:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml
 
+.PHONY: pirateship_scitt_commit_receipts
+pirateship_scitt_commit_receipts:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features commit_receipts
+
 .PHONY: bench
 bench:
 	CC=clang CXX=clang++ cargo bench

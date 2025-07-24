@@ -81,7 +81,11 @@ fn main() {
     let cfg = process_args();
 
     let (protocol, app) = get_feature_set();
-    info!("Protocol: {}, App: {}", protocol, app);
+    if cfg!(feature = "commit_receipts") {
+        info!("Protocol: {}, App: {} using commit receipts", protocol, app);
+    } else {
+        info!("Protocol: {}, App: {} using audit receipts", protocol, app);
+    }
 
     let core_ids = Arc::new(Mutex::new(Box::pin(core_affinity::get_core_ids().unwrap())));
 
