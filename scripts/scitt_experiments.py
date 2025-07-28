@@ -142,9 +142,14 @@ SCP_CMD="scp -o StrictHostKeyChecking=no -i {self.dev_ssh_key}"
 $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'RUST_BACKTRACE=full  {self.remote_workdir}/build/{binary_name} {self.remote_workdir}/configs/{bin}_config.json > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err' &
 PID="$PID $!"
 """
+                    if self.measure_resources:
+                        _script += f"""
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'dool -tclmnd -o {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv' &
+PID="$PID $!"
+"""
             # setup/open cluster
             _script += f"""
-sleep 30
+sleep 5
 $SSH_CMD {self.dev_ssh_user}@{leader.private_ip} <<EOF
 curl -X POST "https://{leader.private_ip}:4001/policy" -H "Content-Type: application/txt" --upload-file {self.remote_workdir}/configs/cts_policy.js -k
 EOF
@@ -173,7 +178,11 @@ EOF
 CLIENT_PIDS="$CLIENT_PIDS $!"
 """
                     client_n += 1
-
+                    if self.measure_resources:
+                        _script += f"""
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'dool -tclmnd -o {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv' &
+PID="$PID $!"
+"""
             # kill cluster
             _script += f"""
 for pid in $CLIENT_PIDS; do
@@ -204,6 +213,7 @@ while [ "$result" != "0" ]; do
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -2 -c {binary_name}' || true
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -15 -c {binary_name}' || true
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -9 -c {binary_name}' || true
+     $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill python3' || true # kill resource measurement (dool)
      result=$($SSH_CMD {self.dev_ssh_user}@{vm.private_ip} "pgrep -x '{binary_name}' > /dev/null && echo 1 || echo 0")
      echo "Result: $result"
 done
@@ -211,6 +221,11 @@ $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'rm -rf /data/*' || true
 $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.log {self.remote_workdir}/logs/{repeat_num}/{bin}.log || true
 $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.err {self.remote_workdir}/logs/{repeat_num}/{bin}.err || true
 $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}_stats_history.csv {self.remote_workdir}/logs/{repeat_num}/{bin}_stats_history.csv || true
+"""
+                # Copy the stats file back
+                if self.measure_resources:
+                    _script += f"""
+$SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv || true
 """
 
             _script += f"""

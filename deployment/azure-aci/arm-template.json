@@ -46,6 +46,17 @@
       "metadata": {
         "description": "Server Socket Port on which nodes will listen."
       }
+    },
+    "sku-type": {
+      "type": "string",
+      "defaultValue": "Standard",
+      "allowedValues": [
+        "Standard",
+        "Confidential"
+      ],
+      "metadata": {
+        "description": "SKU type for the container group. Choose 'Standard' for regular containers or 'Confidential' for confidential containers."
+      }
     }
   },
   "variables": {},
@@ -59,7 +70,7 @@
         "type": "SystemAssigned"
       },
       "properties": {
-        "sku": "Confidential",
+        "sku": "[parameters('sku-type')]",
         "restartPolicy": "Never",
         "osType": "Linux",
         "ipAddress": {

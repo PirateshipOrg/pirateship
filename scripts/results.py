@@ -1240,7 +1240,7 @@ class Result:
                     f.write("==================================\n")
 
         output = self.kwargs.get('output', None)
-        self.tput_latency_sweep_plot(plot_dict, output, xlabel="Throughput (claims/s)", ylabel="Latency (ms)", logscale=True)
+        self.tput_latency_sweep_plot(plot_dict, output, xlabel="Throughput (claims/s)", ylabel="Latency (ms)", logscale=False)
 
     def tput_latency_sweep_parse_locust(self, ramp_up, ramp_down, legends) -> Dict[str, List[Stats]]:
         plot_dict = {}

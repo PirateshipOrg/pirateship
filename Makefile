@@ -83,9 +83,26 @@ chained_pbft_logger:
 pirateship_scitt:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml
 
+.PHONY: pirateship_scitt_profiler
+pirateship_scitt_profiler:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features profiler
+
+.PHONY: pirateship_scitt_null_validation
+pirateship_scitt_null_validation:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features null_validation
+
 .PHONY: pirateship_scitt_commit_receipts
 pirateship_scitt_commit_receipts:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features commit_receipts
+
+.PHONY: pirateship_scitt_commit_receipts_null_validation
+pirateship_scitt_commit_receipts_null_validation:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features commit_receipts,null_validation
+
+
+.PHONY: pirateship_scitt_dummy_receipts
+pirateship_scitt_dummy_receipts:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features commit_receipts,dummy_receipts
 
 .PHONY: bench
 bench:

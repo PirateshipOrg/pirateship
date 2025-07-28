@@ -24,11 +24,12 @@ from app_experiments import AppExperiment
 from ssh_utils import *
 from deployment import Deployment
 from deployment_aci import AciDeployment
-from experiments import BaseExperiment, PirateShipExperiment
+from experiments import BaseExperiment, PirateShipExperiment, NetPerfExperiment
 from autobahn_experiments import AutobahnExperiment
 from scitt_experiments import ScittExperiment
 from ccf_experiments import CCFExperiment
 from results import *
+# from extra_plotting import plot_channel_monitoring, plot_throughput_comparison, plot_resource_usage
 import pickle
 import re
 
@@ -140,8 +141,11 @@ def parse_config(path, workdir=None, existing_experiments=None):
         controller_must_run = e.get("controller_must_run", False)
         git_hash_override = e.get("git_hash", None)
         experiment_type = e.get("type", "pirateship")
+        measure_resources = e.get("measure_resources", False)
         if experiment_type == "pirateship":
             klass = PirateShipExperiment
+        elif experiment_type == "netperf":
+            klass = NetPerfExperiment
         elif experiment_type == "app":
             klass = AppExperiment
         elif experiment_type == "autobahn":
@@ -185,7 +189,10 @@ def parse_config(path, workdir=None, existing_experiments=None):
                     _e.get("build_command", "make"),
                     git_hash_override,
                     project_home,
-                    controller_must_run
+                    controller_must_run,
+                    measure_resources,
+                    _e.get("loop_type", "closed"),
+                    _e.get("request_rate", 1000.0)
                 ))
         else:
             seq_start = int(e.get("seq_start", 0))
@@ -204,7 +211,10 @@ def parse_config(path, workdir=None, existing_experiments=None):
                 e.get("build_command", "make"),
                 git_hash_override,
                 project_home,
-                controller_must_run
+                controller_must_run,
+                measure_resources,
+                _e.get("loop_type", "closed"),
+                _e.get("request_rate", 1000.0)
             ))
 
     results = []
@@ -650,7 +660,10 @@ def clean_logs(config, workdir):
     "-d", "--workdir", required=True,
     type=click.Path(file_okay=False, resolve_path=True)
 )
-def results(config, workdir):
+@click.option(
+    "--extra", is_flag=True, default=False,
+)
+def results(config, workdir, extra):
     # Try to get deployment from the pickle file
     pickle_path = os.path.join(workdir, "deployment", "deployment.pkl")
     with open(pickle_path, "rb") as f:
@@ -689,7 +702,11 @@ def results(config, workdir):
             print("Forcing parse")
             
         result.output()
-
+        # if extra:
+        #     plot_throughput_comparison(result)
+        #     plot_resource_usage(result)
+        #     plot_channel_monitoring(result)
+            
 
 @main.command()
 @click.option(

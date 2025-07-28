@@ -6,7 +6,7 @@ from locust import FastHttpUser, events, task
 
 from pyscitt.client import Client
 
-CLIENT_WAIT_TIME = 0.01
+CLIENT_WAIT_TIME = 0.1
 
 
 @events.init_command_line_parser.add_listener

@@ -1,5 +1,6 @@
 # Utility scriptsto launch confidential containers in Azure 
 
+import os
 import subprocess
 import yaml
 import json
@@ -56,24 +57,24 @@ def get_acr_token(acr_prefix):
 def update_sku(template, image_name):
     # Use the Azure Confcom extension to generate the signature.
     # This call automatically updates the template but requires an ok prompt to override, so we make a copy 
-    parameters = '''
-{
-    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-    "contentVersion": "1.0.0.0",
-    "parameters": {
-        "primary-image": {
-        "value": ""
+    parameters = {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {
+            "primary-image": {
+                "value": image_name
+            },
+            "sku-type": {
+                "value": "Confidential"
+            }
         }
+
     }
-}
-'''
-    parameters = json.loads(parameters)
-    parameters["parameters"]["primary-image"]["value"] = image_name
+    template_with_sku = f"{template}.with-sku.json"
     # open temporaty file to write parameters  using python temp files
     with tempfile.NamedTemporaryFile(mode='w+', delete=True, suffix='.json') as tmpfile:
         json.dump(parameters, tmpfile, indent=4)
         tmpfile.flush()
-        template_with_sku = f"{template}.with-sku.json"
         execute_command(f"cp {template} {template_with_sku}")
         print(execute_command(f"az confcom acipolicygen -y -a {template_with_sku} -p {tmpfile.name}"))
     return template_with_sku
@@ -86,7 +87,7 @@ def cancel_deployment(resource_group, deployment_name):
 
 # Update the ARM template with the appropriate primary image, region, deployment etc. 
 # and launch deployment
-def launchDeployment(template_file, resource_group, deployment_name, acr_prefix, primary_image, ssh_key_raw, acr_token, location, server_port, local, total_node_count, spot=True):
+def launchDeployment(template_file, resource_group, deployment_name, acr_prefix, primary_image, ssh_key_raw, acr_token, location, server_port, local, total_node_count, confidential=False):
     print("Launching deployment")
     if not local:  
         print(execute_command_args(["az", "deployment", "group", "create", 
@@ -96,10 +97,10 @@ def launchDeployment(template_file, resource_group, deployment_name, acr_prefix,
                                   "--parameters", "location=" + location,
                                   "--parameters", "name=" + deployment_name,
                                   "--parameters", "primary-image=" + get_full_image_name(acr_prefix, primary_image) ,
+                                  "--parameters", "sku-type=Confidential" if confidential else "sku-type=Standard",
                                   "--parameters", "port=" + str(server_port),
                                   "--parameters", "registry=" +  acr_prefix + ".azurecr.io",
                                   "--parameters", "acr-token=" + acr_token]))
-    
     else: 
         # PirateShip is quite resource intensive... cpu and memory quotas can be a way to run clusters on a single local machine 
         # if you think this is outside the scope od aci deployment (which it is), I can take it away and just create a utility script that handles this

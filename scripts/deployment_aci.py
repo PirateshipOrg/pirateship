@@ -75,6 +75,7 @@ class AciDeployment(Deployment):
             self.ssh_pub_key = os.path.join(workdir, "deployment", ssh_key_name)
             print(f"SSH KEY IS {self.ssh_pub_key}")
         else:
+            print("Using SSH public key from config file")
             self.ssh_pub_key = os.path.join(workdir, "deployment", config["ssh_pub_key"])
 
         if os.path.isabs(config["ssh_key"]):
@@ -100,10 +101,7 @@ class AciDeployment(Deployment):
         # Name of Container Image
         self.image_name = config["image_name"]
         # Template Json necessary to construct container image
-        if os.path.isabs(config["template"]):
-            self.template= config["template"]
-        else:
-            self.template= os.path.join(workdir, "deployment", "azure-aci", config["template"])
+        self.template= config["template"]
 
         # Remapped Docker SSH Port for local container deployment
         self.docker_ssh = config["docker_ssh"]
@@ -236,8 +234,8 @@ class AciDeployment(Deployment):
         print(deploy_config)
         if not os.path.exists(deploy_config):
             raise FileNotFoundError(f"Deployment config file for deployment mode {self.mode} not found")
-        if not os.path.exists(self.template):
-            raise FileNotFoundError(f"Deployment config file for Azure Template{self.template} not found")
+        # if not os.path.exists(self.template):
+        #     raise FileNotFoundError(f"Deployment config file for Azure Template{self.template} not found")
 
 
         # Get token that will allow connectiong to the Azure Container Registry
@@ -250,6 +248,8 @@ class AciDeployment(Deployment):
         if not self.local: cu.push_image(self.registry_name, full_image_name)
 
         raw_ssh_key = execute_command("cat " + self.ssh_pub_key) if not self.local else None
+        if not os.path.isabs(self.template):
+            self.template = os.path.join(found_path, self.template)
         if not self.local and self.confidential:
             # Update the ARM template to include the CCE policy
             # we only need to do this once for the image
@@ -280,7 +280,7 @@ class AciDeployment(Deployment):
                 if ip is None:
                     print(datetime.datetime.now())
                     # nodes are possibly confidential containers, clients are not
-                    cu.launchDeployment(self.template if is_client else self.node_template, self.resource_group, container_name, self.registry_name, self.image_name, raw_ssh_key, token , location, base_port, self.local, total_node_count)
+                    cu.launchDeployment(self.template if is_client else self.node_template, self.resource_group, container_name, self.registry_name, self.image_name, raw_ssh_key, token , location, base_port, self.local, total_node_count, self.confidential and not is_client)
                     ip = cu.obtain_ip_address(self.resource_group, container_name, self.local)
             finally:
                 semaphore.release()

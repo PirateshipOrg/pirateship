@@ -192,6 +192,8 @@ class CCFExperiment(BaseExperiment):
         self.getRequestHosts = []
 
         self.leader_listen_addr = None
+        self.ledger_directory = self.base_node_config.get("ledger_directory", "ledger")
+        self.snapshot_directory = self.base_node_config.get("snapshot_directory", "snapshots")
         for node_num in range(1, self.num_nodes + 1):
             port = deployment.node_port_base + node_num
             node_port = deployment.node_port_base + node_num + 1000
@@ -203,7 +205,6 @@ class CCFExperiment(BaseExperiment):
             if self.leader_listen_addr is None:
                 name = "leader"
                 self.leader_listen_addr = listen_addr_public
-                leader_node_to_node_addr_public = node_to_node_addr_public
                 self.leader = _vm
             else:
                 name = f"node{node_num}"
@@ -241,7 +242,27 @@ class CCFExperiment(BaseExperiment):
                         }
                     }
                 },
-
+                "ledger_signatures": {
+                    "tx_count": self.base_node_config.get("sig_tx_count", 5_000),
+                    "delay": self.base_node_config.get("sig_delay", "1000ms"),
+                },
+                "worker_threads": self.base_node_config.get("worker_threads", 14),
+                "snapshots": {
+                    "directory": self.snapshot_directory,
+                    "tx_count": self.base_node_config.get("snapshot_tx_count", 10_000),
+                },
+                "ledger": {
+                    "directory": self.ledger_directory,
+                },
+                "node_certificate": {
+                    "curve_id": self.base_node_config.get("curve_id", "Secp384R1"),
+                },
+                "memory": {
+                    "circuit_size": self.base_node_config.get("circuit_size", "16MB"),
+                    "max_msg_size": self.base_node_config.get("max_msg_size", "64MB"),
+                    "max_fragment_size": self.base_node_config.get("max_fragment_size", "256KB"),
+                },
+                "historical_cache_soft_limit": self.base_node_config.get("historical_cache_soft_limit", "100MB"),
             }
             if name == "leader":
                 ccf_config["command"] = {
@@ -324,6 +345,11 @@ EOF
 PID="$PID $!"
 sleep 5
 """
+            if self.measure_resources:
+                _script += f"""
+$SSH_CMD {self.dev_ssh_user}@{self.leader.private_ip} 'dool -tclmnd -o {self.remote_workdir}/logs/{repeat_num}/leader.stats.csv' &
+PID="$PID $!"
+"""
 
             for vm, bin_list in self.binary_mapping.items():
                 for bin in bin_list:
@@ -341,10 +367,15 @@ rm -f nodecert.pem
 EOF
 PID="$PID $!"
 """
+                    if self.measure_resources:
+                        _script += f"""
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'dool -tclmnd -o {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv' &
+PID="$PID $!"
+"""
 
             # setup/open cluster
             _script += f"""
-sleep 30
+sleep 5
 $SSH_CMD {self.dev_ssh_user}@{self.leader.private_ip} <<EOF
 . /opt/scitt-ccf-ledger/venv/bin/activate
 scitt governance activate_member \
@@ -390,7 +421,11 @@ EOF
 CLIENT_PIDS="$CLIENT_PIDS $!"
 """
                     client_n += 1
-
+                    if self.measure_resources:
+                        _script += f"""
+$SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'dool -tclmnd -o {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv' &
+PID="$PID $!"
+"""
             # kill cluster
             _script += f"""
 for pid in $CLIENT_PIDS; do
@@ -406,6 +441,7 @@ sleep 10
 # Kill the binaries in SSHed VMs as well. Calling SIGKILL on the local SSH process might have left them orphaned.
 # Make sure not to kill the tmux server.
 # Then copy the logs back and delete any db files. Cleanup for the next run.
+$SCP_CMD -r {self.dev_ssh_user}@{self.leader.private_ip}:{self.ledger_directory} {self.remote_workdir}/logs/{repeat_num}/ledger || true
 """
             for vm, bin_list in self.binary_mapping.items():
                 for bin in bin_list:
@@ -421,12 +457,17 @@ while [ "$result" != "0" ]; do
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -2 -c {binary_name}' || true
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -15 -c {binary_name}' || true
      $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill -9 -c {binary_name}' || true
+     $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'pkill python3' || true # kill resource measurement (dool)
      result=$($SSH_CMD {self.dev_ssh_user}@{vm.private_ip} "pgrep -x '{binary_name}' > /dev/null && echo 1 || echo 0")
      echo "Result: $result"
 done
 $SSH_CMD {self.dev_ssh_user}@{vm.private_ip} 'rm -rf /data/*' || true
 $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.log {self.remote_workdir}/logs/{repeat_num}/{bin}.log || true
 $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.err {self.remote_workdir}/logs/{repeat_num}/{bin}.err || true
+"""
+                    if self.measure_resources:
+                        _script += f"""
+$SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv {self.remote_workdir}/logs/{repeat_num}/{bin}.stats.csv || true
 """
 
             _script += f"""
