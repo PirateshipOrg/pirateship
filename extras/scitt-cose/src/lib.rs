@@ -30,7 +30,6 @@ const LABEL_ISSUER: i64 = 391;
 const LABEL_FEED: i64 = 392;
 const LABEL_SCITT_RECEIPTS: i64 = 394;
 
-#[derive(Debug)]
 #[allow(dead_code)]
 pub struct CWT {
     pub iss: Option<String>,

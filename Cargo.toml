@@ -83,13 +83,13 @@ harness = false
 name = "merkle_proof"
 harness = false
 
-# [[bench]]
-# name = "scitt_cose_bench"
-# harness = false
-# 
-# [[bench]]
-# name = "scitt_policy_validation"
-# harness = false
+[[bench]]
+name = "scitt_cose_bench"
+harness = false
+
+[[bench]]
+name = "scitt_policy_validation"
+harness = false
 
 [features]
 # Perf counters
