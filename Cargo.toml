@@ -83,6 +83,14 @@ harness = false
 name = "merkle_proof"
 harness = false
 
+# [[bench]]
+# name = "scitt_cose_bench"
+# harness = false
+# 
+# [[bench]]
+# name = "scitt_policy_validation"
+# harness = false
+
 [features]
 # Perf counters
 perf = []
@@ -107,6 +115,8 @@ no_pipeline = []
 extra_qc_check = []
 policy_validation = ["rquickjs", "scitt-cose", "base64"]
 channel_monitoring = []
+null_validation = ["policy_validation"]
+dummy_receipts = []
 
 # Applications
 app_logger = []

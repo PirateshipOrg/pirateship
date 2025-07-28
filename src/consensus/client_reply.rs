@@ -346,25 +346,45 @@ impl ClientReplyHandler {
         });
 
         for (block_n, reply_vec) in ready_for_audit_receipt {
-            let (tx, rx) = oneshot::channel();
-            self.issuer_tx.send(IssuerCommand::IssueAuditReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
-            let Some(builder) = rx.await.unwrap() else {
-                error!("Failed to build audit receipt for block {}", block_n);
-                continue;
-            };
-            assert_eq!(reply_vec.len(), builder.proofs.len());
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            #[cfg(not(feature = "dummy_receipts"))] {
+                let (tx, rx) = oneshot::channel();
+                self.issuer_tx.send(IssuerCommand::IssueAuditReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
+                let Some(builder) = rx.await.unwrap() else {
+                    error!("Failed to build audit receipt for block {}", block_n);
+                    continue;
+                };
+                assert_eq!(reply_vec.len(), builder.proofs.len());
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            }
+            #[cfg(feature = "dummy_receipts")] {
+                let builder = crate::consensus::issuer::ReceiptBuilder {
+                    chain: vec![],
+                    proofs: reply_vec.iter().map(|_| MerkleInclusionProof::default()).collect(),
+                };
+                assert_eq!(reply_vec.len(), builder.proofs.len());
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            }
         }
 
         for (block_n, reply_vec) in ready_for_commit_receipt {
-            let (tx, rx) = oneshot::channel();
-            self.issuer_tx.send(IssuerCommand::IssueCommitReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
-            let Some(builder) = rx.await.unwrap() else {
-                error!("Failed to build commit receipt for block {}", block_n);
-                continue;
-            };
-            assert_eq!(reply_vec.len(), builder.proofs.len());
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            #[cfg(not(feature = "dummy_receipts"))] {
+                let (tx, rx) = oneshot::channel();
+                self.issuer_tx.send(IssuerCommand::IssueCommitReceipt(block_n, reply_vec.iter().map(|(_, tx_n)| *tx_n).collect(), tx)).await.unwrap();
+                let Some(builder) = rx.await.unwrap() else {
+                    error!("Failed to build commit receipt for block {}", block_n);
+                    continue;
+                };
+                assert_eq!(reply_vec.len(), builder.proofs.len());
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            }
+            #[cfg(feature = "dummy_receipts")] {
+                let builder = crate::consensus::issuer::ReceiptBuilder {
+                    chain: vec![],
+                    proofs: reply_vec.iter().map(|_| MerkleInclusionProof::default()).collect(),
+                };
+                assert_eq!(reply_vec.len(), builder.proofs.len());
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+            }
         }
     }
 

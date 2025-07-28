@@ -381,6 +381,9 @@ impl AppEngine for SCITTAppEngine {
         &mut self,
         tx_op: &crate::proto::execution::ProtoTransactionOp,
     ) -> crate::consensus::app::TransactionValidationResult {
+        #[cfg(feature = "null_validation")]
+        return Ok(());
+
         if tx_op.operands.len() != 2 {
             error!(
                 "Invalid operation operands length: {}",
@@ -408,7 +411,7 @@ impl AppEngine for SCITTAppEngine {
             return Err("No currently active policy found".to_string());
         };
 
-        JS_RUNTIME.with(|runtime| apply_policy_to_claim(runtime, policy, headers.phdr))
+        JS_RUNTIME.with(|runtime| apply_policy_to_claim(runtime, policy, &headers.phdr))
     }
 
     fn get_current_state(&self) -> Self::State {
@@ -462,10 +465,10 @@ impl SCITTAppEngine {
 }
 
 #[cfg(feature = "policy_validation")]
-fn apply_policy_to_claim(
+pub fn apply_policy_to_claim(
     runtime: &Runtime,
     policy: &[u8],
-    phdr: ProtectedHeader,
+    phdr: &ProtectedHeader,
 ) -> Result<(), String> {
     let ctx = Context::full(runtime).unwrap();
     ctx.with::<_, Result<(), String>>(|ctx| {
