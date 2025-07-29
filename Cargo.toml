@@ -70,6 +70,7 @@ prost-build = { version = "0.12" }
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
 memory-stats = "1.2.0"
+pprof = { version = "0.13", features = ["flamegraph"] }
 
 [[bench]]
 name = "sign_bench"
