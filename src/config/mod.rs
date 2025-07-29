@@ -88,6 +88,7 @@ impl ConsensusConfig {
         #[cfg(feature = "round_robin_leader")]
         {
             let n = self.node_list.len() as u64;
+            let view = if view == 0 { 1 } else { view }; // view 0 creates problems, race condition only occurs on debug builds
             self.node_list[((view - 1) % n) as usize].clone()
         }
 
