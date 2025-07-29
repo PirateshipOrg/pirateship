@@ -17,6 +17,7 @@ import numpy as np
 from pprint import pprint
 import matplotlib
 import matplotlib.pyplot as plt
+import pandas as pd
 
 plt.rc('font',**{'size': 100, 'family':'serif','serif':['Linux Libertine O']})
 # plt.rc('legend', fontsize=7)
@@ -141,6 +142,60 @@ def process_latencies(points, duration, ramp_up, ramp_down, latencies, byz=False
         latencies.extend([p[2] for p in points])
     else:
         latencies.extend([p[1] for p in points])
+
+RESOURCE_TYPES = ['cpu', 'memory', 'net_recv', 'net_send', 'disk_read', 'disk_write']
+def parse_stats_file(file_path: str, duration: int, ramp_up: int, ramp_down: int):
+    """Parse a single dool stats CSV file."""
+    try:
+        df = pd.read_csv(file_path, skiprows=5)
+        if len(df) == 0:
+            return None
+        
+        if duration > 0:
+            start_idx = ramp_up
+            end_idx = duration - ramp_down
+            if end_idx > len(df):
+                end_idx = len(df)
+            df = df[start_idx:end_idx]
+        
+        time_indices = list(range(len(df)))
+        
+        resources = {}
+        
+        # CPU: usr + sys
+        if 'usr' in df.columns and 'sys' in df.columns:
+            usr = pd.to_numeric(df['usr'], errors='coerce').fillna(0)
+            sys = pd.to_numeric(df['sys'], errors='coerce').fillna(0)
+            resources['cpu'] = list(zip(time_indices, usr + sys))
+        
+        # Memory usage (convert to MB)
+        if 'used' in df.columns:
+            mem = pd.to_numeric(df['used'], errors='coerce').fillna(0) / (1024*1024)
+            resources['memory'] = list(zip(time_indices, mem))
+        
+        # Network (convert to MB/s)
+        if 'recv' in df.columns:
+            net_recv = pd.to_numeric(df['recv'], errors='coerce').fillna(0) / (1024*1024)
+            resources['net_recv'] = list(zip(time_indices, net_recv))
+        
+        if 'send' in df.columns:
+            net_send = pd.to_numeric(df['send'], errors='coerce').fillna(0) / (1024*1024)
+            resources['net_send'] = list(zip(time_indices, net_send))
+        
+        # Disk I/O (convert to MB/s)
+        if 'read' in df.columns:
+            disk_read = pd.to_numeric(df['read'], errors='coerce').fillna(0) / (1024*1024)
+            resources['disk_read'] = list(zip(time_indices, disk_read))
+        
+        if 'writ' in df.columns:
+            disk_write = pd.to_numeric(df['writ'], errors='coerce').fillna(0) / (1024*1024)
+            resources['disk_write'] = list(zip(time_indices, disk_write))
+        
+        return resources
+        
+    except Exception as e:
+        print(f"Error parsing {file_path}: {e}")
+        return None
 
 
 @dataclass
@@ -1139,12 +1194,6 @@ class Result:
 
         self.crash_byz_tput_timeseries_plot(times, crash_commits, byz_commits, events)
 
-
-        
-
-
-
-
     def stacked_bar_graph(self):
         # Parse args
         ramp_up = self.kwargs.get('ramp_up', 0)
@@ -1195,6 +1244,167 @@ class Result:
 
     def output(self):
         self.plotter_func()
+
+    # RESOURCES
+
+    def resource_timeseries(self):
+        """Plot combined resource usage for leader, followers, and clients in single plots."""
+        ramp_up = self.kwargs.get('ramp_up', 25)
+        ramp_down = self.kwargs.get('ramp_down', 15)
+        output_dir = self.workdir
+
+        os.makedirs(output_dir, exist_ok=True)
+        
+        for group_name, experiment_list in self.experiment_groups.items():
+            for experiment in experiment_list:
+                variant_name = str(experiment.seq_num)
+                variant_label = f"{group_name}-{variant_name}"
+                
+                print(f"Processing combined resources for {variant_label}")
+                
+                log_dirs = []
+                for repeat_num in range(experiment.repeats):
+                    log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
+                    if os.path.exists(log_dir) and os.listdir(log_dir):
+                        log_dirs.append(log_dir)
+                
+                if not log_dirs:
+                    continue
+
+                leader_resources = {rt : [] for rt in RESOURCE_TYPES}
+                follower_resources = {rt : [] for rt in RESOURCE_TYPES}
+                client_resources = { rt : [] for rt in RESOURCE_TYPES}
+                
+                for log_dir in log_dirs:
+                    leader_res, follower_res, client_res = self.parse_resource_data(log_dir, experiment.duration, ramp_up, ramp_down)
+                    
+                    if not leader_res or not follower_res or not client_res:
+                        print(f"Missing resource data for {variant_label} in {log_dir}")
+                        continue
+                    for resource_type in RESOURCE_TYPES:
+                        for res in leader_res:
+                            if resource_type in res:
+                                leader_resources[resource_type].append(res[resource_type])
+                    
+                    for resource_type in RESOURCE_TYPES:
+                        run_follower_data = []
+                        for res in follower_res:
+                            if resource_type in res:
+                                run_follower_data.append(res[resource_type])
+                        
+                        if run_follower_data:
+                            # Average across all followers for this single run
+                            min_len = min(len(ts) for ts in run_follower_data)
+                            averaged_data = []
+                            for i in range(min_len):
+                                timestamp = run_follower_data[0][i][0]
+                                avg_val = np.mean([ts[i][1] for ts in run_follower_data])
+                                averaged_data.append((timestamp, avg_val))
+                            follower_resources[resource_type].append(averaged_data)
+                    
+                    for resource_type in RESOURCE_TYPES:
+                        run_client_data = []
+                        for res in client_res:
+                            if resource_type in res:
+                                run_client_data.append(res[resource_type])
+                        
+                        if run_client_data:
+                            # Average across all clients for this single run
+                            min_len = min(len(ts) for ts in run_client_data)
+                            averaged_data = []
+                            for i in range(min_len):
+                                timestamp = run_client_data[0][i][0]
+                                avg_val = np.mean([ts[i][1] for ts in run_client_data])
+                                averaged_data.append((timestamp, avg_val))
+                            client_resources[resource_type].append(averaged_data)
+                
+                self.plot_combined_resource_panel(leader_resources, follower_resources, client_resources, variant_label, output_dir)
+
+    def parse_resource_data(self, log_dir: str, duration: int, ramp_up: int, ramp_down: int):
+        leader_resources = []
+        node_resources = []
+        client_resources = []
+        
+        for f in os.listdir(log_dir):
+            if f.startswith('node') and f.endswith('.stats.csv'):
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    if f.startswith('node1'):
+                        leader_resources.append(stats)
+                    else:
+                        node_resources.append(stats)
+        
+        for f in os.listdir(log_dir):
+            if f.startswith('client') and f.endswith('.stats.csv'):
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    client_resources.append(stats)
+        
+        return leader_resources, node_resources, client_resources
+
+    def plot_combined_resource_panel(self, leader_resources, follower_resources, client_resources, 
+                                   variant_label, output_dir):
+        """Plot leader, followers, and clients resources in a single panel."""
+        plt.switch_backend('Agg')
+        plt.rcParams.update({'font.size': 12})
+
+        fig, axes = plt.subplots(3, 2, figsize=(20, 15))
+        axes = axes.flatten()
+
+        resource_info = [
+            ('cpu', 'CPU Usage (\%)', 'CPU Usage'),
+            ('memory', 'Memory (MB)', 'Memory Usage'),
+            ('net_recv', 'Network Recv (MB/s)', 'Network Receive'),
+            ('net_send', 'Network Send (MB/s)', 'Network Send'),
+            ('disk_read', 'Disk Read (MB/s)', 'Disk Read'),
+            ('disk_write', 'Disk Write (MB/s)', 'Disk Write')
+        ]
+
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
+        labels = ['Leader (node1)', 'Followers (avg)', 'Clients (avg)']
+        
+        for i, (resource_type, ylabel, title) in enumerate(resource_info):
+            ax = axes[i]
+            
+            resource_sets = [leader_resources, follower_resources, client_resources]
+            
+            for j, (resources, color, label) in enumerate(zip(resource_sets, colors, labels)):
+                if not resources[resource_type]:
+                    continue
+                    
+                if len(resources[resource_type]) > 1:
+                    # Average across multiple runs
+                    min_len = min(len(ts) for ts in resources[resource_type])
+                    times = list(range(min_len))
+                    means = []
+                    stds = []
+                    for i_time in range(min_len):
+                        values = [ts[i_time][1] for ts in resources[resource_type]]
+                        means.append(np.mean(values))
+                        stds.append(np.std(values))
+                    
+                    ax.plot(times, means, linewidth=2, color=color, label=label)
+                    ax.fill_between(times,
+                                  [max(0, m - s) for m, s in zip(means, stds)],
+                                  [m + s for m, s in zip(means, stds)],
+                                  alpha=0.2, color=color)
+                else:
+                    ts = resources[resource_type][0]
+                    times = list(range(len(ts)))
+                    values = [point[1] for point in ts]
+                    ax.plot(times, values, linewidth=2, color=color, label=label)
+                        
+            ax.set_xlabel('Time (seconds)')
+            ax.set_ylabel(ylabel)
+            ax.set_title(f'{title} - {variant_label}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        output_file = os.path.join(output_dir, f'{variant_label}.pdf')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"{variant_label} combined resources plot saved to {output_file}")
 
     # SCITT
 

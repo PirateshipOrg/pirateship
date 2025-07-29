@@ -29,7 +29,6 @@ from autobahn_experiments import AutobahnExperiment
 from scitt_experiments import ScittExperiment
 from ccf_experiments import CCFExperiment
 from results import *
-# from extra_plotting import plot_channel_monitoring, plot_throughput_comparison, plot_resource_usage
 import pickle
 import re
 
@@ -694,7 +693,6 @@ def results(config, workdir, extra):
 
     # deployment.sync_local_to_dev_vm()
 
-
     _, _, results = parse_config(config, workdir=workdir, existing_experiments=experiments)
     for result in results:
         if force_redo_results:
@@ -702,11 +700,6 @@ def results(config, workdir, extra):
             print("Forcing parse")
             
         result.output()
-        # if extra:
-        #     plot_throughput_comparison(result)
-        #     plot_resource_usage(result)
-        #     plot_channel_monitoring(result)
-            
 
 @main.command()
 @click.option(
