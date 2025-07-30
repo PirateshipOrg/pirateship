@@ -4415,7 +4415,6 @@ dependencies = [
  "iso8601",
  "log",
  "log4rs",
- "once_cell",
  "pft",
  "prost",
  "prost-types",

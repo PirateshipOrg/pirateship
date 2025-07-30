@@ -30,8 +30,9 @@ iso8601 = "0.6.2"
 async-recursion = "1.1.1"
 
 [features]
-
 commit_receipts = []
+null_validation = ["pft/null_validation"]
+dummy_receipts = ["pft/dummy_receipts"]
 
 [[bin]]
 name = "scitt"
