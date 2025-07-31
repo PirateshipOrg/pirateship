@@ -11,7 +11,8 @@ CLIENT_WAIT_TIME = 0.1
 
 @events.init_command_line_parser.add_listener
 def init_parser(parser):
-    parser.add_argument("--scitt-statements", help="Path to statements directory")
+    parser.add_argument("--scitt-statements",
+                        help="Path to statements directory")
     parser.add_argument(
         "--skip-confirmation",
         help="Whether to skip statements submission confirmation or not",
@@ -25,7 +26,9 @@ class ScittUser(FastHttpUser):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.client = Client(self.host, development=True, wait_time=CLIENT_WAIT_TIME)
+        self.client = Client(self.host,
+                             development=True,
+                             wait_time=CLIENT_WAIT_TIME)
         self.request_event = self.environment.events.request
 
     def trace(self, name, fn):
@@ -37,7 +40,8 @@ class ScittUser(FastHttpUser):
         except Exception as e:
             exc = e
         finally:
-            elapsed = (time.perf_counter() - start_time) * 1000 # Convert to milliseconds
+            elapsed = (time.perf_counter() -
+                       start_time) * 1000  # Convert to milliseconds
             self.request_event.fire(
                 request_type=name,
                 name=name,
@@ -51,6 +55,7 @@ class ScittUser(FastHttpUser):
 
 
 class Submitter(ScittUser):
+
     def on_start(self):
         claims_dir = self.environment.parsed_options.scitt_statements
         self.skip_confirmation = self.environment.parsed_options.skip_confirmation
@@ -60,14 +65,11 @@ class Submitter(ScittUser):
 
     @task
     def submit_signed_statement(self):
-        signed_statement = self._signed_statements[
-            random.randrange(len(self._signed_statements))
-        ]
+        signed_statement = self._signed_statements[random.randrange(
+            len(self._signed_statements))]
         self.trace(
             "submit_signed_statement",
-            lambda: (
-                self.client.submit_signed_statement(signed_statement)
-                if self.skip_confirmation
-                else self.client.submit_signed_statement_and_wait(signed_statement)
-            ),
+            lambda: (self.client.wait_for_operation(self.client.submit_signed_statement(signed_statement))
+                     if self.skip_confirmation else self.client.
+                     submit_signed_statement_and_wait(signed_statement)),
         )

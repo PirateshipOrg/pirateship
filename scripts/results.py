@@ -1513,8 +1513,12 @@ class Result:
                         if key not in latencies:
                             latencies[key] = 0
                         latencies[key] += int(value)
-                    if result.get("num_fails_per_sec" ,{}) != {}:
-                        print(f"\x1b[31;1mFound failures in {fname}. Skipping...\x1b[0m")
+                    if (failures := result.get("num_fail_per_sec" ,{})) != {}:
+                        total = sum(failures.values())
+                        if total > 10:
+                            print(f"\x1b[31;1mFound failures in {fname}({total})\x1b[0m")
+                        # otherwise we just ignore for now
+                        
             except Exception as e:
                 print(f"\x1b[31;1mError reading {fname}. Skipping...\x1b[0m")
                 print(f"\x1b[31;1mError details: {e}\x1b[0m")

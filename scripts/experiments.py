@@ -481,7 +481,7 @@ sleep 30
 
 
     def bins_already_exist(self):
-        TARGET_BINARIES = ["client", "controller", "server", "net-perf"]
+        TARGET_BINARIES = ["client", "controller", "server", "net-perf", "scitt"]
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
 
         res = run_remote_public_ip([

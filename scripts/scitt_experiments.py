@@ -105,6 +105,14 @@ class ScittExperiment(PirateShipExperiment):
         ])
         return crypto_info
 
+    def bins_already_exist(self):
+        remote_repo = f"/home/{self.dev_ssh_user}/repo"
+
+        res = run_remote_public_ip([
+            f"ls {remote_repo}/target/release"
+        ], self.dev_ssh_user, self.dev_ssh_key, self.dev_vm, hide=True)
+
+        return "scitt" in res[0] 
 
     def copy_back_build_files(self):
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
@@ -171,7 +179,7 @@ locust -f {self.remote_workdir}/configs/locustfile.py \
     --spawn-rate {self.num_clients_per_vm[client_n]} \
     --run-time {self.duration} \
     --csv {self.remote_workdir}/logs/{repeat_num}/{bin} \
-    --csv-full-history \
+    --csv-full-history {'--skip-confirmation' if self.base_client_config.get('skip_confirmation', False) else ''}\
     --scitt-statements {self.remote_workdir}/configs/cose  > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err
 EOF
 
