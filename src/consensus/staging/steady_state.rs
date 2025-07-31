@@ -1066,11 +1066,11 @@ impl Staging {
 
         let new_bci = new_bci_fast_path.max(new_bci_slow_path);
 
-        self.do_byzantine_commit(old_bci, new_bci).await;
+        self.do_byzantine_commit(old_bci, new_bci, incoming_qc).await;
         Ok(())
     }
 
-    pub(crate) async fn do_byzantine_commit(&mut self, old_bci: u64, new_bci: u64) {
+    pub(crate) async fn do_byzantine_commit(&mut self, old_bci: u64, new_bci: u64, qc: ProtoQuorumCertificate) {
         if new_bci <= old_bci {
             return;
         }
@@ -1096,7 +1096,7 @@ impl Staging {
             byz_blocks.push(block);
         }
 
-        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks)).await;
+        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks, qc)).await;
         let _ = self.logserver_tx.send(LogServerCommand::UpdateBCI(self.bci)).await;
     }
 

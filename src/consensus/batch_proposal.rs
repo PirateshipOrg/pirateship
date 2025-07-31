@@ -297,11 +297,8 @@ impl BatchProposer {
                 self.reply_tx.send(ClientReplyCommand::ProbeRequestAck(block_n, tx_n, is_audit, ack_chan)).await.unwrap();
             }
                 
-
-
             return None;
         }
-
 
         Some((Some(tx), ack_chan))
 
@@ -326,7 +323,7 @@ impl BatchProposer {
             return (false, 0, 0, false);
         };
 
-        if op.operands.len() != 1 {
+        if op.operands.len() != 2 {
             return (false, 0, 0, false);
         }
 

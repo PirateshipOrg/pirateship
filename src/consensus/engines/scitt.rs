@@ -1,7 +1,7 @@
 use hashbrown::HashMap;
 use std::fmt::Display;
 
-use log::{error, trace, warn};
+use log::{error, trace};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "policy_validation")]
@@ -378,7 +378,7 @@ impl AppEngine for SCITTAppEngine {
 
     #[cfg(feature = "policy_validation")]
     fn handle_validation(
-        &mut self,
+        &self,
         tx_op: &crate::proto::execution::ProtoTransactionOp,
     ) -> crate::consensus::app::TransactionValidationResult {
         #[cfg(feature = "null_validation")]

@@ -4,7 +4,7 @@ use log::{error, info, trace};
 use prost::Message as _;
 use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
 
-use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoTransactionReceipt, ProtoByzResponse, ProtoClientReply, ProtoTryAgain, ProtoTransactionResponse}, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
+use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTransactionResponse, ProtoTryAgain}, consensus::ProtoQuorumCertificate, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
 
 use super::batch_proposal::MsgAckChanWithTag;
 
@@ -12,7 +12,7 @@ pub enum ClientReplyCommand {
     CancelAllRequests,
     StopCancelling,
     CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>, u64 /* last_qc */),
-    ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>),
+    ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>, u64 /* last_qc */),
     UnloggedRequestAck(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
     ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, bool /* is_audit */, MsgAckChanWithTag),
 }
@@ -22,7 +22,7 @@ enum ReplyProcessorCommand {
     CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>),
     ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
-    Probe(bool /* is_audit */, u64 /* block_n */, ProofChain, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
+    Probe(bool /* is_audit */, u64 /* block_n */, ProofChain, Vec<ProtoQuorumCertificate>, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
 }
 pub struct ClientReplyHandler {
     config: AtomicConfig,
@@ -135,17 +135,18 @@ impl ClientReplyHandler {
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         },
 
-                        ReplyProcessorCommand::Probe(is_audit, _block_n, proof_chain, reply_vec) => {
+                        ReplyProcessorCommand::Probe(is_audit, _block_n, proof_chain, qcs, reply_vec) => {
                             for ((reply_chan, client_tag, _sender), _tx_n, inclusion_proof) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
                                 let reply = ProtoClientReply {
                                     reply: Some(
-                                        // this is just syntax sugar for the proto. both are chains and a proof, but the chain validation should be different (1 vs 2 QCs/fastQC)
+                                        // this is just syntax sugar for the proto. both are chains, qcs, a proof, but the chain validation should be different (1 vs 2 QCs/fastQC)
                                         if is_audit { 
                                             crate::proto::client::proto_client_reply::Reply::AuditReceipt(
                                                 ProtoTransactionReceipt {
                                                     chain: proof_chain.clone(),
                                                     proof: inclusion_proof.as_vec(),
+                                                    qcs: qcs.clone(),
                                                 }
                                             )
                                         } else {
@@ -153,6 +154,7 @@ impl ClientReplyHandler {
                                                 ProtoTransactionReceipt {
                                                     chain: proof_chain.clone(),
                                                     proof: inclusion_proof.as_vec(),
+                                                    qcs: qcs.clone(),
                                                 }
                                             )
                                         }
@@ -285,8 +287,12 @@ impl ClientReplyHandler {
                         self.crash_commit_reply_buf.insert(hash, (n, reply_vec));
                     }
                 }
+                self.maybe_clear_probe_buf().await;
             },
-            ClientReplyCommand::ByzCommitAck(byz_commit_ack) => {
+            ClientReplyCommand::ByzCommitAck(byz_commit_ack, qc) => {
+                if qc > self.last_qc {
+                    self.last_qc = qc;
+                }
                 for (hash, (n, reply_vec)) in byz_commit_ack {
                     if let Some(reply_sender_vec) = self.byz_reply_map.remove(&hash) {
                         self.do_byz_commit_reply(reply_sender_vec, hash, n, reply_vec).await;
@@ -354,15 +360,16 @@ impl ClientReplyHandler {
                     continue;
                 };
                 assert_eq!(reply_vec.len(), builder.proofs.len());
-                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, builder.qcs, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
             }
             #[cfg(feature = "dummy_receipts")] {
                 let builder = crate::consensus::issuer::ReceiptBuilder {
                     chain: vec![],
                     proofs: reply_vec.iter().map(|_| MerkleInclusionProof::default()).collect(),
+                    qcs: vec![],
                 };
                 assert_eq!(reply_vec.len(), builder.proofs.len());
-                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, builder.qcs, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
             }
         }
 
@@ -375,15 +382,16 @@ impl ClientReplyHandler {
                     continue;
                 };
                 assert_eq!(reply_vec.len(), builder.proofs.len());
-                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, builder.qcs, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
             }
             #[cfg(feature = "dummy_receipts")] {
                 let builder = crate::consensus::issuer::ReceiptBuilder {
                     chain: vec![],
                     proofs: reply_vec.iter().map(|_| MerkleInclusionProof::default()).collect(),
+                    qcs: vec![],
                 };
                 assert_eq!(reply_vec.len(), builder.proofs.len());
-                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(true, block_n, builder.chain, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
+                self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(false, block_n, builder.chain, builder.qcs, reply_vec.into_iter().zip(builder.proofs).map(|((sender, tx_n), proof)| (sender, tx_n, proof)).collect())).await.unwrap();
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::{HashMap, VecDeque}, sync::Arc};
 
 use log::warn;
 use tokio::sync::{oneshot, Mutex};
@@ -7,7 +7,7 @@ use crate::{
     config::AtomicConfig,
     consensus::logserver::LogServerQuery,
     crypto::{CachedBlock, MerkleInclusionProof},
-    proto::consensus::ProtoBlock,
+    proto::consensus::{ProtoBlock, ProtoQuorumCertificate},
     utils::channel::{make_channel, Receiver, Sender},
 };
 
@@ -15,6 +15,8 @@ pub type ProofChain = Vec<ProtoBlock>;
 pub struct ReceiptBuilder {
     // The chain of blocks from the requested block to the subsequent auditQC
     pub chain: ProofChain,
+    // The list of quorum certificates that can be used to prove the block committed or audited
+    pub qcs: Vec<ProtoQuorumCertificate>,
     // Inclusion proofs for each requested transaction *in the same order as the request*
     pub proofs: Vec<MerkleInclusionProof>,
 }
@@ -26,13 +28,15 @@ pub enum IssuerCommand {
     IssueCommitReceipt(u64, Vec<u64>, oneshot::Sender<Option<ReceiptBuilder>>),
     /// Once a chunk of block is added, cache them for future inclusion proofs
     NewChunk(Vec<CachedBlock>),
+    /// New QC received, cache it for receipts
+    NewQC(ProtoQuorumCertificate),
     /// Drop tail of cached blocks
     Rollback(u64),
     /// Garbage collect cached blocks (at most) up to the current bci
     GC(u64),
 }
 
-const MIN_CACHED_BLOCKS: usize = 1000;
+const MIN_CACHED_BLOCKS: usize = 10000;
 pub struct Issuer {
     config: AtomicConfig,
 
@@ -40,6 +44,8 @@ pub struct Issuer {
     logserver_tx: Sender<LogServerQuery>,
 
     cached_blocks: VecDeque<CachedBlock>,
+
+    cached_qcs: HashMap<u64, ProtoQuorumCertificate>,
 }
 
 impl Issuer {
@@ -53,6 +59,7 @@ impl Issuer {
             issuer_rx,
             logserver_tx,
             cached_blocks: VecDeque::with_capacity(MIN_CACHED_BLOCKS),
+            cached_qcs: HashMap::new(),
         }
     }
 
@@ -81,6 +88,9 @@ impl Issuer {
                     },
                     Some(IssuerCommand::Rollback(block_n)) => {
                         self.handle_rollback(block_n).await;
+                    },
+                    Some(IssuerCommand::NewQC(qc)) => {
+                        self.cached_qcs.insert(qc.n, qc);
                     },
                     Some(IssuerCommand::GC(bci)) => {
                         self.handle_gc(bci).await;
@@ -134,34 +144,37 @@ impl Issuer {
         block_n: u64,
         txs: Vec<u64>,
         reply: oneshot::Sender<Option<ReceiptBuilder>>,
-        n_qcs: usize,
+        target_n_qcs: usize,
     ) {
         let mut chain = Vec::new();
 
         let Some(index) = self.find_block(block_n).await else {
+            warn!("Failed to generate receipt builder. Failed to find block {} in cache", block_n);
             let _ = reply.send(None);
             return;
         };
 
         let block = &self.cached_blocks[index];
 
-        let mut qcs = 0;
+        let mut current_n_qcs = 0;
+        let mut qcs = Vec::new();
         for b in self.cached_blocks.iter().skip(index) {
             chain.push(b.block.clone());
-            if !b.block.qc.is_empty() {
-                if b.block.qc.len() >= self.byzantine_fast_path_threshold() {
-                    qcs += 2;
-                    break; // we have enough QCs to prove the block committed or audited
+            if let Some(qc) = self.cached_qcs.get(&b.block.n) {
+                qcs.push(qc.clone());
+                if qc.sig.len() >= self.byzantine_fast_path_threshold() {
+                    current_n_qcs += 2; // we have enough QCs to prove the block committed or audited
+                } else {
+                    current_n_qcs += 1;
                 }
-                qcs += 1;
             }
-            if qcs >= n_qcs {
-                break; // we have enough QCs to prove the block
+            if current_n_qcs >= target_n_qcs {
+                break
             }
         }
 
-        if qcs < n_qcs {
-            warn!("Not enough QCs to prove block {} audited: {} < {}", block_n, qcs, n_qcs);
+        if current_n_qcs < target_n_qcs {
+            warn!("Not enough QCs to prove block {} audited: {} < {}", block_n, current_n_qcs, target_n_qcs);
             let _ = reply.send(None);
             return;
         }
@@ -177,7 +190,7 @@ impl Issuer {
             .collect()
         };
 
-        let _ = reply.send(Some(ReceiptBuilder { chain, proofs }));
+        let _ = reply.send(Some(ReceiptBuilder { chain, qcs, proofs }));
     }
 
     async fn handle_new_chunk(&mut self, blocks: Vec<CachedBlock>) {
@@ -204,8 +217,13 @@ impl Issuer {
         let bci_cbi = self.find_block(bci).await;
         if self.cached_blocks.len() - bci_cbi.unwrap_or(0) > MIN_CACHED_BLOCKS {
             self.cached_blocks.drain(0..bci_cbi.unwrap_or(0));
-        } else {
+        } else if self.cached_blocks.len() > MIN_CACHED_BLOCKS {
             self.cached_blocks.drain(0..self.cached_blocks.len() - MIN_CACHED_BLOCKS);
+        } else {
+            return; // no blocks to GC, no need to GC QCs either
         }
+        // Drop QCs that are older than the last cached block
+        let last_cached_block = self.cached_blocks.back().map_or(0, |b| b.block.n);
+        self.cached_qcs.retain(|&n, _| n >= last_cached_block);
     }
 }

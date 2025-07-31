@@ -59,7 +59,7 @@ impl AppEngine for NullApp {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, _tx: &crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
+    fn handle_validation(&self, _tx: &crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
         Ok(())
     }
 

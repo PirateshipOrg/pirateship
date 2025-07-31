@@ -3,9 +3,9 @@ use std::{cell::RefCell, marker::PhantomData, pin::Pin, sync::Arc, time::Duratio
 use hex::ToHex;
 use log::{info, warn};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::sync::{oneshot, Mutex};
+use tokio::{sync::{oneshot, Mutex, RwLock}, task::JoinSet};
 
-use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{make_channel, Receiver, Sender}, PerfCounter}};
 
 use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
 #[cfg(feature = "channel_monitoring")]
@@ -17,7 +17,7 @@ pub type TxWithValidationAck = (ProtoTransactionOp, oneshot::Sender<TransactionV
 pub enum AppCommand {
     NewRequestBatch(u64 /* block.n */, u64 /* view */, bool /* view_is_stable */, bool /* i_am_leader */, usize /* length of new batch of request */, HashType /* hash of the last block */),
     CrashCommit(Vec<CachedBlock> /* all blocks from old_ci + 1 to new_ci */),
-    ByzCommit(Vec<CachedBlock> /* all blocks from old_bci + 1 to new_bci */),
+    ByzCommit(Vec<CachedBlock> /* all blocks from old_bci + 1 to new_bci */, ProtoQuorumCertificate /* most recent QC */),
     Rollback(u64 /* new last block */),
     #[cfg(feature = "policy_validation")]
     Validate(CachedBlock, oneshot::Sender<TransactionValidationResult>),
@@ -32,7 +32,7 @@ pub trait AppEngine {
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&mut self, tx: &ProtoTransactionOp) -> TransactionValidationResult;
+    fn handle_validation(&self, tx: &ProtoTransactionOp) -> TransactionValidationResult;
     fn get_current_state(&self) -> Self::State;
 }
 
@@ -113,7 +113,11 @@ impl LogStats {
 pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     _config: AtomicConfig,
 
+    #[cfg(feature = "policy_validation")]
+    engine: Arc<RwLock<E>>,
+    #[cfg(not(feature = "policy_validation"))]
     engine: E,
+
     stats: LogStats,
 
     staging_rx: Receiver<AppCommand>,
@@ -125,8 +129,6 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     client_reply_tx: Sender<ClientReplyCommand>,
     issuer_tx: Sender<IssuerCommand>,
 
-    #[cfg(feature = "policy_validation")]
-    validation_rx: Receiver<TxWithValidationAck>,
 
     checkpoint_timer: Arc<Pin<Box<ResettableTimer>>>,
     log_timer: Arc<Pin<Box<ResettableTimer>>>,
@@ -139,10 +141,20 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     channel_monitor: Arc<Mutex<ChannelMonitor>>,
 
     phantom: PhantomData<&'a E>,
+
+
+    #[cfg(feature = "policy_validation")]
+    validation_rx: Receiver<TxWithValidationAck>,
+    #[cfg(feature = "policy_validation")]
+    validation_handles: JoinSet<()>,
+    #[cfg(feature = "policy_validation")]
+    validation_txs: Vec<Sender<TxWithValidationAck>>,
+    #[cfg(feature = "policy_validation")]
+    last_tx: usize,
 }
 
 
-impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
+impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
     pub fn new(
         config: AtomicConfig,
         staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
@@ -157,6 +169,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     ) -> Self {
         let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
         let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
+
+        #[cfg(feature = "policy_validation")]
+        let engine = Arc::new(RwLock::new(E::new(config.clone())));
+        #[cfg(not(feature = "policy_validation"))]
         let engine = E::new(config.clone());
 
         let event_order = vec![
@@ -186,11 +202,29 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             channel_monitor: channel_monitor,
             #[cfg(feature = "policy_validation")]
             validation_rx,
+            #[cfg(feature = "policy_validation")]
+            validation_handles: JoinSet::new(),
+            #[cfg(feature = "policy_validation")]
+            validation_txs: Vec::new(),
+            #[cfg(feature = "policy_validation")]
+            last_tx: 0,
         }
     }
 
     pub async fn run(application: Arc<Mutex<Self>>) {
         let mut application = application.lock().await;
+
+        #[cfg(feature = "policy_validation")]
+        for _ in 0..4 {
+            let (tx, rx) = make_channel(2048);
+            application.validation_txs.push(tx);
+            let engine_clone = Arc::clone(&application.engine);
+            application.validation_handles.spawn(async move {
+                while let Some((tx, reply_tx)) = rx.recv().await {
+                    let _ = reply_tx.send(engine_clone.read().await.handle_validation(&tx));
+                }
+            });
+        }
 
         let log_timer_handle = application.log_timer.run().await;
         let checkpoint_timer_handle = application.checkpoint_timer.run().await;
@@ -256,10 +290,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     return Err(());
                 }
                 let (tx, reply_tx) = txwva.unwrap();
-                let res = reply_tx.send(self.engine.handle_validation(&tx));
-                if res.is_err() {
-                    warn!("Validation reply channel closed, skipping validation for tx: {:?}\n{:?}", tx, res.err().unwrap());
-                }
+                // let (otx, orx) = oneshot::channel();
+                self.validation_txs[self.last_tx].send((tx, reply_tx)).await.unwrap();
+                // let _ = reply_tx.send(orx.await.unwrap());
+                self.last_tx = (self.last_tx + 1) % self.validation_txs.len();
             },
             _ = self.checkpoint_timer.wait() => {
                 self.checkpoint().await;
@@ -285,7 +319,15 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     }
 
     async fn checkpoint(&mut self) {
-        let state = self.engine.get_current_state();
+        #[allow(unused_mut)]
+        let mut state;
+        #[cfg(feature = "policy_validation")] {
+            state = self.engine.read().await.get_current_state();
+        }
+        #[cfg(not(feature = "policy_validation"))] {
+            state = self.engine.get_current_state();
+        }
+
         // TODO: Decide on checkpointing strategy
 
         info!("Current state checkpoint: {}", state);
@@ -301,7 +343,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             self.gc_tx.send(self.stats.bci - 1).await.unwrap();
             let _ = self.issuer_tx.send(IssuerCommand::GC(self.stats.bci)).await;
         } 
-
     }
 
     async fn handle_unlogged_request(&mut self, request: ProtoTransaction, reply_tx: oneshot::Sender<ProtoTransactionResult>) {
@@ -314,8 +355,14 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             }
         }
 
-        
-        let result = self.engine.handle_unlogged_request(request);
+        #[allow(unused_mut)]
+        let mut result; 
+        #[cfg(feature = "policy_validation")] {
+            result = self.engine.write().await.handle_unlogged_request(request);
+        }
+        #[cfg(not(feature = "policy_validation"))] {
+            result = self.engine.handle_unlogged_request(request);
+        }
         self.stats.total_requests += 1;
         self.stats.total_unlogged_txs += 1;
 
@@ -333,9 +380,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     fn perf_add_event(&mut self, entry: u64, event: &str) {
         self.perf_counter.borrow_mut().new_event(event, &entry);
     }
-
-
-
 
     async fn handle_staging_command(&mut self, cmd: AppCommand) {
         match cmd {
@@ -373,7 +417,14 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
 
                 let _ = self.issuer_tx.send(IssuerCommand::NewChunk(blocks.clone())).await;
 
-                let results = self.engine.handle_crash_commit(blocks);
+                #[allow(unused_mut)]
+                let mut results;
+                #[cfg(feature = "policy_validation")] {
+                    results = self.engine.write().await.handle_crash_commit(blocks);
+                }
+                #[cfg(not(feature = "policy_validation"))] {
+                    results = self.engine.handle_crash_commit(blocks);
+                }
                 
                 for n in &block_ns {
                     self.perf_add_event(*n, "Process Crash Committed Block");
@@ -394,7 +445,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     self.perf_add_event(n, "Send Reply");
                 }
             },
-            AppCommand::ByzCommit(blocks) => {
+            AppCommand::ByzCommit(blocks, qc) => {
                 let mut new_bci = self.stats.bci;
                 let (block_hashes, block_ns) = blocks.iter().map(|block| {
                     if new_bci < block.block.n {
@@ -402,7 +453,18 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     }
                     (block.block_hash.clone(), block.block.n)
                 }).collect::<(Vec<_>, Vec<_>)>();
-                let results = self.engine.handle_byz_commit(blocks);
+                let qc_n = qc.n;
+                let _ = self.issuer_tx.send(IssuerCommand::NewQC(qc)).await;
+
+                #[allow(unused_mut)]
+                let mut results;
+                #[cfg(feature = "policy_validation")] {
+                    results = self.engine.write().await.handle_byz_commit(blocks);
+                }
+                #[cfg(not(feature = "policy_validation"))] {
+                    results = self.engine.handle_byz_commit(blocks);
+                }
+
                 self.stats.total_byz_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
                 self.stats.bci = new_bci;
 
@@ -412,8 +474,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoByzResponse>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
                     block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoByzResponse>)
                 ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::ByzCommitAck(result_map)).await.unwrap();
-                
+                self.client_reply_tx.send(ClientReplyCommand::ByzCommitAck(result_map, qc_n)).await.unwrap();
+
                 for n in block_ns_cp {
                     self.perf_deregister(n);
                 }
@@ -434,21 +496,37 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
 
                 self.stats.last_n = new_last_block;
                 let _ = self.issuer_tx.send(IssuerCommand::Rollback(new_last_block)).await;
-                self.engine.handle_rollback(new_last_block);
+
+                #[cfg(feature = "policy_validation")] {
+                     self.engine.write().await.handle_rollback(new_last_block);
+                }
+                #[cfg(not(feature = "policy_validation"))] {
+                    self.engine.handle_rollback(new_last_block);
+                }
             }
             #[cfg(feature = "policy_validation")]
             AppCommand::Validate(block, reply_tx) => {
+                let mut i = 0;
+                let mut replies = vec![];
                 for tx in &block.block.tx_list {
                     let Some(phase) = &tx.on_crash_commit else {
                         continue;
                     };
                     for op in &phase.ops {
-                        let result = self.engine.handle_validation(op);
-                        if result.is_err() {
-                            reply_tx.send(result).unwrap();
-                            return;
-                        }
+                        let (tx, rx) = oneshot::channel();
+                        replies.push(rx);
+                        self.validation_txs[i % self.validation_txs.len()]
+                            .send((op.clone(), tx)).await.unwrap();
+                        i += 1;
                     }
+                }
+                for reply_rx in replies {
+                    let res = reply_rx.await.unwrap();
+                    if res.is_err() {
+                        reply_tx.send(res).unwrap();
+                        return;
+                    }
+
                 }
                 reply_tx.send(Ok(())).unwrap();
             }
