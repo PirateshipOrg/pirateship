@@ -115,6 +115,7 @@ impl ConsensusConfig {
 pub struct AppConfig {
     pub logger_stats_report_ms: u64,
     pub checkpoint_interval_ms: u64,
+    pub validation_workers: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -237,6 +238,7 @@ impl ClientConfig {
             app_config: AppConfig {
                 logger_stats_report_ms: 100,
                 checkpoint_interval_ms: 60000,
+                validation_workers: 1,
             },
             
             #[cfg(feature = "evil")]

@@ -114,10 +114,13 @@ evil = []
 extra_2pc = []
 no_pipeline = []
 extra_qc_check = []
-policy_validation = ["rquickjs", "scitt-cose", "base64"]
 channel_monitoring = []
-null_validation = ["policy_validation"]
 dummy_receipts = []
+# validation stuff
+policy_validation = ["rquickjs", "scitt-cose", "base64"]
+concurrent_validation = ["policy_validation"]
+sequential_validation = ["policy_validation"]
+null_validation = ["policy_validation", "sequential_validation"]
 
 # Applications
 app_logger = []

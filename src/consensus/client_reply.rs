@@ -11,7 +11,7 @@ use super::batch_proposal::MsgAckChanWithTag;
 pub enum ClientReplyCommand {
     CancelAllRequests,
     StopCancelling,
-    CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>, u64 /* last_qc */),
+    CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>),
     ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>, u64 /* last_qc */),
     UnloggedRequestAck(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
     ProbeRequestAck(u64 /* block_n */, u64 /* tx_n */, bool /* is_audit */, MsgAckChanWithTag),
@@ -235,6 +235,8 @@ impl ClientReplyHandler {
             
             self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses)).await.unwrap();
         }
+
+        self.maybe_clear_probe_buf().await;
     }
 
     async fn do_byz_commit_reply(&mut self, reply_sender_vec: Vec<(u64, SenderType)>, _hash: HashType, n: u64, reply_vec: Vec<ProtoByzResponse>) {
@@ -277,8 +279,7 @@ impl ClientReplyHandler {
                 self.must_cancel = true;
                 
             },
-            ClientReplyCommand::CrashCommitAck(crash_commit_ack, last_qc) => {
-                self.last_qc = last_qc; // just assume this is correct. it might get rolled back, but that should be fine if generating commit receipts fails gracefully.
+            ClientReplyCommand::CrashCommitAck(crash_commit_ack) => {
                 for (hash, (n, reply_vec)) in crash_commit_ack {
                     if let Some(reply_sender_vec) = self.reply_map.remove(&hash) {
                         self.do_crash_commit_reply(reply_sender_vec, hash, n, reply_vec).await;
@@ -287,7 +288,6 @@ impl ClientReplyHandler {
                         self.crash_commit_reply_buf.insert(hash, (n, reply_vec));
                     }
                 }
-                self.maybe_clear_probe_buf().await;
             },
             ClientReplyCommand::ByzCommitAck(byz_commit_ack, qc) => {
                 if qc > self.last_qc {

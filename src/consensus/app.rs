@@ -3,9 +3,15 @@ use std::{cell::RefCell, marker::PhantomData, pin::Pin, sync::Arc, time::Duratio
 use hex::ToHex;
 use log::{info, warn};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::{sync::{oneshot, Mutex, RwLock}, task::JoinSet};
+use tokio::{sync::{oneshot, Mutex}};
 
-use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{make_channel, Receiver, Sender}, PerfCounter}};
+#[cfg(feature = "concurrent_validation")]
+use tokio::{sync::RwLock, task::JoinSet};
+
+use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+
+#[cfg(feature = "concurrent_validation")]
+use crate::utils::channel::make_channel;
 
 use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
 #[cfg(feature = "channel_monitoring")]
@@ -13,6 +19,9 @@ use super::channel_monitor::ChannelMonitor;
 
 pub type TransactionValidationResult = Result<(), String>;
 pub type TxWithValidationAck = (ProtoTransactionOp, oneshot::Sender<TransactionValidationResult>);
+
+#[cfg(all(feature = "policy_validation", not(any(feature = "concurrent_validation", feature = "sequential_validation"))))]
+compile_error!("policy_validation requires exactly one of: concurrent_validation, sequential_validation");
 
 pub enum AppCommand {
     NewRequestBatch(u64 /* block.n */, u64 /* view */, bool /* view_is_stable */, bool /* i_am_leader */, usize /* length of new batch of request */, HashType /* hash of the last block */),
@@ -113,9 +122,9 @@ impl LogStats {
 pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     _config: AtomicConfig,
 
-    #[cfg(feature = "policy_validation")]
+    #[cfg(feature = "concurrent_validation")]
     engine: Arc<RwLock<E>>,
-    #[cfg(not(feature = "policy_validation"))]
+    #[cfg(not(feature = "concurrent_validation"))]
     engine: E,
 
     stats: LogStats,
@@ -145,11 +154,11 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
 
     #[cfg(feature = "policy_validation")]
     validation_rx: Receiver<TxWithValidationAck>,
-    #[cfg(feature = "policy_validation")]
+    #[cfg(feature = "concurrent_validation")]
     validation_handles: JoinSet<()>,
-    #[cfg(feature = "policy_validation")]
+    #[cfg(feature = "concurrent_validation")]
     validation_txs: Vec<Sender<TxWithValidationAck>>,
-    #[cfg(feature = "policy_validation")]
+    #[cfg(feature = "concurrent_validation")]
     last_tx: usize,
 }
 
@@ -170,9 +179,9 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
         let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
         let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
 
-        #[cfg(feature = "policy_validation")]
+        #[cfg(feature = "concurrent_validation")]
         let engine = Arc::new(RwLock::new(E::new(config.clone())));
-        #[cfg(not(feature = "policy_validation"))]
+        #[cfg(not(feature = "concurrent_validation"))]
         let engine = E::new(config.clone());
 
         let event_order = vec![
@@ -202,11 +211,11 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
             channel_monitor: channel_monitor,
             #[cfg(feature = "policy_validation")]
             validation_rx,
-            #[cfg(feature = "policy_validation")]
+            #[cfg(feature = "concurrent_validation")]
             validation_handles: JoinSet::new(),
-            #[cfg(feature = "policy_validation")]
+            #[cfg(feature = "concurrent_validation")]
             validation_txs: Vec::new(),
-            #[cfg(feature = "policy_validation")]
+            #[cfg(feature = "concurrent_validation")]
             last_tx: 0,
         }
     }
@@ -214,8 +223,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
     pub async fn run(application: Arc<Mutex<Self>>) {
         let mut application = application.lock().await;
 
-        #[cfg(feature = "policy_validation")]
-        for _ in 0..4 {
+        #[cfg(feature = "concurrent_validation")]
+        for _ in 0..application._config.get().app_config.validation_workers {
             let (tx, rx) = make_channel(2048);
             application.validation_txs.push(tx);
             let engine_clone = Arc::clone(&application.engine);
@@ -289,11 +298,15 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 if txwva.is_none() {
                     return Err(());
                 }
-                let (tx, reply_tx) = txwva.unwrap();
-                // let (otx, orx) = oneshot::channel();
-                self.validation_txs[self.last_tx].send((tx, reply_tx)).await.unwrap();
-                // let _ = reply_tx.send(orx.await.unwrap());
-                self.last_tx = (self.last_tx + 1) % self.validation_txs.len();
+                #[cfg(feature = "concurrent_validation")] {
+                    let (tx, reply_tx) = txwva.unwrap();
+                    self.validation_txs[self.last_tx].send((tx, reply_tx)).await.unwrap();
+                    self.last_tx = (self.last_tx + 1) % self.validation_txs.len();
+                }
+                #[cfg(feature = "sequential_validation")] {
+                    let (tx, reply_tx) = txwva.unwrap();
+                    reply_tx.send(self.engine.handle_validation(&tx)).unwrap();
+                }
             },
             _ = self.checkpoint_timer.wait() => {
                 self.checkpoint().await;
@@ -321,10 +334,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
     async fn checkpoint(&mut self) {
         #[allow(unused_mut)]
         let mut state;
-        #[cfg(feature = "policy_validation")] {
+        #[cfg(feature = "concurrent_validation")] {
             state = self.engine.read().await.get_current_state();
         }
-        #[cfg(not(feature = "policy_validation"))] {
+        #[cfg(not(feature = "concurrent_validation"))] {
             state = self.engine.get_current_state();
         }
 
@@ -356,11 +369,11 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
         }
 
         #[allow(unused_mut)]
-        let mut result; 
-        #[cfg(feature = "policy_validation")] {
+        let mut result;
+        #[cfg(feature = "concurrent_validation")] {
             result = self.engine.write().await.handle_unlogged_request(request);
         }
-        #[cfg(not(feature = "policy_validation"))] {
+        #[cfg(not(feature = "concurrent_validation"))] {
             result = self.engine.handle_unlogged_request(request);
         }
         self.stats.total_requests += 1;
@@ -419,10 +432,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
 
                 #[allow(unused_mut)]
                 let mut results;
-                #[cfg(feature = "policy_validation")] {
+                #[cfg(feature = "concurrent_validation")] {
                     results = self.engine.write().await.handle_crash_commit(blocks);
                 }
-                #[cfg(not(feature = "policy_validation"))] {
+                #[cfg(not(feature = "concurrent_validation"))] {
                     results = self.engine.handle_crash_commit(blocks);
                 }
                 
@@ -440,7 +453,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoTransactionResult>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
                     block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoTransactionResult>)
                 ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::CrashCommitAck(result_map, new_last_qc)).await.unwrap();
+                self.client_reply_tx.send(ClientReplyCommand::CrashCommitAck(result_map)).await.unwrap();
                 for n in block_ns_cp {
                     self.perf_add_event(n, "Send Reply");
                 }
@@ -458,10 +471,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
 
                 #[allow(unused_mut)]
                 let mut results;
-                #[cfg(feature = "policy_validation")] {
+                #[cfg(feature = "concurrent_validation")] {
                     results = self.engine.write().await.handle_byz_commit(blocks);
                 }
-                #[cfg(not(feature = "policy_validation"))] {
+                #[cfg(not(feature = "concurrent_validation"))] {
                     results = self.engine.handle_byz_commit(blocks);
                 }
 
@@ -497,34 +510,50 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 self.stats.last_n = new_last_block;
                 let _ = self.issuer_tx.send(IssuerCommand::Rollback(new_last_block)).await;
 
-                #[cfg(feature = "policy_validation")] {
+                #[cfg(feature = "concurrent_validation")] {
                      self.engine.write().await.handle_rollback(new_last_block);
                 }
-                #[cfg(not(feature = "policy_validation"))] {
+                #[cfg(not(feature = "concurrent_validation"))] {
                     self.engine.handle_rollback(new_last_block);
                 }
             }
             #[cfg(feature = "policy_validation")]
-            AppCommand::Validate(block, reply_tx) => {
-                let mut i = 0;
-                let mut replies = vec![];
-                for tx in &block.block.tx_list {
+            AppCommand::Validate(_block, reply_tx) => {
+                #[cfg(feature = "concurrent_validation")] {
+                    let mut i = 0;
+                    let mut replies = vec![];
+                    for tx in &_block.block.tx_list {
+                        let Some(phase) = &tx.on_crash_commit else {
+                            continue;
+                        };
+                        for op in &phase.ops {
+                            let (tx, rx) = oneshot::channel();
+                            replies.push(rx);
+                            self.validation_txs[i % self.validation_txs.len()]
+                                .send((op.clone(), tx)).await.unwrap();
+                            i += 1;
+                        }
+                    }
+                    for reply_rx in replies {
+                        let res = reply_rx.await.unwrap();
+                        if res.is_err() {
+                            reply_tx.send(res).unwrap();
+                            return;
+                        }
+
+                    }
+                }
+                #[cfg(feature = "sequential_validation")]
+                for tx in &_block.block.tx_list {
                     let Some(phase) = &tx.on_crash_commit else {
                         continue;
                     };
                     for op in &phase.ops {
-                        let (tx, rx) = oneshot::channel();
-                        replies.push(rx);
-                        self.validation_txs[i % self.validation_txs.len()]
-                            .send((op.clone(), tx)).await.unwrap();
-                        i += 1;
-                    }
-                }
-                for reply_rx in replies {
-                    let res = reply_rx.await.unwrap();
-                    if res.is_err() {
-                        reply_tx.send(res).unwrap();
-                        return;
+                        let res = self.engine.handle_validation(op);
+                        if res.is_err() {
+                            reply_tx.send(res).unwrap();
+                            return;
+                        }
                     }
 
                 }

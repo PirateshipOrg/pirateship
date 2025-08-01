@@ -4,6 +4,7 @@ use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 
 use log::warn;
 use pft::config::Config;
+#[cfg(feature = "concurrent_validation")]
 use pft::consensus::app::TxWithValidationAck;
 use pft::consensus::batch_proposal::TxWithAckChanTag;
 use pft::consensus::engines::scitt::{SCITTWriteType, TXID};
@@ -16,11 +17,14 @@ use pft::utils::channel::Sender;
 use prost::Message;
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
-use serde::{de, Deserialize};
+use serde::Deserialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{collections::HashMap, fs::File, io::BufReader};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
+#[cfg(feature = "concurrent_validation")]
+use tokio::sync::oneshot;
+use scitt_cose;
 
 static AUDIT_RECEIPT: bool = cfg!(not(feature = "commit_receipts"));
 
@@ -32,7 +36,8 @@ struct AppState {
     /// Request cache to store responses for TXID lookups.
     request_cache: Arc<Mutex<HashMap<TXID, ProtoTransactionResponse>>>,
     /// Global channel to validate claims before submission
-    validator_tx: Sender<TxWithValidationAck>,
+    #[cfg(feature = "concurrent_validation")]
+    validation_tx: Sender<TxWithValidationAck>,
 }
 
 #[derive(Deserialize)]
@@ -56,16 +61,18 @@ async fn register_signed_statement(
         ],
     };
 
-    let (tx, rx) = oneshot::channel();
-    state
-        .validator_tx
-        .send((transaction_op.clone(), tx))
-        .await
-        .expect("Failed to send validation request");
-    match rx.await.expect("Failed to receive validation response") {
-        Ok(_) => (),
-        Err(err) => {
-            return HttpResponse::BadRequest().body(format!("Claim validation failed: {}", err))
+    #[cfg(feature = "concurrent_validation")] {
+        let (tx, rx) = oneshot::channel();
+        state
+            .validation_tx
+            .send((transaction_op.clone(), tx))
+            .await
+            .expect("Failed to send validation request");
+        match rx.await.expect("Failed to receive validation response") {
+            Ok(_) => (),
+            Err(err) => {
+                return HttpResponse::BadRequest().body(format!("Claim validation failed: {}", err))
+            }
         }
     }
 
@@ -99,16 +106,22 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
         None => return HttpResponse::BadRequest().body("Invalid txid"),
     };
 
-    let _receipt = match get_receipt(&txid, &state, AUDIT_RECEIPT).await {
+    let receipt = match get_receipt(&txid, &state, AUDIT_RECEIPT).await {
         Ok(receipt) => receipt,
         Err(err) => return err,
     };
 
-    // TODO receipt to cose
+    let cose_receipt = match scitt_cose::create_cose_receipt(receipt.proof, None) {
+        Ok(cose_bytes) => cose_bytes,
+        Err(err) => {
+            warn!("Failed to create COSE receipt: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to create COSE receipt");
+        }
+    };
 
     HttpResponse::Ok()
         .content_type("application/cose")
-        .body(vec![])
+        .body(cose_receipt)
 }
 
 /// Retrieve Statement with Embedded Receipt
@@ -138,16 +151,32 @@ async fn get_entry_statement(
         return HttpResponse::NotFound().body("No results found for the given txid");
     }
 
-    let _receipt = match get_receipt(&txid, &state, AUDIT_RECEIPT).await {
+    let claim = &results[0].values[0];
+
+    let receipt = match get_receipt(&txid, &state, AUDIT_RECEIPT).await {
         Ok(receipt) => receipt,
         Err(err) => return err,
     };
 
-    // TODO embed the receipt in the response
+    let cose_receipt = match scitt_cose::create_cose_receipt(receipt.proof, None) {
+        Ok(cose_bytes) => cose_bytes,
+        Err(err) => {
+            warn!("Failed to create COSE receipt: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to create COSE receipt");
+        }
+    };
+
+    let statement_with_receipt = match scitt_cose::embed_receipt_in_statement(claim, cose_receipt) {
+        Ok(cose_bytes) => cose_bytes,
+        Err(err) => {
+            warn!("Failed to embed receipt in statement: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to embed receipt in statement");
+        }
+    };
 
     HttpResponse::Ok()
         .content_type("application/cose")
-        .body(results[0].values[0].clone())
+        .body(statement_with_receipt)
 }
 
 /// Retrieve IDs for all entries within a range
@@ -245,16 +274,18 @@ async fn register_policy(policy: web::Bytes, state: web::Data<AppState>) -> impl
         operands: vec![SCITTWriteType::Policy.to_slice().to_vec(), policy.to_vec()],
     };
 
-    let (tx, rx) = oneshot::channel();
-    state
-        .validator_tx
-        .send((transaction_op.clone(), tx))
-        .await
-        .expect("Failed to send validation request");
-    match rx.await.expect("Failed to receive validation response") {
-        Ok(_) => (),
-        Err(err) => {
-            return HttpResponse::BadRequest().body(format!("policy validation failed: {}", err))
+    #[cfg(feature = "concurrent_validation")] {
+        let (tx, rx) = oneshot::channel();
+        state
+            .validation_tx
+            .send((transaction_op.clone(), tx))
+            .await
+            .expect("Failed to send validation request");
+        match rx.await.expect("Failed to receive validation response") {
+            Ok(_) => (),
+            Err(err) => {
+                return HttpResponse::BadRequest().body(format!("policy validation failed: {}", err))
+            }
         }
     }
 
@@ -445,8 +476,9 @@ fn unwrap_receipt(
 pub async fn run_actix_server(
     config: Config,
     batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>,
-    validator_tx: pft::utils::channel::AsyncSenderWrapper<TxWithValidationAck>,
     actix_threads: usize,
+    #[cfg(feature = "concurrent_validation")]
+    validation_tx: pft::utils::channel::AsyncSenderWrapper<TxWithValidationAck>,
 ) -> std::io::Result<()> {
     let addr = config.net_config.addr.clone();
     // Add 1000 to the port.
@@ -501,7 +533,8 @@ pub async fn run_actix_server(
             batch_proposer_tx: batch_proposer_tx.clone(),
             curr_client_tag: AtomicU64::new(0),
             request_cache: Arc::new(Mutex::new(HashMap::new())),
-            validator_tx: validator_tx.clone(),
+            #[cfg(feature = "concurrent_validation")]
+            validation_tx: validation_tx.clone(),
         };
 
         App::new()

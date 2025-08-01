@@ -29,7 +29,7 @@ use crate::proto::consensus::ProtoBlock;
 pub struct SCITTState {
     pub crash_committed_claims: HashMap<TXID, Vec<(u64, Vec<u8>) /* versions */>>,
     pub byz_committed_claims: HashMap<TXID, Vec<u8>>,
-    pub crash_committed_policies: Vec<Vec<u8>>,
+    pub crash_committed_policies: Vec<(u64, Vec<u8>)>,
     pub byz_committed_policies: Vec<Vec<u8>>,
 }
 
@@ -189,7 +189,7 @@ impl AppEngine for SCITTAppEngine {
                             SCITTWriteType::Policy => {
                                 let policy = &op.operands[1];
 
-                                self.state.crash_committed_policies.push(policy.clone());
+                                self.state.crash_committed_policies.push((proto_block.n, policy.clone()));
 
                                 txn_result.result.push(ProtoTransactionOpResult {
                                     success: true,
@@ -308,6 +308,12 @@ impl AppEngine for SCITTAppEngine {
             val_versions.retain(|v| v.0 > self.last_bci);
         }
         self.state.crash_committed_claims.retain(|_, v| v.len() > 0);
+        for (version, policy) in self.state.crash_committed_policies.iter() {
+            if *version <= self.last_bci {
+                self.state.byz_committed_policies.push(policy.clone());
+            }
+        }
+        self.state.crash_committed_policies.retain(|(v, _)| *v > self.last_bci);
         trace!("block count:{}", block_count);
         trace!("transaction count{}", txn_count);
         final_result
@@ -406,8 +412,7 @@ impl AppEngine for SCITTAppEngine {
             }
         };
 
-        let policy = self.state.crash_committed_policies.last();
-        let Some(policy) = policy else {
+        let Some(policy) = self.get_current_policy() else {
             return Err("No currently active policy found".to_string());
         };
 
@@ -460,6 +465,19 @@ impl SCITTAppEngine {
             Some(scan_result)
         } else {
             None
+        }
+    }
+
+    #[cfg(feature = "policy_validation")]
+    fn get_current_policy(&self) -> Option<&Vec<u8>> {
+        if let Some((_, policy)) = self.state.crash_committed_policies.last() {
+            Some(policy)
+        } else {
+            if let Some(policy) = self.state.byz_committed_policies.last() {
+                Some(policy)
+            } else {
+                None
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use coset::{cbor::Value, Algorithm, CborSerializable, ContentType, CoseSign1, Label};
+use coset::{cbor::Value, Algorithm, CborSerializable, ContentType, CoseSign1, Label, CoseSign1Builder, HeaderBuilder};
 use didx509_sys;
 use minicbor::decode::Decoder;
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
@@ -29,6 +29,10 @@ const LABEL_X5CHAIN: i64 = 33;
 const LABEL_ISSUER: i64 = 391;
 const LABEL_FEED: i64 = 392;
 const LABEL_SCITT_RECEIPTS: i64 = 394;
+const LABEL_VDS: i64 = 395;
+const LABEL_VDP: i64 = 396;
+const LABEL_QCS: i64 = 397;
+const LABEL_INCLUSION_PROOF: i64 = -1;
 
 #[allow(dead_code)]
 pub struct CWT {
@@ -407,29 +411,106 @@ fn verify_statement(signed_statement: &[u8]) -> Result<COSEHeaders, String> {
     Ok(headers)
 }
 
-pub fn validate_scitt_cose_signed_statement(
-    tagged_cose_bytes: &[u8],
-) -> Result<COSEHeaders, String> {
+fn skip_cose_tag(tagged_cose_bytes: &[u8]) -> Result<&[u8], String> {
     let mut dec = Decoder::new(tagged_cose_bytes);
-
-    // SCITT uses tagged statements, as such we expect tag 18 (COSE_Sign1)
-    let tag = dec
-        .tag()
-        .map_err(|e| format!("Error decoding tag: {}", e))?;
-
+    let tag = dec.tag().map_err(|e| format!("Error decoding tag: {}", e))?;
     if tag.as_u64() != 18 {
         return Err(format!("Expected tag 18 for COSE_Sign1, got tag {}", tag));
     }
-
     let start = dec.position();
-    dec.skip()
-        .map_err(|e| format!("Error skipping COSE_Sign1: {}", e))?;
+    dec.skip().map_err(|e| format!("Error skipping COSE_Sign1: {}", e))?;
     let end = dec.position();
+    Ok(&tagged_cose_bytes[start..end])
+}
 
-    let cose_bytes = &tagged_cose_bytes[start..end];
+pub fn validate_scitt_cose_signed_statement(
+    tagged_cose_bytes: &[u8],
+) -> Result<COSEHeaders, String> {
+    let cose_bytes = match skip_cose_tag(tagged_cose_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Err(err);
+        }
+    };
 
     match verify_statement(&cose_bytes) {
         Ok(headers) => Ok(headers),
         Err(err) => Err(format!("COSE verification failed: {}", err)),
     }
+}
+
+pub fn create_cose_receipt(
+    inclusion_proof_path: Vec<Vec<u8>>,
+    signature_bytes: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let cose_sign1 = if let Some(sig_bytes) = signature_bytes {
+        CoseSign1::from_slice(sig_bytes)
+            .map_err(|e| format!("Failed to decode existing COSE signature: {}", e))?
+    } else {
+        CoseSign1Builder::new()
+            .payload(vec![])
+            .build()
+    };
+    
+    let mut unprotected_header = HeaderBuilder::new();
+    
+    let proof_path_values: Vec<Value> = inclusion_proof_path
+        .into_iter()
+        .map(|bytes| Value::Bytes(bytes))
+        .collect();
+    
+    let inclusion_proof_value = Value::Array(proof_path_values);
+    let vdp_map = Value::Map(vec![(
+        Value::Integer(LABEL_INCLUSION_PROOF.into()),
+        inclusion_proof_value,
+    )]);
+    
+    unprotected_header = unprotected_header.value(LABEL_VDP, vdp_map);
+    
+    let cose_receipt = CoseSign1Builder::new()
+        .protected(cose_sign1.protected.header.clone())
+        .unprotected(unprotected_header.build())
+        .payload(cose_sign1.payload.unwrap_or_default())
+        .signature(cose_sign1.signature.clone())
+        .build();
+    
+    cose_receipt.to_vec()
+        .map_err(|e| format!("Failed to serialize COSE receipt: {}", e))
+}
+
+pub fn embed_receipt_in_statement(
+    cose_statement_bytes: &Vec<u8>,
+    cose_receipt_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let original_cose = CoseSign1::from_slice(skip_cose_tag(cose_statement_bytes).unwrap())
+        .map_err(|e| format!("Failed to decode COSE statement: {}", e))?;
+    
+    let mut unprotected_header = HeaderBuilder::new();
+    
+    for (label, value) in &original_cose.unprotected.rest {
+        unprotected_header = unprotected_header.value(
+            match label {
+                coset::Label::Int(i) => *i,
+                coset::Label::Text(s) => {
+                    return Err(format!("Expected only int labels: {}", s));
+                }
+            },
+            value.clone()
+        );
+    }
+    
+    let receipt_value = Value::Bytes(cose_receipt_bytes);
+    let receipts_array = Value::Array(vec![receipt_value]);
+    
+    unprotected_header = unprotected_header.value(LABEL_SCITT_RECEIPTS, receipts_array);
+    
+    let cose_with_receipt = CoseSign1Builder::new()
+        .protected(original_cose.protected.header.clone())
+        .unprotected(unprotected_header.build())
+        .payload(original_cose.payload.unwrap_or_default())
+        .signature(original_cose.signature.clone())
+        .build();
+    
+    cose_with_receipt.to_vec()
+        .map_err(|e| format!("Failed to serialize COSE statement with receipt: {}", e))
 }

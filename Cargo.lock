@@ -4422,6 +4422,7 @@ dependencies = [
  "reqwest",
  "rustls 0.20.9",
  "rustls-pemfile 1.0.4",
+ "scitt-cose",
  "serde",
  "serde_cbor",
  "serde_json",

@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, VecDeque}, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use log::warn;
 use tokio::sync::{oneshot, Mutex};
@@ -44,7 +47,6 @@ pub struct Issuer {
     logserver_tx: Sender<LogServerQuery>,
 
     cached_blocks: VecDeque<CachedBlock>,
-
     cached_qcs: HashMap<u64, ProtoQuorumCertificate>,
 }
 
@@ -120,14 +122,24 @@ impl Issuer {
         }
 
         let (tx, rx) = make_channel(1);
-        self.logserver_tx.send(LogServerQuery::GetChunk(block_n, head, tx)).await.unwrap();
+        self.logserver_tx
+            .send(LogServerQuery::GetChunk(block_n, head, tx))
+            .await
+            .unwrap();
         let chunk = rx.recv().await.unwrap();
 
         if chunk.is_empty() {
             return None; // logserver does not have the necessary ledger chunk to build this receipt (?)
         }
 
-        assert!(self.cached_blocks.back().map_or(true, |f| f.block.n > chunk.last().unwrap().block.n), "Block number {} is greater than requested {}", chunk.last().unwrap().block.n, head);
+        assert!(
+            self.cached_blocks
+                .back()
+                .map_or(true, |f| f.block.n > chunk.last().unwrap().block.n),
+            "Block number {} is greater than requested {}",
+            chunk.last().unwrap().block.n,
+            head
+        );
         for b in chunk.into_iter().rev() {
             self.cached_blocks.push_front(b);
         }
@@ -149,7 +161,10 @@ impl Issuer {
         let mut chain = Vec::new();
 
         let Some(index) = self.find_block(block_n).await else {
-            warn!("Failed to generate receipt builder. Failed to find block {} in cache", block_n);
+            warn!(
+                "Failed to generate receipt builder. Failed to find block {} in cache",
+                block_n
+            );
             let _ = reply.send(None);
             return;
         };
@@ -162,19 +177,26 @@ impl Issuer {
             chain.push(b.block.clone());
             if let Some(qc) = self.cached_qcs.get(&b.block.n) {
                 qcs.push(qc.clone());
+                #[cfg(feature = "fast_path")]
                 if qc.sig.len() >= self.byzantine_fast_path_threshold() {
                     current_n_qcs += 2; // we have enough QCs to prove the block committed or audited
                 } else {
                     current_n_qcs += 1;
                 }
+                #[cfg(not(feature = "fast_path"))] {
+                    current_n_qcs += 1;
+                }
             }
             if current_n_qcs >= target_n_qcs {
-                break
+                break;
             }
         }
 
         if current_n_qcs < target_n_qcs {
-            warn!("Not enough QCs to prove block {} audited: {} < {}", block_n, current_n_qcs, target_n_qcs);
+            warn!(
+                "Not enough QCs to prove block {} audited: {} < {}",
+                block_n, current_n_qcs, target_n_qcs
+            );
             let _ = reply.send(None);
             return;
         }
@@ -195,10 +217,18 @@ impl Issuer {
 
     async fn handle_new_chunk(&mut self, blocks: Vec<CachedBlock>) {
         for block in blocks {
-            if self.cached_blocks.back().map_or(true, |b| b.block.n == block.block.n - 1) {
+            if self
+                .cached_blocks
+                .back()
+                .map_or(true, |b| b.block.n == block.block.n - 1)
+            {
                 self.cached_blocks.push_back(block);
             } else {
-                warn!("Received a block that is not sequentially next: expected {}, got {}", self.cached_blocks.back().map_or(0, |b| b.block.n + 1), block.block.n);
+                warn!(
+                    "Received a block that is not sequentially next: expected {}, got {}",
+                    self.cached_blocks.back().map_or(0, |b| b.block.n + 1),
+                    block.block.n
+                );
                 break;
             }
         }
@@ -218,7 +248,8 @@ impl Issuer {
         if self.cached_blocks.len() - bci_cbi.unwrap_or(0) > MIN_CACHED_BLOCKS {
             self.cached_blocks.drain(0..bci_cbi.unwrap_or(0));
         } else if self.cached_blocks.len() > MIN_CACHED_BLOCKS {
-            self.cached_blocks.drain(0..self.cached_blocks.len() - MIN_CACHED_BLOCKS);
+            self.cached_blocks
+                .drain(0..self.cached_blocks.len() - MIN_CACHED_BLOCKS);
         } else {
             return; // no blocks to GC, no need to GC QCs either
         }

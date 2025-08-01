@@ -471,7 +471,7 @@ $SCP_CMD {self.dev_ssh_user}@{vm.private_ip}:{self.remote_workdir}/logs/{repeat_
 """
 
             _script += f"""
-sleep 30
+sleep 10
 """
 
             # pkill -9 -c server also kills tmux-server. So we can't run a server on the dev VM.

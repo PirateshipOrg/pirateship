@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "fast_path", "platforms", "policy_validation"] }
+pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "platforms", "policy_validation"], default-features = false }
+scitt-cose = { path = "../../extras/scitt-cose" }
 rustls = "0.20"
 actix-web = {version = "4.0.1", features = ["rustls"]}
 rustls-pemfile = "1.0.0"
@@ -33,6 +34,12 @@ async-recursion = "1.1.1"
 commit_receipts = []
 null_validation = ["pft/null_validation"]
 dummy_receipts = ["pft/dummy_receipts"]
+fast_path = ["pft/fast_path"]
+concurrent_validation = ["pft/concurrent_validation"]
+sequential_validation = ["pft/sequential_validation"]
+
+default = ["sequential_validation", "fast_path"]
+concurrent = ["concurrent_validation", "fast_path"]
 
 [[bin]]
 name = "scitt"

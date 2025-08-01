@@ -35,11 +35,12 @@ use staging::{Staging, VoteWithSender};
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
 #[cfg(feature = "channel_monitoring")]
 use channel_monitor::ChannelMonitor;
-#[cfg(feature = "policy_validation")]
-use crate::consensus::app::TxWithValidationAck;
 use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
+
+#[cfg(feature = "concurrent_validation")]
+use crate::consensus::app::TxWithValidationAck;
 
 pub struct ConsensusServerContext {
     _config: AtomicConfig,
@@ -200,11 +201,11 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
 impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     pub fn new(config: Config) -> Self {
         let (batch_proposer_tx, batch_proposer_rx) = make_channel(config.rpc_config.channel_depth as usize);
-        #[cfg(feature = "policy_validation")]
-        let (_, validator_rx) = make_channel(config.rpc_config.channel_depth as usize);
-        Self::mew(config, batch_proposer_tx, batch_proposer_rx, 
-            #[cfg(feature = "policy_validation")]
-            validator_rx
+        #[cfg(feature = "concurrent_validation")]
+        let (_, validation_rx) = make_channel(config.rpc_config.channel_depth as usize);
+        Self::mew(config, batch_proposer_tx, batch_proposer_rx,
+            #[cfg(feature = "concurrent_validation")]
+            validation_rx
         )
     }
     
@@ -215,8 +216,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     /// ( o.o )
     ///  > ^ < 
     pub fn mew(config: Config, batch_proposer_tx: Sender<TxWithAckChanTag>, batch_proposer_rx: Receiver<TxWithAckChanTag>,
-        #[cfg(feature = "policy_validation")]
-        validator_rx: Receiver<TxWithValidationAck>
+        #[cfg(feature = "concurrent_validation")]
+        validation_rx: Receiver<TxWithValidationAck>
     ) -> Self {
         let _chan_depth = config.rpc_config.channel_depth as usize;
         let _num_crypto_tasks = config.consensus_config.num_crypto_workers;
@@ -293,8 +294,14 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "extra_2pc")]
         let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
 
+        #[cfg(feature = "sequential_validation")]
+        let (validation_tx, validation_rx) = make_channel(_chan_depth);
+
         let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx.clone(), fork_receiver_command_tx.clone(), vote_tx.clone(), view_change_tx.clone(), backfill_request_tx.clone());
-        let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx.clone(), client_reply_command_tx.clone(), unlogged_tx.clone(), batch_proposer_command_rx);
+        let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx.clone(), client_reply_command_tx.clone(), unlogged_tx.clone(), batch_proposer_command_rx,
+            #[cfg(feature = "sequential_validation")]
+            validation_tx.clone()
+        );
         let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx.clone(), client_reply_tx.clone(), block_maker_crypto);
         let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, block_broadcaster_storage, staging_tx.clone(), fork_receiver_command_tx.clone(), app_tx.clone());
         let staging = Staging::new(config.clone(), staging_client.into(), staging_crypto, staging_rx, vote_rx, pacemaker_cmd_rx, pacemaker_cmd_tx2.clone(), client_reply_command_tx.clone(), app_tx.clone(), broadcaster_control_command_tx.clone(), control_command_tx.clone(), fork_receiver_command_tx.clone(), qc_tx, batch_proposer_command_tx.clone(), logserver_tx.clone(),
@@ -352,7 +359,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             channel_monitor.clone(),
 
             #[cfg(feature = "policy_validation")]
-            validator_rx,
+            validation_rx,
         );
 
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx, issuer_tx);
