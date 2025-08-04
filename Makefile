@@ -87,6 +87,14 @@ pirateship_scitt:
 pirateship_scitt_concurrent:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features concurrent --no-default-features
 
+.PHONY: pirateship_scitt_256
+pirateship_scitt_256:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features sha256
+
+.PHONY: pirateship_scitt_concurrent_256
+pirateship_scitt_concurrent_256:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features concurrent,sha256 --no-default-features
+
 .PHONY: pirateship_scitt_nofast
 pirateship_scitt_nofast:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features sequential_validation --no-default-features

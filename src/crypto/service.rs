@@ -13,6 +13,9 @@ use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats,
 
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
 
+#[cfg(feature = "sha256")]
+pub(crate) type Sha = Sha256;
+#[cfg(not(feature = "sha256"))]
 pub(crate) type Sha = Sha512;
 
 #[derive(Clone, Debug)]

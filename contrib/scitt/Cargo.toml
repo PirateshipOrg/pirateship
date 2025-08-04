@@ -37,6 +37,7 @@ dummy_receipts = ["pft/dummy_receipts"]
 fast_path = ["pft/fast_path"]
 concurrent_validation = ["pft/concurrent_validation"]
 sequential_validation = ["pft/sequential_validation"]
+sha256 = ["pft/sha256"]
 
 default = ["sequential_validation", "fast_path"]
 concurrent = ["concurrent_validation", "fast_path"]

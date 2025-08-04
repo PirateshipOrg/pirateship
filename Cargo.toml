@@ -103,6 +103,7 @@ fixed_leader = []
 always_sign = []
 never_sign = []
 dynamic_sign = []
+sha256 = []
 # Other features
 storage = []
 disk_wal = []
