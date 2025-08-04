@@ -278,8 +278,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (issuer_tx, issuer_rx) = make_channel(_chan_depth);
 
         let block_maker_crypto = crypto.get_connector();
-        let block_broadcaster_crypto = crypto.get_connector();
-        let block_broadcaster_storage = storage.get_connector(block_broadcaster_crypto);
+        let staging_crypto = crypto.get_connector();
+        let staging_storage = storage.get_connector(staging_crypto);
         let block_broadcaster_crypto2 = crypto.get_connector();
         let logserver_crypto = crypto.get_connector();
         let logserver_storage = storage.get_connector(logserver_crypto);
@@ -303,8 +303,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             validation_tx.clone()
         );
         let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx.clone(), client_reply_tx.clone(), block_maker_crypto);
-        let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, block_broadcaster_storage, staging_tx.clone(), fork_receiver_command_tx.clone(), app_tx.clone());
-        let staging = Staging::new(config.clone(), staging_client.into(), staging_crypto, staging_rx, vote_rx, pacemaker_cmd_rx, pacemaker_cmd_tx2.clone(), client_reply_command_tx.clone(), app_tx.clone(), broadcaster_control_command_tx.clone(), control_command_tx.clone(), fork_receiver_command_tx.clone(), qc_tx, batch_proposer_command_tx.clone(), logserver_tx.clone(),
+        let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, staging_tx.clone(), fork_receiver_command_tx.clone(), app_tx.clone());
+        let staging = Staging::new(config.clone(), staging_client.into(), staging_crypto, staging_rx, vote_rx, pacemaker_cmd_rx, pacemaker_cmd_tx2.clone(), client_reply_command_tx.clone(), app_tx.clone(), broadcaster_control_command_tx.clone(), control_command_tx.clone(), fork_receiver_command_tx.clone(), qc_tx, batch_proposer_command_tx.clone(), logserver_tx.clone(), staging_storage,
             #[cfg(feature = "extra_2pc")]
             extra_2pc_command_tx.clone(),
 

@@ -213,7 +213,6 @@ impl Staging {
 
     async fn vote_on_last_block_for_self(
         &mut self,
-        storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
         let name = self.config.get().net_config.name.clone();
 
@@ -222,14 +221,9 @@ impl Staging {
             None => return Err(()),
         };
 
-        // Wait for it to be stored.
         // Invariant: I vote => I stored
-        for ack in self.__storage_ack_buffer.drain(..) {
-            let _ = ack.await.unwrap();
-        }
-        let _ = storage_ack.await.unwrap();
-
-        self.perf_add_event(&last_block.block, "Storage");
+        // THIS IS NOT THE CASE NO MORE: WE WRITE AFTER AGREEMENT
+        // delaying the write guarantees the host cannot generate receipts for blocks before agreement.
 
         let mut vote = ProtoVote {
             sig_array: Vec::with_capacity(1),
@@ -299,19 +293,11 @@ impl Staging {
 
     async fn send_vote_on_last_block_to_leader(
         &mut self,
-        storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
         let last_block = match self.pending_blocks.back() {
             Some(b) => b,
             None => return Err(()),
         };
-
-        // Wait for it to be stored.
-        // Invariant: I vote => I stored
-        for ack in self.__storage_ack_buffer.drain(..) {
-            let _ = ack.await.unwrap();
-        }
-        let _ = storage_ack.await.unwrap();
 
         // I will resend all the signatures in pending_blocks that I have not received a QC for.
         // But only if the last block was signed.
@@ -413,7 +399,6 @@ impl Staging {
     pub(super) async fn process_block_as_leader(
         &mut self,
         block: CachedBlock,
-        storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
         this_is_final_block: bool,
     ) -> Result<(), ()> {
@@ -514,12 +499,12 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_leader(block, ae_stats, this_is_final_block)
                     .await;
             } else {
 
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_follower(block, ae_stats, this_is_final_block)
                     .await;
             }
 
@@ -560,11 +545,8 @@ impl Staging {
         // }
 
         if this_is_final_block {
-            self.vote_on_last_block_for_self(storage_ack).await?;
-        } else {
-            self.__storage_ack_buffer.push_back(storage_ack);
+            self.vote_on_last_block_for_self().await?;
         }
-
 
         Ok(())
     }
@@ -574,7 +556,6 @@ impl Staging {
     pub(super) async fn process_block_as_follower(
         &mut self,
         block: CachedBlock,
-        storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
         this_is_final_block: bool
     ) -> Result<(), ()> {
@@ -665,11 +646,11 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_leader(block, ae_stats, this_is_final_block)
                     .await;
             } else {
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_follower(block, ae_stats, this_is_final_block)
                     .await;
             }
         }
@@ -740,9 +721,7 @@ impl Staging {
 
         // Reply vote to the leader.
         if this_is_final_block {
-            self.send_vote_on_last_block_to_leader(storage_ack).await?;
-        } else {
-            self.__storage_ack_buffer.push_back(storage_ack);
+            self.send_vote_on_last_block_to_leader().await?;
         }
 
         let (hard_gap, soft_gap) = {
@@ -877,6 +856,8 @@ impl Staging {
             .map(|e| e.block.clone())
             .collect::<Vec<_>>();
 
+        let storage_ack = self.storage.put_blocks(blocks.clone()).await;
+
         #[cfg(feature = "perf")]
         let mut block_perf_stats = Vec::new();
         #[cfg(feature = "perf")]
@@ -892,6 +873,8 @@ impl Staging {
         for (signed, block_n) in block_perf_stats {
             self.perf_add_event_from_perf_stats(signed, block_n, "Send Crash Commit to App");
         }
+
+        let _ = storage_ack.await.unwrap();
     }
 
     async fn maybe_crash_commit(&mut self) -> Result<(), ()> {

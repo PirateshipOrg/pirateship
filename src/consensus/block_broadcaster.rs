@@ -29,9 +29,8 @@ pub struct BlockBroadcaster {
     control_command_rx: Receiver<BlockBroadcasterCommand>,
     
     // Output ports
-    storage: StorageServiceConnector,
     client: PinnedClient,
-    staging_tx: Sender<(CachedBlock, oneshot::Receiver<StorageAck>, AppendEntriesStats, bool /* this_is_final_block */)>,
+    staging_tx: Sender<(CachedBlock, AppendEntriesStats, bool /* this_is_final_block */)>,
 
     // Command ports
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
@@ -55,8 +54,7 @@ impl BlockBroadcaster {
         my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
         other_block_rx: Receiver<MultipartFork>,
         control_command_rx: Receiver<BlockBroadcasterCommand>,
-        storage: StorageServiceConnector,
-        staging_tx: Sender<(CachedBlock, oneshot::Receiver<StorageAck>, AppendEntriesStats, bool)>,
+        staging_tx: Sender<(CachedBlock, AppendEntriesStats, bool)>,
         fork_receiver_command_tx: Sender<ForkReceiverCommand>,
         app_command_tx: Sender<AppCommand>,
     ) -> Self {
@@ -80,7 +78,6 @@ impl BlockBroadcaster {
             my_block_rx,
             other_block_rx,
             control_command_rx,
-            storage,
             client,
             staging_tx,
             fork_receiver_command_tx,
@@ -210,16 +207,11 @@ impl BlockBroadcaster {
     async fn store_and_forward_internally(&mut self, block: &CachedBlock, ae_stats: AppendEntriesStats, this_is_final_block: bool) -> Result<(), Error> {
         let perf_entry = block.block.n;
         
-        // Store
-        let storage_ack = self.storage.put_block(block).await;
-        self.perf_add_event(perf_entry, "Store block");
-        // info!("Stored {}", block.block.n);
-    
         // Forward
         self.perf_add_event(perf_entry, "Forward block to logserver");
 
         // info!("Sending {}", block.block.n);
-        self.staging_tx.send((block.clone(), storage_ack, ae_stats, this_is_final_block)).await.unwrap();
+        self.staging_tx.send((block.clone(), ae_stats, this_is_final_block)).await.unwrap();
         // info!("Sent {}", block.block.n);
         self.perf_add_event(perf_entry, "Forward block to staging");
 
