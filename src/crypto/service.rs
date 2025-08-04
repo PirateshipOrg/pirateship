@@ -9,7 +9,7 @@ use rand::{thread_rng, Rng};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::{sync::{mpsc::{channel, Receiver, Sender}, oneshot}, task::JoinSet};
 
-use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats, MultipartFork}, crypto::{default_hash, MerkleTree, DIGEST_LENGTH}, proto::consensus::{HalfSerializedBlock, ProtoBlock, ProtoQuorumCertificate, ProtoViewChange}, utils::{deserialize_proto_block, serialize_proto_block_nascent, serialize_proto_block_nascent_with_merkle_root, update_parent_hash_in_proto_block_ser, update_signature_in_proto_block_ser, PerfCounter}};
+use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats, MultipartFork}, crypto::{default_hash, MerkleTree, DIGEST_LENGTH}, proto::consensus::{HalfSerializedBlock, ProtoBlock, ProtoQuorumCertificate, ProtoViewChange}, utils::{deserialize_proto_block, get_block_size_from_ser, serialize_proto_block_nascent, update_parent_hash_in_proto_block_ser, update_signature_in_proto_block_ser, PerfCounter, BLOCK_OFFSET, PARENT_OFFSET, USIZE_LENGTH}};
 
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
 
@@ -67,17 +67,9 @@ impl FutureHash {
 
 pub fn hash_proto_block_ser(data: &[u8]) -> HashType {
     let mut hasher = Sha::new();
-    hasher.update(&data[DIGEST_LENGTH+SIGNATURE_LENGTH..]);
+    hasher.update(&data[BLOCK_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(data)]);
     hasher.update(&data[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
     hasher.update(&data[..SIGNATURE_LENGTH]);
-    hasher.finalize().to_vec()
-}
-
-pub fn hash_proto_with_mt_and_sig(block: &ProtoBlock, merkle_tree: &MerkleTree, sig: &[u8]) -> HashType {
-    let mut hasher = Sha::new();
-    hasher.update(&serialize_proto_block_nascent_with_merkle_root(block, merkle_tree.root()).unwrap()[DIGEST_LENGTH+SIGNATURE_LENGTH..]);
-    hasher.update(&block.parent);
-    hasher.update(&sig);
     hasher.finalize().to_vec()
 }
 
@@ -220,10 +212,8 @@ impl CryptoService {
                     break;
                 },
                 CryptoServiceCommand::PrepareBlock(mut proto_block, block_tx, hash_tx, hash_tx2, must_sign, parent_hash_rx) => {
-                    // let mut buf = bincode::serialize(&proto_block).unwrap();
-                    // let mut buf = bitcode::encode(&proto_block);
-                    // let mut buf = proto_block.encode_to_vec();
                     let merkle_tree = MerkleTree::from_block(&proto_block);
+
                     let (perf_counter, event_order, mut event_num) = if must_sign {
                         (&mut signed_block_prepare_perf_counter, &signed_block_prepare_event_order, 0)
                     } else {
@@ -247,19 +237,15 @@ impl CryptoService {
                     proto_block.sig = None;
                     proto_block.parent.clear();
 
-                    let mut buf = serialize_proto_block_nascent(&proto_block).unwrap();
+                    let (mut buf, block_size) = serialize_proto_block_nascent(&proto_block, &merkle_tree.root()).unwrap();
                     perf_event!();
 
-                    let mut hashing_buf = serialize_proto_block_nascent_with_merkle_root(&proto_block, &merkle_tree.root()).unwrap();
-                    // perf_event!();
-
                     let mut hasher = Sha::new();
-                    hasher.update(&hashing_buf[DIGEST_LENGTH+SIGNATURE_LENGTH..]);
+                    hasher.update(&buf[BLOCK_OFFSET..BLOCK_OFFSET + block_size]);
                     perf_event!();
 
                     // Memory fence to prevent reordering.
                     fence(std::sync::atomic::Ordering::SeqCst);
-
                     
                     let parent = match parent_hash_rx {
                         FutureHash::None => default_hash(),
@@ -269,25 +255,21 @@ impl CryptoService {
                     };
                     update_parent_hash_in_proto_block_ser(&mut buf, &parent);
                     perf_event!();
-                    update_parent_hash_in_proto_block_ser(&mut hashing_buf, &parent);
-                    // perf_event!();
 
                     let mut block = proto_block;
                     block.parent = parent;
-                    hasher.update(&hashing_buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
+                    hasher.update(&buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
                     if must_sign {
-                        // Signature is on the (parent_hash || block) part of the serialized block.
-                        let partial_hsh = hash(&hashing_buf[SIGNATURE_LENGTH..]);
+                        // Signature is on the (parent_hash || merkle_root || block) part of the serialized block (without the detached transactions)
+                        let partial_hsh = hash(&buf[PARENT_OFFSET..BLOCK_OFFSET + block_size]);
                         let keystore = keystore.get();
                         let sig = keystore.sign(&partial_hsh);
                         block.sig = Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig.to_vec()));
                         update_signature_in_proto_block_ser(&mut buf, &sig);
                         perf_event!();
-                        update_signature_in_proto_block_ser(&mut hashing_buf, &sig);
-                        // perf_event!();
                     }
 
-                    hasher.update(&hashing_buf[..SIGNATURE_LENGTH]);
+                    hasher.update(&buf[..SIGNATURE_LENGTH]);
                     perf_event!();
 
                     let hsh = hasher.finalize().to_vec();
@@ -306,38 +288,35 @@ impl CryptoService {
                     }
                     let block_ser = res.unwrap();
 
-                    let block = match deserialize_proto_block(block_ser.as_ref()) {
+                    let chk_hsh = hash_proto_block_ser(&block_ser);
+                    if !chk_hsh.eq(&hsh) {
+                        block_tx.send(Err(Error::new(ErrorKind::InvalidData, "Invalid hash"))).unwrap();
+                        continue;
+                    }
+
+                    let block = deserialize_proto_block(block_ser.as_ref());
+
+                    match block {
                         Ok(block) => {
-                            block
+                            let mt = MerkleTree::from_block(&block);
+                            block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh, mt))).unwrap();
                         },
                         Err(_) => {
                             block_tx.send(Err(Error::new(ErrorKind::InvalidData, "Decode error"))).unwrap();
-                            return;
                         },
                     };
-                    let mt = MerkleTree::from_block(&block);
-
-                    let chk_hsh = hash_proto_with_mt_and_sig(&block, &mt, &block_ser[..SIGNATURE_LENGTH]);
-                    if !chk_hsh.eq(&hsh) {
-                        block_tx.send(Err(Error::new(ErrorKind::InvalidData, "Invalid hash"))).unwrap();
-                    } else {
-                        block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh, mt))).unwrap();
-                    }
-
                 },
                 CryptoServiceCommand::VerifyBlockSer(min_qc_len, block_ser, block_tx, hash_tx) => {
                     let block = deserialize_proto_block(block_ser.as_ref());
+                    let hsh = hash_proto_block_ser(&block_ser);
 
                     // TODO: If view_is_stable = False, verify ProtoForkValidation
                     match block {
                         Ok(block) => {
                             let mt = MerkleTree::from_block(&block);
-                            let hsh = hash_proto_with_mt_and_sig(&block, &mt, &block_ser[..SIGNATURE_LENGTH]);
                             // Verify signature
                             if let Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig)) = &block.sig {
-                                let mut buf = serialize_proto_block_nascent_with_merkle_root(&block, &mt.root()).unwrap();
-                                update_parent_hash_in_proto_block_ser(&mut buf, &block.parent);
-                                let partial_hsh = hash(&buf[SIGNATURE_LENGTH..]);
+                                let partial_hsh = hash(&block_ser[PARENT_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(&block_ser)]);
                                 let keystore = keystore.get();
                                 let view = block.view;
                                 let leader_for_view = config.get().consensus_config.get_leader_for_view(view);
