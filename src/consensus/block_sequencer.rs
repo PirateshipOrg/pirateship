@@ -12,7 +12,7 @@ use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector, HashType},
     proto::consensus::{
-        DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate,
+        DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate, ProtoTransactionList
     },
     utils::timer::ResettableTimer,
 };
@@ -353,7 +353,9 @@ impl BlockSequencer {
             fork_validation,
             view_is_stable: self.view_is_stable,
             config_num: self.config_num,
-            tx_list: batch,
+            payload: Some(crate::proto::consensus::proto_block::Payload::TxList(ProtoTransactionList {
+                tx_list: batch,
+            })),
             sig: Some(crate::proto::consensus::proto_block::Sig::NoSig(
                 DefferedSignature {},
             )),

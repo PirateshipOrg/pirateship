@@ -10,6 +10,9 @@ use tokio::{sync::RwLock, task::JoinSet};
 
 use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
+#[cfg(feature = "policy_validation")]
+use crate::utils::unwrap_tx_list;
+
 #[cfg(feature = "concurrent_validation")]
 use crate::utils::channel::make_channel;
 
@@ -522,7 +525,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 #[cfg(feature = "concurrent_validation")] {
                     let mut i = 0;
                     let mut replies = vec![];
-                    for tx in &_block.block.tx_list {
+                    for tx in unwrap_tx_list(&_block.block) {
                         let Some(phase) = &tx.on_crash_commit else {
                             continue;
                         };
@@ -544,7 +547,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                     }
                 }
                 #[cfg(feature = "sequential_validation")]
-                for tx in &_block.block.tx_list {
+                for tx in unwrap_tx_list(&_block.block) {
                     let Some(phase) = &tx.on_crash_commit else {
                         continue;
                     };

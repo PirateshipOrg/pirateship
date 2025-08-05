@@ -19,6 +19,8 @@ pub use serialize::*;
 mod perf;
 pub use perf::*;
 
+use crate::crypto::HashType;
+
 pub mod timer;
 
 
@@ -143,4 +145,34 @@ pub mod channel {
 
     pub use channel_async::*;
 
+}
+
+
+// These are utility functions just to avoid having to write the same unwrapping logic everywhere
+pub fn unwrap_tx_list(
+    block: &crate::proto::consensus::ProtoBlock,
+) -> &Vec<crate::proto::execution::ProtoTransaction> {
+    match &block.payload {
+        Some(crate::proto::consensus::proto_block::Payload::TxList(txs)) => &txs.tx_list,
+        _ => panic!("Expected ProtoTransactionList, got None"),
+    }
+}
+
+pub fn unwrap_and_take_tx_list(
+    block: &mut crate::proto::consensus::ProtoBlock,
+) -> Vec<crate::proto::execution::ProtoTransaction> {
+    match block.payload.take() {
+        Some(crate::proto::consensus::proto_block::Payload::TxList(txs)) => txs.tx_list,
+        _ => panic!("Expected ProtoTransactionList, got None"),
+    }
+}
+
+
+pub fn unwrap_merkle_root(
+    block: &crate::proto::consensus::ProtoBlock,
+) -> &HashType {
+    match &block.payload {
+        Some(crate::proto::consensus::proto_block::Payload::MerkleRoot(root)) => root,
+        _ => panic!("Expected ProtoMerkleRoot, got None"),
+    }
 }

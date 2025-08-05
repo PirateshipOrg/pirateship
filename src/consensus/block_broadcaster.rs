@@ -4,7 +4,7 @@ use log::{debug, error, info, trace};
 use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::{consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork}, rpc::ProtoPayload}, rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType}, utils::{channel::{Receiver, Sender}, PerfCounter, StorageAck, StorageServiceConnector}};
+use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::{consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork}, rpc::ProtoPayload}, rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType}, utils::{channel::{Receiver, Sender}, unwrap_tx_list, PerfCounter}};
 #[cfg(feature = "evil")]
 use crate::{crypto::FutureHash, proto::execution::ProtoTransaction};
 
@@ -249,7 +249,7 @@ impl BlockBroadcaster {
             }, this_is_final_block).await?;
         }
         // Forward to app for stats.
-        self.app_command_tx.send(AppCommand::NewRequestBatch(block.block.n, view, view_is_stable, true, block.block.tx_list.len(), block.block_hash.clone())).await.unwrap();
+        self.app_command_tx.send(AppCommand::NewRequestBatch(block.block.n, view, view_is_stable, true, unwrap_tx_list(&block.block).len(), block.block_hash.clone())).await.unwrap();
         // Forward to other nodes. Involves copies and serialization so done last.
 
         let names = self.get_everyone_except_me();
@@ -315,8 +315,7 @@ impl BlockBroadcaster {
             self.store_and_forward_internally(&block, blocks.ae_stats.clone(), this_is_final_block).await?;
 
             // Forward to app for stats.
-            self.app_command_tx.send(AppCommand::NewRequestBatch(block.block.n, view, view_is_stable, false, block.block.tx_list.len(), block.block_hash.clone())).await.unwrap();
-
+            self.app_command_tx.send(AppCommand::NewRequestBatch(block.block.n, view, view_is_stable, false, unwrap_tx_list(&block.block).len(), block.block_hash.clone())).await.unwrap();
         }
 
         Ok(())

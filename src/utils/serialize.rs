@@ -4,15 +4,15 @@ use bytes::BytesMut;
 use ed25519_dalek::SIGNATURE_LENGTH;
 use prost::{DecodeError, Message};
 
-use crate::{crypto::{HashType, DIGEST_LENGTH}, proto::consensus::{DefferedSignature, ProtoBlock, ProtoTransactionList}};
+use crate::{crypto::{HashType, DIGEST_LENGTH}, proto::consensus::{proto_block, DefferedSignature, ProtoBlock, ProtoTransactionList}, utils::unwrap_and_take_tx_list};
 
 pub const USIZE_LENGTH: usize = std::mem::size_of::<usize>();
-pub const BLOCK_OFFSET: usize = SIGNATURE_LENGTH + DIGEST_LENGTH*2 + USIZE_LENGTH;
+pub const BLOCK_OFFSET: usize = SIGNATURE_LENGTH + USIZE_LENGTH + DIGEST_LENGTH;
 pub const PARENT_OFFSET: usize = SIGNATURE_LENGTH + USIZE_LENGTH;
 
 pub fn serialize_proto_block_nascent(block: &ProtoBlock, merkle_root: &HashType) -> Result<(Vec<u8>, usize), Error> {
     //
-    // Serialized format: signature || block_size || parent_hash || merkle_root || block || txs
+    // Serialized format: signature || block_size || parent_hash || block || txs
     //
     if block.parent.len() != 0
     || (block.sig != None
@@ -23,9 +23,9 @@ pub fn serialize_proto_block_nascent(block: &ProtoBlock, merkle_root: &HashType)
 
     let mut detached_block = block.clone();
     let detached_txs = ProtoTransactionList{
-        tx_list: detached_block.tx_list
+        tx_list: unwrap_and_take_tx_list(&mut detached_block)
     };
-    detached_block.tx_list = Vec::new();
+    detached_block.payload = Some(proto_block::Payload::MerkleRoot(merkle_root.to_vec()));
     detached_block.parent.clear();
 
     let detached_block_size = detached_block.encoded_len();
@@ -34,7 +34,6 @@ pub fn serialize_proto_block_nascent(block: &ProtoBlock, merkle_root: &HashType)
     bytes.extend_from_slice(&[0u8; SIGNATURE_LENGTH]);
     bytes.extend_from_slice(&detached_block_size.to_be_bytes());
     bytes.extend_from_slice(&[0u8; DIGEST_LENGTH]);
-    bytes.extend_from_slice(merkle_root);
     detached_block.encode(&mut bytes).unwrap();
     detached_txs.encode(&mut bytes).unwrap();
 
@@ -43,7 +42,7 @@ pub fn serialize_proto_block_nascent(block: &ProtoBlock, merkle_root: &HashType)
 
 pub fn serialize_proto_block_prefilled(mut block: ProtoBlock, merkle_root: &HashType) -> Vec<u8> {
     //
-    // Serialized format: signature || block_size || parent_hash || merkle_root || block || txs
+    // Serialized format: signature || block_size || parent_hash || block || txs
     //
     let mut bytes = BytesMut::with_capacity(DIGEST_LENGTH + SIGNATURE_LENGTH + block.encoded_len());
     match &block.sig {
@@ -58,26 +57,22 @@ pub fn serialize_proto_block_prefilled(mut block: ProtoBlock, merkle_root: &Hash
         }
     }
     let detached_txs = ProtoTransactionList{
-        tx_list: block.tx_list
+        tx_list: unwrap_and_take_tx_list(&mut block)
     };
-    block.tx_list = Vec::new();
+    block.sig = None;
+    block.payload = Some(proto_block::Payload::MerkleRoot(merkle_root.to_vec()));
 
     let parent = block.parent;
     block.parent = Vec::new();
     bytes.extend_from_slice(&block.encoded_len().to_be_bytes());
     bytes.extend_from_slice(&parent);
-    bytes.extend_from_slice(merkle_root);
     
     block.parent.clear();
-    block.sig = None;
 
     block.encode(&mut bytes).unwrap();
-    let block_size = bytes.len() - BLOCK_OFFSET;
     detached_txs.encode(&mut bytes).unwrap();
-    let mut bytes_vec = bytes.to_vec();
-    bytes_vec[SIGNATURE_LENGTH..SIGNATURE_LENGTH + USIZE_LENGTH].copy_from_slice(&block_size.to_be_bytes());
 
-    bytes_vec
+    bytes.to_vec()
 }
 
 pub fn update_parent_hash_in_proto_block_ser(block: &mut Vec<u8>, parent_hash: &HashType) {
@@ -109,14 +104,14 @@ pub fn deserialize_proto_block(bytes: &[u8]) -> Result<ProtoBlock, DecodeError> 
     let txs = ProtoTransactionList::decode(&bytes[BLOCK_OFFSET + block_size..]).unwrap();
 
     block.parent = bytes[PARENT_OFFSET..PARENT_OFFSET + DIGEST_LENGTH].to_vec();
-    block.tx_list = txs.tx_list;
+    block.payload = Some(proto_block::Payload::TxList(txs));
 
     let sig = &bytes[..SIGNATURE_LENGTH];
     let sig_is_null = sig.iter().all(|&x| x == 0);
     if sig_is_null {
-        block.sig = Some(crate::proto::consensus::proto_block::Sig::NoSig(DefferedSignature{}));
+        block.sig = Some(proto_block::Sig::NoSig(DefferedSignature{}));
     } else {
-        block.sig = Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig.to_vec()));
+        block.sig = Some(proto_block::Sig::ProposerSig(sig.to_vec()));
     }
 
     Ok(block)
@@ -125,7 +120,7 @@ pub fn deserialize_proto_block(bytes: &[u8]) -> Result<ProtoBlock, DecodeError> 
 #[cfg(test)]
 mod test {
     use rand::{thread_rng, Rng};
-    use crate::{crypto::hash, proto::{consensus::ProtoBlock, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}}, utils::BLOCK_OFFSET};
+    use crate::{crypto::hash, proto::{consensus::{proto_block, ProtoBlock, ProtoTransactionList}, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}}};
 
     #[test]
     fn test_proto_block_serde() {
@@ -146,7 +141,7 @@ mod test {
                 is_2pc: false,
             });
         }
-        block.tx_list = tx;
+        block.payload = Some(proto_block::Payload::TxList(ProtoTransactionList { tx_list: tx }));
 
         let merkle_tree = crate::crypto::MerkleTree::from_block(&block);
         let (ser, _) = super::serialize_proto_block_nascent(&block, &merkle_tree.root()).unwrap();

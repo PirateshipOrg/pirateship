@@ -5,7 +5,7 @@ use std::fmt::Display;
 use log::{trace, warn};
 use serde::{Serialize, Deserialize};
 
-use crate::{config::AtomicConfig, consensus::app::AppEngine};
+use crate::{config::AtomicConfig, consensus::app::AppEngine, utils::unwrap_tx_list};
 
 #[allow(unused_imports)]
 use crate::proto::{
@@ -77,7 +77,7 @@ impl AppEngine for KVSAppEngine {
             let proto_block: &ProtoBlock = &block.block;
             self.last_ci = proto_block.n;
             let mut block_result: Vec<ProtoTransactionResult> = Vec::new();
-            for tx in proto_block.tx_list.iter() {
+            for tx in unwrap_tx_list(&proto_block).iter() {
                 let mut txn_result = ProtoTransactionResult {
                     result: Vec::new(),
                 };
@@ -274,7 +274,7 @@ impl AppEngine for KVSAppEngine {
             self.last_bci = proto_block.n;
             let mut block_result: Vec<ProtoByzResponse> = Vec::new(); 
 
-            for (tx_n, tx) in proto_block.tx_list.iter().enumerate() {
+            for (tx_n, tx) in unwrap_tx_list(&proto_block).iter().enumerate() {
                 let byz_result = ProtoByzResponse {
                     block_n: proto_block.n,
                     tx_n: tx_n as u64,

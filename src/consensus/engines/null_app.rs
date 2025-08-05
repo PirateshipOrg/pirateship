@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-use crate::{consensus::app::AppEngine, proto::{client::ProtoByzResponse, execution::{ProtoTransactionOpResult, ProtoTransactionPhase, ProtoTransactionResult}}};
+use crate::{consensus::app::AppEngine, proto::{client::ProtoByzResponse, execution::{ProtoTransactionOpResult, ProtoTransactionPhase, ProtoTransactionResult}}, utils::unwrap_tx_list};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NullApp;
@@ -20,7 +20,7 @@ impl AppEngine for NullApp {
 
     fn handle_crash_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::execution::ProtoTransactionResult>> {
         blocks.iter().map(|block| {
-            block.block.tx_list.iter().map(|tx| {
+            unwrap_tx_list(&block.block).iter().map(|tx| {
                 ProtoTransactionResult {
                     result: tx.on_crash_commit.as_ref().unwrap_or(&ProtoTransactionPhase::default())
                         .ops.iter().map(|_| ProtoTransactionOpResult {
@@ -34,7 +34,7 @@ impl AppEngine for NullApp {
 
     fn handle_byz_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::client::ProtoByzResponse>> {
         blocks.iter().map(|block| {
-            block.block.tx_list.iter().enumerate().map(|(tx_n, _tx)| {
+            unwrap_tx_list(&block.block).iter().enumerate().map(|(tx_n, _tx)| {
                 ProtoByzResponse {
                     block_n: block.block.n,
                     tx_n: tx_n as u64,

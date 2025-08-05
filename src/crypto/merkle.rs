@@ -3,7 +3,7 @@ use prost::Message;
 
 use crate::{
     crypto::{default_hash, hash, HashType, Sha},
-    proto::consensus::ProtoBlock,
+    proto::consensus::ProtoBlock, utils::unwrap_tx_list,
 };
 
 #[allow(unused_imports)]
@@ -37,6 +37,10 @@ impl MerkleInclusionProof {
 
     pub fn default() -> Self {
         MerkleInclusionProof(vec![])
+    }
+
+    pub fn new(proof: Vec<HashType>) -> Self {
+        MerkleInclusionProof(proof)
     }
 }
 
@@ -89,8 +93,9 @@ impl MerkleTree {
     }
 
     pub fn from_block(block: &ProtoBlock) -> Self {
-        let mut leaves = Vec::with_capacity(block.tx_list.len());
-        for tx in &block.tx_list {
+        let tx_list = unwrap_tx_list(block);
+        let mut leaves = Vec::with_capacity(tx_list.len());
+        for tx in tx_list {
             let mut buf = BytesMut::with_capacity(tx.encoded_len());
             tx.encode(&mut buf).unwrap();
             leaves.push(hash(&buf));
@@ -123,7 +128,7 @@ impl MerkleTree {
             level_size /= 2;
         }
 
-        MerkleInclusionProof(proof)
+        MerkleInclusionProof::new(proof)
     }
 
     /// benchmarks show that this is actually slightly slower than calling `generate_inclusion_proof` N times... left it for future reference
@@ -156,7 +161,7 @@ impl MerkleTree {
             level_size /= 2;
         }
         
-        proofs.into_iter().map(|proof| MerkleInclusionProof(proof)).collect()
+        proofs.into_iter().map(|proof| MerkleInclusionProof::new(proof)).collect()
     }
 
     pub fn root(&self) -> &HashType {
@@ -165,6 +170,10 @@ impl MerkleTree {
 
     pub fn leaves(&self) -> &[HashType] {
         &self.tree[..self.n_leaves]
+    }
+
+    pub fn n_leaves(&self) -> usize {
+        self.n_leaves
     }
 }
 

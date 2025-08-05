@@ -174,7 +174,9 @@ impl Issuer {
         let mut current_n_qcs = 0;
         let mut qcs = Vec::new();
         for b in self.cached_blocks.iter().skip(index) {
-            chain.push(b.block.clone());
+            let mut proto = b.block.clone();
+            proto.payload = Some(crate::proto::consensus::proto_block::Payload::MerkleRoot(b.merkle_tree.root().to_vec()));
+            chain.push(proto);
             if let Some(qc) = self.cached_qcs.get(&b.block.n) {
                 qcs.push(qc.clone());
                 #[cfg(feature = "fast_path")]
@@ -202,7 +204,7 @@ impl Issuer {
         }
 
         let proofs = if txs.is_empty() {
-            (0..block.block.tx_list.len())
+            (0..block.merkle_tree.n_leaves())
             .map(|tx| block.merkle_tree.generate_inclusion_proof(tx as usize))
             .collect()
         } else {

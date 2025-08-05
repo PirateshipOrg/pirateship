@@ -15,6 +15,7 @@ use scitt_cose::{validate_scitt_cose_signed_statement, CBORType, COSEHeaders, Pr
 #[cfg(feature = "policy_validation")]
 use base64::engine::{general_purpose, Engine};
 
+use crate::utils::unwrap_tx_list;
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
 use crate::proto::execution::{
@@ -149,7 +150,7 @@ impl AppEngine for SCITTAppEngine {
             let proto_block: &ProtoBlock = &block.block;
             self.last_ci = proto_block.n;
             let mut block_result: Vec<ProtoTransactionResult> = Vec::new();
-            for (i, tx) in proto_block.tx_list.iter().enumerate() {
+            for (i, tx) in unwrap_tx_list(&proto_block).iter().enumerate() {
                 let mut txn_result = ProtoTransactionResult { result: Vec::new() };
                 let ops = match &tx.on_crash_commit {
                     Some(ops) => &ops.ops,
@@ -256,7 +257,7 @@ impl AppEngine for SCITTAppEngine {
             self.last_bci = proto_block.n;
             let mut block_result: Vec<ProtoByzResponse> = Vec::new();
 
-            for (tx_n, tx) in proto_block.tx_list.iter().enumerate() {
+            for (tx_n, tx) in unwrap_tx_list(&proto_block).iter().enumerate() {
                 let byz_result = ProtoByzResponse {
                     block_n: proto_block.n,
                     tx_n: tx_n as u64,
