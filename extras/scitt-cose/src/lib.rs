@@ -29,10 +29,10 @@ const LABEL_X5CHAIN: i64 = 33;
 const LABEL_ISSUER: i64 = 391;
 const LABEL_FEED: i64 = 392;
 const LABEL_SCITT_RECEIPTS: i64 = 394;
+#[allow(dead_code)]
 const LABEL_VDS: i64 = 395;
 const LABEL_VDP: i64 = 396;
-const LABEL_QCS: i64 = 397;
-const LABEL_INCLUSION_PROOF: i64 = -1;
+const LABEL_PS_RECEIPT: i64 = -99;
 
 #[allow(dead_code)]
 pub struct CWT {
@@ -440,30 +440,20 @@ pub fn validate_scitt_cose_signed_statement(
 }
 
 pub fn create_cose_receipt(
-    inclusion_proof_path: Vec<Vec<u8>>,
-    signature_bytes: Option<&[u8]>,
+    receipt: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
-    let cose_sign1 = if let Some(sig_bytes) = signature_bytes {
-        CoseSign1::from_slice(sig_bytes)
-            .map_err(|e| format!("Failed to decode existing COSE signature: {}", e))?
-    } else {
-        CoseSign1Builder::new()
-            .payload(vec![])
-            .build()
-    };
-    
+    let cose_sign1 = CoseSign1Builder::new()
+        .payload(vec![])
+        .build();
+
     let mut unprotected_header = HeaderBuilder::new();
-    
-    let proof_path_values: Vec<Value> = inclusion_proof_path
-        .into_iter()
-        .map(|bytes| Value::Bytes(bytes))
-        .collect();
-    
-    let inclusion_proof_value = Value::Array(proof_path_values);
-    let vdp_map = Value::Map(vec![(
-        Value::Integer(LABEL_INCLUSION_PROOF.into()),
-        inclusion_proof_value,
-    )]);
+
+    let vdp_map = Value::Map(vec![
+    (
+        Value::Integer(LABEL_PS_RECEIPT.into()),
+        Value::Bytes(receipt),
+    ),
+    ]);
     
     unprotected_header = unprotected_header.value(LABEL_VDP, vdp_map);
     
@@ -513,4 +503,47 @@ pub fn embed_receipt_in_statement(
     
     cose_with_receipt.to_vec()
         .map_err(|e| format!("Failed to serialize COSE statement with receipt: {}", e))
+}
+
+pub fn extract_receipt_from_statement(
+    cose_statement_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let cose = CoseSign1::from_slice(cose_statement_bytes)
+        .map_err(|e| format!("Failed to decode COSE statement: {}", e))?;
+    
+    // First, extract the COSE receipt from the SCITT receipts array
+    for (label, value) in &cose.unprotected.rest {
+        let Label::Int(i) = label else { continue };
+        if *i != LABEL_SCITT_RECEIPTS { continue }
+        
+        let Value::Array(receipts_array) = value else { continue };
+        if receipts_array.len() != 1 { continue }
+        
+        let Value::Bytes(cose_receipt_bytes) = &receipts_array[0] else { continue };
+        
+        // Now parse the COSE receipt to extract the actual receipt
+        let cose_receipt = CoseSign1::from_slice(cose_receipt_bytes)
+            .map_err(|e| format!("Failed to decode COSE receipt: {}", e))?;
+        
+        // Look for the VDP label in the unprotected header
+        for (receipt_label, receipt_value) in &cose_receipt.unprotected.rest {
+            let Label::Int(receipt_i) = receipt_label else { continue };
+            if *receipt_i != LABEL_VDP { continue }
+            
+            let Value::Map(vdp_map) = receipt_value else { continue };
+            
+            // Look for the PS_RECEIPT label in the VDP map
+            for (ps_label, ps_value) in vdp_map {
+                let Value::Integer(ps_i) = ps_label else { continue };
+                if i128::from(*ps_i) as i64 != LABEL_PS_RECEIPT { continue }
+                
+                let Value::Bytes(actual_receipt) = ps_value else { continue };
+                return Ok(actual_receipt.clone());
+            }
+        }
+        
+        return Err("No PS receipt found in COSE receipt VDP".to_string());
+    }
+    
+    Err("No SCITT receipts found in the COSE statement".to_string())
 }

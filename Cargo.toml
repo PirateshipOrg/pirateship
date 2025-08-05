@@ -6,6 +6,7 @@ resolver = "2"
 members = [
     ".",
     "contrib/kms",
+    "contrib/receipt_validator",
     "contrib/scitt",
     "contrib/smallbank",
     "contrib/svr3",

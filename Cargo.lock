@@ -3937,6 +3937,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "receipt-validator"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap 4.5.35",
+ "ed25519-dalek",
+ "pft",
+ "prost",
+ "prost-types",
+ "scitt-cose",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "redis"
 version = "0.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

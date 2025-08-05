@@ -260,7 +260,7 @@ impl CryptoService {
                     block.parent = parent;
                     hasher.update(&buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
                     if must_sign {
-                        // Signature is on the (parent_hash || merkle_root || block) part of the serialized block (without the detached transactions)
+                        // Signature is on the (parent_hash || block) part of the serialized block (without the detached transactions)
                         let partial_hsh = hash(&buf[PARENT_OFFSET..BLOCK_OFFSET + block_size]);
                         let keystore = keystore.get();
                         let sig = keystore.sign(&partial_hsh);

@@ -24,9 +24,26 @@ use std::{collections::HashMap, fs::File, io::BufReader};
 use tokio::sync::{mpsc, Mutex};
 #[cfg(feature = "concurrent_validation")]
 use tokio::sync::oneshot;
-use scitt_cose;
 
 static AUDIT_RECEIPT: bool = cfg!(not(feature = "commit_receipts"));
+
+pub trait ReceiptToCose {
+    fn receipt_to_cose(self) -> Result<Vec<u8>, String>;
+    fn embed_in_claim(self, claim: &Vec<u8>) -> Result<Vec<u8>, String>;
+}
+
+impl ReceiptToCose for ProtoTransactionReceipt {
+    fn receipt_to_cose(self) -> Result<Vec<u8>, String> {
+        scitt_cose::create_cose_receipt(self.encode_to_vec())
+            .map_err(|e| format!("Failed to create COSE receipt: {}", e))
+    }
+
+    fn embed_in_claim(self, claim: &Vec<u8>) -> Result<Vec<u8>, String> {
+        let cose_receipt = self.receipt_to_cose()?;
+
+        scitt_cose::embed_receipt_in_statement(claim, cose_receipt)
+    }
+}
 
 struct AppState {
     /// Global channel to feed into the consensusNode.
@@ -111,7 +128,7 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
         Err(err) => return err,
     };
 
-    let cose_receipt = match scitt_cose::create_cose_receipt(receipt.proof, None) {
+    let cose_receipt = match receipt.receipt_to_cose() {
         Ok(cose_bytes) => cose_bytes,
         Err(err) => {
             warn!("Failed to create COSE receipt: {}", err);
@@ -122,6 +139,27 @@ async fn get_entry_receipt(txid: web::Path<String>, state: web::Data<AppState>) 
     HttpResponse::Ok()
         .content_type("application/cose")
         .body(cose_receipt)
+}
+
+/// Retrieve raw PS receipt
+/// Not part of the spec, used for testing
+#[get("/raw_receipt/{txid}")]
+async fn get_raw_receipt(txid: web::Path<String>, state: web::Data<AppState>) -> impl Responder {
+    let txid = match TXID::from_string(&txid) {
+        Some(tx_n) => tx_n,
+        None => return HttpResponse::BadRequest().body("Invalid txid"),
+    };
+
+    let receipt = match get_receipt(&txid, &state, AUDIT_RECEIPT).await {
+        Ok(receipt) => receipt,
+        Err(err) => return err,
+    };
+
+    let serialized_receipt = receipt.encode_to_vec();
+
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .body(serialized_receipt)
 }
 
 /// Retrieve Statement with Embedded Receipt
@@ -158,19 +196,11 @@ async fn get_entry_statement(
         Err(err) => return err,
     };
 
-    let cose_receipt = match scitt_cose::create_cose_receipt(receipt.proof, None) {
+    let statement_with_receipt = match receipt.embed_in_claim(claim) {
         Ok(cose_bytes) => cose_bytes,
         Err(err) => {
-            warn!("Failed to create COSE receipt: {}", err);
-            return HttpResponse::InternalServerError().body("Failed to create COSE receipt");
-        }
-    };
-
-    let statement_with_receipt = match scitt_cose::embed_receipt_in_statement(claim, cose_receipt) {
-        Ok(cose_bytes) => cose_bytes,
-        Err(err) => {
-            warn!("Failed to embed receipt in statement: {}", err);
-            return HttpResponse::InternalServerError().body("Failed to embed receipt in statement");
+            warn!("Failed to embed receipt: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to embed COSE receipt");
         }
     };
 
@@ -542,6 +572,7 @@ pub async fn run_actix_server(
             .service(register_signed_statement)
             .service(get_entries_tx_ids) // The order matters. If this is registered after get_entry_receipt, it will match the same path and never work
             .service(get_entry_receipt)
+            .service(get_raw_receipt)
             .service(get_entry_statement)
             .service(get_operation_with_status)
             .service(register_policy)

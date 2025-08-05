@@ -798,12 +798,13 @@ class Result:
                 plot_dict_items = list(sorted(plot_dict.items()))
 
                 for i, (legend, stat_list) in enumerate(plot_dict_items):
-                    if "Slow" in legend:
-                        legend = "Slow Audit"
-                    elif "Fast" in legend:
-                        legend = "Fast Audit"
-                    elif "Crash Commit" in legend:
-                        legend = "Commit"
+                    # Joao: I disabled this. It is easy enough to set this correctly in the toml and otherwise breaks more complex legends.
+                    # if "Slow" in legend:
+                    #     legend = "Slow Audit"
+                    # elif "Fast" in legend:
+                    #     legend = "Fast Audit"
+                    # elif "Crash Commit" in legend:
+                    #     legend = "Commit"
                     tputs = [stat.mean_tput for stat in stat_list]
                     latencies = [stat.median_latency for stat in stat_list]
                     axes.plot(tputs, latencies, label=legend, color=colors[i], marker=markers[i], mew=6, ms=12, linewidth=6)
