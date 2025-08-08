@@ -6,7 +6,7 @@ from locust import FastHttpUser, events, task
 
 from pyscitt.client import Client
 
-CLIENT_WAIT_TIME = 0.1
+CLIENT_WAIT_TIME = 0.10
 
 
 @events.init_command_line_parser.add_listener
@@ -69,7 +69,11 @@ class Submitter(ScittUser):
             len(self._signed_statements))]
         self.trace(
             "submit_signed_statement",
-            lambda: (self.client.wait_for_operation(self.client.submit_signed_statement(signed_statement))
-                     if self.skip_confirmation else self.client.
-                     submit_signed_statement_and_wait(signed_statement)),
+            lambda: (
+                self.get_transparent_statement(
+                    self.client.submit_signed_statement(signed_statement).
+                    operation_tx)
+                # self.client.wait_for_operation(self.client.submit_signed_statement(signed_statement))
+                if self.skip_confirmation else self.client.
+                submit_signed_statement_and_wait(signed_statement)),
         )

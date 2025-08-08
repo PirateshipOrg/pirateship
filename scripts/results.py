@@ -1327,13 +1327,14 @@ class Result:
         client_resources = []
         
         for f in os.listdir(log_dir):
-            if f.startswith('node') and f.endswith('.stats.csv'):
+            if f == 'leader.stats.csv' or f == 'node1.stats.csv':
                 stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
                 if stats:
-                    if f.startswith('node1'):
-                        leader_resources.append(stats)
-                    else:
-                        node_resources.append(stats)
+                    leader_resources.append(stats)
+            elif f.startswith('node') and f.endswith('.stats.csv'):
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    node_resources.append(stats)
         
         for f in os.listdir(log_dir):
             if f.startswith('client') and f.endswith('.stats.csv'):

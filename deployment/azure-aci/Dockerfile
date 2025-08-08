@@ -69,7 +69,7 @@ RUN curl -L "https://github.com/microsoft/CCF/releases/download/ccf-${CCF_VERSIO
 RUN git clone https://github.com/microsoft/scitt-ccf-ledger/ /opt/scitt-ccf-ledger && \
     cd /opt/scitt-ccf-ledger && \
     git checkout ${SCITT_VERSION} && \
-    # sed -i "s/CCF_APP_INFO/CCF_APP_DEBUG/" app/src/tracing.h && \ 
+    sed -i "s/CCF_APP_INFO/CCF_APP_DEBUG/" app/src/tracing.h && \ 
     sed -i "s/MAX_ACTIVE_HANDLES = 100/MAX_ACTIVE_HANDLES = 1000/" app/src/historical/historical_queries_adapter.h && \
     PLATFORM=${CCF_PLATFORM} BUILD_TESTS=OFF ./build.sh && \    
     python3 -m venv venv && \
