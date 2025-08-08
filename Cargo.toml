@@ -50,7 +50,7 @@ crossbeam = "0.8.4"
 clap = { version = "4.5.15", features = ["derive", "cargo"] }
 rocksdb = "0.22.0"
 lz4_flex = { version = "0.11" }
-gluesql = "0.15"
+gluesql = "0.17.0"
 zipf = "7.0.1"
 kanal = "0.1.0-pre8"
 bincode = "1.3.3"

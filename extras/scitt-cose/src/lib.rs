@@ -223,9 +223,9 @@ fn decode_cose_headers(cose: &CoseSign1) -> COSEHeaders {
     COSEHeaders { phdr, uhdr }
 }
 
-fn parse_certificate_chain(
-    x5chain: &Option<Vec<Vec<u8>>>,
-) -> Result<(Vec<X509Certificate>, String), String> {
+fn parse_certificate_chain<'a>(
+    x5chain: &'a Option<Vec<Vec<u8>>>,
+) -> Result<(Vec<X509Certificate<'a>>, String), String> {
     if let Some(chain) = x5chain {
         let mut certificates = Vec::new();
         let mut der_certificates = Vec::new();
