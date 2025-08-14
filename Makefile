@@ -111,6 +111,10 @@ pirateship_scitt_commit_receipts:
 pirateship_scitt_concurrent_commit_receipts:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features commit_receipts,concurrent,fast_path --no-default-features
 
+.PHONY: pirateship_scitt_concurrent_nofast
+pirateship_scitt_concurrent_nofast:
+	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/scitt/Cargo.toml --features concurrent_validation --no-default-features
+
 .PHONY: receipt_validator
 receipt_validator:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/receipt_validator/Cargo.toml

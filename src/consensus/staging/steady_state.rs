@@ -659,15 +659,16 @@ impl Staging {
             // and that can lead to failing validations and consequently to unnecessary view changes.
             // This might be suboptimal because we end up crash committing one block at a time instead of processing
             // chunks of the chain, and because of that we only enable this for policy validation.
+
+            use crate::utils::unwrap_tx_list;
             self.do_crash_commit(self.ci, ae_stats.ci).await;
             let (tx, rx) = oneshot::channel();
             self.app_tx
-                .send(AppCommand::Validate(block.clone(), tx))
+                .send(AppCommand::Validate(block.block.n, unwrap_tx_list(&block.block).clone(), tx))
                 .await
                 .unwrap();
-            let res = rx.await.unwrap();
-            if let Err(err) = res {
-                error!("Policy validation failed for block {}, not voting in favor of it: {}", block.block.n, err);
+            if rx.await.unwrap().is_err() { // here we do not care which txs failed, the leader should guarantee that all txs are valid
+                error!("Policy validation failed for block {}, not voting in favor of it", block.block.n);
                 return Ok(());
             }
         }
@@ -1053,9 +1054,14 @@ impl Staging {
     }
 
     pub(crate) async fn do_byzantine_commit(&mut self, old_bci: u64, new_bci: u64, qc: ProtoQuorumCertificate) {
+        // warn!("BEFORE: Byzantine commit from {} to {}. QC {}", old_bci, new_bci, qc.n);
+
         if new_bci <= old_bci {
+            let _ = self.app_tx.send(AppCommand::ByzCommit(vec![], qc)).await;
             return;
         }
+
+        // warn!("Byzantine commit from {} to {}. QC {}", old_bci, new_bci, qc.n);
 
         self.bci = new_bci;
 

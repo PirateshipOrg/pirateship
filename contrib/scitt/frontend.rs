@@ -1,19 +1,5 @@
-use crate::cbor_utils::operation_props_to_cbor;
-
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-
 use log::warn;
-use pft::config::Config;
-#[cfg(feature = "concurrent_validation")]
-use pft::consensus::app::TxWithValidationAck;
-use pft::consensus::batch_proposal::TxWithAckChanTag;
-use pft::consensus::engines::scitt::{SCITTWriteType, TXID};
-use pft::proto::client::{
-    self, ProtoClientReply, ProtoTransactionReceipt, ProtoTransactionResponse,
-};
-use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
-use pft::rpc::SenderType;
-use pft::utils::channel::Sender;
 use prost::Message;
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
@@ -22,8 +8,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::{collections::HashMap, fs::File, io::BufReader};
 use tokio::sync::{mpsc, Mutex};
-#[cfg(feature = "concurrent_validation")]
-use tokio::sync::oneshot;
+
+use pft::{
+    config::Config,
+    consensus::{
+        batch_proposal::TxWithAckChanTag,
+        engines::{scitt::SCITTWriteType, TXID},
+    },
+    proto::{
+        client::{self, ProtoClientReply, ProtoTransactionReceipt, ProtoTransactionResponse},
+        execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase},
+    },
+    rpc::SenderType,
+    utils::channel::Sender,
+};
+
+use crate::cbor_utils::operation_props_to_cbor;
+
 
 static AUDIT_RECEIPT: bool = cfg!(not(feature = "commit_receipts"));
 
@@ -52,9 +53,6 @@ struct AppState {
     curr_client_tag: AtomicU64,
     /// Request cache to store responses for TXID lookups.
     request_cache: Arc<Mutex<HashMap<TXID, ProtoTransactionResponse>>>,
-    /// Global channel to validate claims before submission
-    #[cfg(feature = "concurrent_validation")]
-    validation_tx: Sender<TxWithValidationAck>,
 }
 
 #[derive(Deserialize)]
@@ -77,21 +75,6 @@ async fn register_signed_statement(
             cose_signed_statement.to_vec(),
         ],
     };
-
-    #[cfg(feature = "concurrent_validation")] {
-        let (tx, rx) = oneshot::channel();
-        state
-            .validation_tx
-            .send((transaction_op.clone(), tx))
-            .await
-            .expect("Failed to send validation request");
-        match rx.await.expect("Failed to receive validation response") {
-            Ok(_) => (),
-            Err(err) => {
-                return HttpResponse::BadRequest().body(format!("Claim validation failed: {}", err))
-            }
-        }
-    }
 
     let response = match send_write(vec![transaction_op], &state).await {
         Ok(response) => response,
@@ -304,21 +287,6 @@ async fn register_policy(policy: web::Bytes, state: web::Data<AppState>) -> impl
         operands: vec![SCITTWriteType::Policy.to_slice().to_vec(), policy.to_vec()],
     };
 
-    #[cfg(feature = "concurrent_validation")] {
-        let (tx, rx) = oneshot::channel();
-        state
-            .validation_tx
-            .send((transaction_op.clone(), tx))
-            .await
-            .expect("Failed to send validation request");
-        match rx.await.expect("Failed to receive validation response") {
-            Ok(_) => (),
-            Err(err) => {
-                return HttpResponse::BadRequest().body(format!("policy validation failed: {}", err))
-            }
-        }
-    }
-
     let result = match send_write(vec![transaction_op], &state).await {
         Ok(response) => response,
         Err(err) => return err,
@@ -507,8 +475,6 @@ pub async fn run_actix_server(
     config: Config,
     batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>,
     actix_threads: usize,
-    #[cfg(feature = "concurrent_validation")]
-    validation_tx: pft::utils::channel::AsyncSenderWrapper<TxWithValidationAck>,
 ) -> std::io::Result<()> {
     let addr = config.net_config.addr.clone();
     // Add 1000 to the port.
@@ -563,8 +529,6 @@ pub async fn run_actix_server(
             batch_proposer_tx: batch_proposer_tx.clone(),
             curr_client_tag: AtomicU64::new(0),
             request_cache: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "concurrent_validation")]
-            validation_tx: validation_tx.clone(),
         };
 
         App::new()

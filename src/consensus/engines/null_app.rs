@@ -59,12 +59,16 @@ impl AppEngine for NullApp {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&self, _tx: &crate::proto::execution::ProtoTransactionOp) -> crate::consensus::app::TransactionValidationResult {
-        Ok(())
+    fn handle_validation(&self, _tx: &crate::proto::execution::ProtoTransactionOp, _txid: super::TXID) -> crate::consensus::app::TransactionValidationResult {
+        Ok(None)
     }
 
     fn get_current_state(&self) -> Self::State {
         self.clone()
     }
-}
 
+    #[cfg(feature = "concurrent_validation")]
+    fn handle_post_validation(&self, _readsets: Vec<crate::consensus::app::ReadSet>) -> crate::consensus::app::PostValidationResult {
+        Ok(())
+    }
+}

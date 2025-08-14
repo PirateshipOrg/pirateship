@@ -6,8 +6,8 @@ use std::io::ErrorKind;
 use log::warn;
 use prost::Message as _;
 use crate::config::NodeInfo;
-#[cfg(feature = "sequential_validation")]
-use crate::consensus::app::TxWithValidationAck;
+#[cfg(feature = "policy_validation")]
+use crate::consensus::app::AppCommand;
 use crate::proto::client::{ProtoClientReply, ProtoCurrentLeader};
 use crate::proto::execution::ProtoTransactionResult;
 use crate::rpc::server::LatencyProfile;
@@ -39,8 +39,8 @@ pub struct BatchProposer {
     reply_tx: Sender<ClientReplyCommand>,
     unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
-    #[cfg(feature = "sequential_validation")]
-    validation_tx: Sender<TxWithValidationAck>,
+    #[cfg(feature = "policy_validation")]
+    app_tx: Sender<AppCommand>,
 
     current_raw_batch: Option<RawBatch>, // So that I can take()
     current_reply_vec: Vec<MsgAckChanWithTag>,
@@ -63,8 +63,8 @@ impl BatchProposer {
         block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
         reply_tx: Sender<ClientReplyCommand>, unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         cmd_rx: Receiver<BatchProposerCommand>,
-        #[cfg(feature = "sequential_validation")]
-        validation_tx: Sender<TxWithValidationAck>,
+        #[cfg(feature = "policy_validation")]
+        app_tx: Sender<AppCommand>,
     ) -> Self {
         let batch_timer = ResettableTimer::new(
             Duration::from_millis(config.get().consensus_config.batch_max_delay_ms)
@@ -92,8 +92,8 @@ impl BatchProposer {
             current_leader: String::new(),
             cmd_rx,
             last_batch_proposed: Instant::now(),
-            #[cfg(feature = "sequential_validation")]
-            validation_tx,
+            #[cfg(feature = "policy_validation")]
+            app_tx,
         };
 
         #[cfg(not(feature = "view_change"))]
@@ -226,24 +226,6 @@ impl BatchProposer {
             let ack_chan = new_tx.1;
             let new_tx = new_tx.0.unwrap();
 
-            #[cfg(feature = "sequential_validation")]
-            if let Some(on_crash_commit) = &new_tx.on_crash_commit {
-                if on_crash_commit.ops.is_empty() {
-                    warn!("Malformed transaction");
-                    self.register_reply_malformed(ack_chan).await;
-                    return Ok(());
-                }
-                let (res_tx, res_rx) = oneshot::channel();
-                let op = &on_crash_commit.ops[0];
-                self.validation_tx.send((op.clone(), res_tx)).await.unwrap();
-                let res = res_rx.await.unwrap();
-                if res.is_err() {
-                    warn!("Policy validation failed for transaction: {:?}", new_tx);
-                    self.register_reply_malformed(ack_chan).await;
-                    return Ok(());
-                }
-            }
-
             self.current_raw_batch.as_mut().unwrap().push(new_tx);
             self.current_reply_vec.push(ack_chan);
             self.perf_add_event(work_counter, "Add request to batch");
@@ -252,16 +234,38 @@ impl BatchProposer {
         let max_batch_size = self.config.get().consensus_config.max_backlog_batch_size;
 
         if self.current_raw_batch.as_ref().unwrap().len() >= max_batch_size || (self.make_new_batches && batch_timer_tick) {
+
+            #[cfg(feature = "policy_validation")]
+            self.validate_block().await;
+
             self.propose_new_batch().await;
         }
 
         Ok(())
     }
 
+    #[cfg(feature = "policy_validation")]
+    async fn validate_block(&mut self) {
+        let (tx, rx) = oneshot::channel();
+        self.app_tx.send(AppCommand::Validate(std::u64::MAX, self.current_raw_batch.as_ref().unwrap().clone(), tx)).await.unwrap();
+        if let Err(validation_errors) = rx.await.unwrap() {
+            for (txid, err) in validation_errors {
+                // take index txid.tx_idx from the current_raw_batch and current_reply_vec
+                let _tx = self.current_raw_batch.as_mut().unwrap().remove(txid.tx_idx);
+                let ack_chan = self.current_reply_vec.remove(txid.tx_idx);
+                self.reply_validation_failed(ack_chan, err).await;
+            }
+        }
+    }
+
     // async fn 
 
     async fn register_reply_malformed(&mut self, _ack_chan: MsgAckChanWithTag) {
         todo!()
+    }
+
+    async fn reply_validation_failed(&mut self, _ack_chan: MsgAckChanWithTag, _error: String) {
+        todo!();
     }
 
     async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) { // TODO

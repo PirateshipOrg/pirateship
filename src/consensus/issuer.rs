@@ -92,6 +92,7 @@ impl Issuer {
                         self.handle_rollback(block_n).await;
                     },
                     Some(IssuerCommand::NewQC(qc)) => {
+                        // warn!("QC {}", qc.n);
                         self.cached_qcs.insert(qc.n, qc);
                     },
                     Some(IssuerCommand::GC(bci)) => {

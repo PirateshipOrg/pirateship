@@ -15,23 +15,29 @@ use scitt_cose::{validate_scitt_cose_signed_statement, CBORType, COSEHeaders, Pr
 #[cfg(feature = "policy_validation")]
 use base64::engine::{general_purpose, Engine};
 
-use crate::utils::unwrap_tx_list;
-use crate::{config::AtomicConfig, consensus::app::AppEngine};
-
-use crate::proto::execution::{
-    ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult,
+use crate::{
+    config::AtomicConfig,
+    consensus::{
+        app::AppEngine,
+        engines::TXID,
+    },
+    proto::{
+        client::ProtoByzResponse,
+        consensus::ProtoBlock,
+        execution::{
+            ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult,
+        },
+    },
+    utils::unwrap_tx_list,
 };
-
-use crate::proto::client::ProtoByzResponse;
-
-use crate::proto::consensus::ProtoBlock;
 
 #[derive(std::fmt:: Debug, Clone, Serialize, Deserialize)]
 pub struct SCITTState {
-    pub crash_committed_claims: HashMap<TXID, Vec<(u64, Vec<u8>) /* versions */>>,
+    pub crash_committed_claims: HashMap<TXID, Vec<u8>>,
     pub byz_committed_claims: HashMap<TXID, Vec<u8>>,
-    pub crash_committed_policies: Vec<(u64, Vec<u8>)>,
-    pub byz_committed_policies: Vec<Vec<u8>>,
+    pub speculative_policies: Vec<(TXID, Vec<u8>)>,
+    pub crash_committed_policies: Vec<(TXID, Vec<u8>)>,
+    pub byz_committed_policies: Vec<(TXID, Vec<u8>)>,
 }
 
 impl Display for SCITTState {
@@ -43,12 +49,6 @@ impl Display for SCITTState {
             self.byz_committed_claims.len()
         )
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TXID {
-    pub block_n: u64,
-    pub tx_idx: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
@@ -75,39 +75,6 @@ impl SCITTWriteType {
     }
 }
 
-impl TXID {
-    const DELIMITER: char = ':';
-    pub fn new(block_n: u64, tx_idx: usize) -> Self {
-        Self { block_n, tx_idx }
-    }
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(&self.block_n.to_be_bytes());
-        v.extend_from_slice(&self.tx_idx.to_be_bytes());
-        v
-    }
-    pub fn from_vec(v: &[u8]) -> Option<Self> {
-        if v.len() < 16 {
-            return None; // 8 bytes for u64 + 8 bytes for usize
-        }
-        let block_n = u64::from_be_bytes(v[0..8].try_into().ok()?);
-        let tx_idx = usize::from_be_bytes(v[8..16].try_into().ok()?);
-        Some(Self { block_n, tx_idx })
-    }
-    pub fn to_string(&self) -> String {
-        format!("{}{}{}", self.block_n, Self::DELIMITER, self.tx_idx)
-    }
-    pub fn from_string(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split(Self::DELIMITER).collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let block_n = parts[0].parse::<u64>().ok()?;
-        let tx_idx = parts[1].parse::<usize>().ok()?;
-        Some(Self { block_n, tx_idx })
-    }
-}
-
 #[cfg(feature = "policy_validation")]
 thread_local! {
     pub static JS_RUNTIME: Runtime = Runtime::new().unwrap();
@@ -131,6 +98,7 @@ impl AppEngine for SCITTAppEngine {
             state: SCITTState {
                 crash_committed_claims: HashMap::new(),
                 byz_committed_claims: HashMap::new(),
+                speculative_policies: Vec::new(),
                 crash_committed_policies: Vec::new(),
                 byz_committed_policies: Vec::new(),
             },
@@ -168,10 +136,10 @@ impl AppEngine for SCITTAppEngine {
                             continue;
                         }
 
+                        let txid = TXID::new(proto_block.n, i);
                         match SCITTWriteType::from_slice(&op.operands[0]) {
                             SCITTWriteType::Claim => {
                                 let claim: &Vec<u8> = &op.operands[1];
-                                let txid = TXID::new(proto_block.n, i);
                                 if self.state.crash_committed_claims.contains_key(&txid) {
                                     error!(
                                         "Invalid ledger write: {} already exists",
@@ -180,7 +148,7 @@ impl AppEngine for SCITTAppEngine {
                                 } else {
                                     self.state
                                         .crash_committed_claims
-                                        .insert(txid.clone(), vec![(proto_block.n, claim.clone())]);
+                                        .insert(txid.clone(), claim.clone());
                                 }
                                 txn_result.result.push(ProtoTransactionOpResult {
                                     success: true,
@@ -190,7 +158,7 @@ impl AppEngine for SCITTAppEngine {
                             SCITTWriteType::Policy => {
                                 let policy = &op.operands[1];
 
-                                self.state.crash_committed_policies.push((proto_block.n, policy.clone()));
+                                self.state.crash_committed_policies.push((txid.clone(), policy.clone()));
 
                                 txn_result.result.push(ProtoTransactionOpResult {
                                     success: true,
@@ -297,24 +265,20 @@ impl AppEngine for SCITTAppEngine {
         }
 
         // Then move all Byz committed entries from ci_state to bci_state.
-        for (key, val_versions) in self.state.crash_committed_claims.iter_mut() {
-            for (pos, val) in &(*val_versions) {
-                if *pos <= self.last_bci {
-                    self.state
-                        .byz_committed_claims
-                        .insert(key.clone(), val.clone());
-                }
+        for (txid, claim) in self.state.crash_committed_claims.iter_mut() {
+            if txid.block_n <= self.last_bci {
+                self.state
+                    .byz_committed_claims
+                    .insert(txid.clone(), claim.clone());
             }
-
-            val_versions.retain(|v| v.0 > self.last_bci);
         }
-        self.state.crash_committed_claims.retain(|_, v| v.len() > 0);
+        self.state.crash_committed_claims.retain(|v, _| v.block_n > self.last_bci);
         for (version, policy) in self.state.crash_committed_policies.iter() {
-            if *version <= self.last_bci {
-                self.state.byz_committed_policies.push(policy.clone());
+            if version.block_n <= self.last_bci {
+                self.state.byz_committed_policies.push((version.clone(), policy.clone()));
             }
         }
-        self.state.crash_committed_policies.retain(|(v, _)| *v > self.last_bci);
+        self.state.crash_committed_policies.retain(|(v, _)| v.block_n > self.last_bci);
         trace!("block count:{}", block_count);
         trace!("transaction count{}", txn_count);
         final_result
@@ -322,11 +286,9 @@ impl AppEngine for SCITTAppEngine {
 
     fn handle_rollback(&mut self, rolled_back_blocks: u64) {
         //roll back ci_state to rolled_back_blocks (block.n)
-        for (_k, v) in self.state.crash_committed_claims.iter_mut() {
-            v.retain(|(pos, _)| *pos <= rolled_back_blocks);
-        }
-
-        self.state.crash_committed_claims.retain(|_, v| v.len() > 0);
+        self.state.crash_committed_claims.retain(|v, _| v.block_n <= rolled_back_blocks);
+        self.state.crash_committed_policies.retain(|(v, _)| v.block_n <= rolled_back_blocks);
+        self.state.speculative_policies.clear();
     }
 
     fn handle_unlogged_request(
@@ -387,6 +349,7 @@ impl AppEngine for SCITTAppEngine {
     fn handle_validation(
         &self,
         tx_op: &crate::proto::execution::ProtoTransactionOp,
+        txid: TXID,
     ) -> crate::consensus::app::TransactionValidationResult {
         #[cfg(feature = "null_validation")]
         return Ok(());
@@ -403,7 +366,10 @@ impl AppEngine for SCITTAppEngine {
         let argument = &tx_op.operands[1];
 
         if op_type == SCITTWriteType::Policy {
-            return JS_RUNTIME.with(|runtime| validate_policy(runtime, argument));
+            if let Err(err) = JS_RUNTIME.with(|runtime| validate_policy(runtime, argument)) {
+                return Err(err);
+            }
+            return Ok(None);
         }
 
         let headers: COSEHeaders = match validate_scitt_cose_signed_statement(argument) {
@@ -413,11 +379,34 @@ impl AppEngine for SCITTAppEngine {
             }
         };
 
-        let Some(policy) = self.get_current_policy() else {
+        let Some(versioned_policy) = self.get_current_policy(&txid) else {
             return Err("No currently active policy found".to_string());
         };
 
-        JS_RUNTIME.with(|runtime| apply_policy_to_claim(runtime, policy, &headers.phdr))
+        if let Err(err) = JS_RUNTIME.with(|runtime| apply_policy_to_claim(runtime, &versioned_policy.1, &headers.phdr)) {
+            return Err(err);
+        }
+        return Ok(Some((txid, versioned_policy.0.clone())));
+        
+        
+    }
+
+    #[cfg(feature = "concurrent_validation")]
+    fn handle_post_validation(&self, readsets: Vec<crate::consensus::app::ReadSet>) -> crate::consensus::app::PostValidationResult {
+        #[cfg(feature = "null_validation")]
+        return Ok(());
+
+        for (reader, policy_version) in readsets {
+            if let Some(versioned_policy) = self.get_current_policy(&reader) {
+                let current_policy_version = &versioned_policy.0;
+                if !current_policy_version.eq(&policy_version) {
+                    return Err(format!("Policy version mismatch {:?} {:?}", current_policy_version, policy_version));
+                }
+            } else {
+                panic!("No current policy found for reader: {:?}", reader);
+            }
+        }
+        Ok(())
     }
 
     fn get_current_state(&self) -> Self::State {
@@ -427,20 +416,10 @@ impl AppEngine for SCITTAppEngine {
 
 impl SCITTAppEngine {
     fn read(&self, key: &TXID) -> Option<Vec<u8>> {
-        //same search logic from old kvs.rs
-        let ci_res = self.state.crash_committed_claims.get(key);
-        if let Some(v) = ci_res {
-            // Invariant: v is sorted by ci
-            // Invariant: v.len() > 0
-            let res = &v.last().unwrap().1;
-            return Some(res.clone());
-        } else {
-            //check bci_state
-        }
-
-        let bci_res = self.state.byz_committed_claims.get(key);
-        if let Some(v) = bci_res {
-            return Some(v.clone());
+        if let Some(claim) = self.state.crash_committed_claims.get(key) {
+            return Some(claim.clone());
+        } else if let Some(claim) = self.state.byz_committed_claims.get(key) {
+            return Some(claim.clone());
         } else {
             return None;
         }
@@ -449,18 +428,14 @@ impl SCITTAppEngine {
     fn scan(&self, from: &Option<TXID>, to: &Option<TXID>) -> Option<Vec<Vec<u8>>> {
         if let (Some(from), Some(to)) = (from, to) {
             let mut scan_result = Vec::new();
-            for (key, versions) in self.state.crash_committed_claims.iter() {
-                if key.block_n >= from.block_n && key.block_n <= to.block_n {
-                    for (pos, _) in versions {
-                        if *pos >= from.block_n && *pos <= to.block_n {
-                            scan_result.push(key.to_vec());
-                        }
-                    }
+            for (txid, _claim) in self.state.crash_committed_claims.iter() {
+                if txid.block_n >= from.block_n && txid.block_n <= to.block_n {
+                    scan_result.push(txid.to_vec());
                 }
             }
-            for (key, _) in self.state.byz_committed_claims.iter() {
-                if key.block_n >= from.block_n && key.block_n <= to.block_n {
-                    scan_result.push(key.to_vec());
+            for (txid, _claim) in self.state.byz_committed_claims.iter() {
+                if txid.block_n >= from.block_n && txid.block_n <= to.block_n {
+                    scan_result.push(txid.to_vec());
                 }
             }
             Some(scan_result)
@@ -470,15 +445,19 @@ impl SCITTAppEngine {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn get_current_policy(&self) -> Option<&Vec<u8>> {
-        if let Some((_, policy)) = self.state.crash_committed_policies.last() {
-            Some(policy)
-        } else {
-            if let Some(policy) = self.state.byz_committed_policies.last() {
-                Some(policy)
-            } else {
-                None
+    fn get_current_policy(&self, reader: &TXID) -> Option<&(TXID, Vec<u8>)> {
+        for versioned_policy in self.state.speculative_policies.iter().rev() {
+            let version = &versioned_policy.0;
+            if version.block_n <= reader.block_n || (version.block_n == reader.block_n && version.tx_idx <= reader.tx_idx) {
+                return Some(versioned_policy);
             }
+        }
+        if let Some(versioned_policy) = self.state.crash_committed_policies.last() {
+            Some(versioned_policy)
+        } else if let Some(policy) = self.state.byz_committed_policies.last() {
+                Some(policy)
+        } else {
+            None
         }
     }
 }

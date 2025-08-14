@@ -8,10 +8,7 @@ use tokio::{sync::{oneshot, Mutex}};
 #[cfg(feature = "concurrent_validation")]
 use tokio::{sync::RwLock, task::JoinSet};
 
-use crate::{config::AtomicConfig, consensus::issuer::IssuerCommand, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
-
-#[cfg(feature = "policy_validation")]
-use crate::utils::unwrap_tx_list;
+use crate::{config::AtomicConfig, consensus::{engines::TXID, issuer::IssuerCommand}, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
 #[cfg(feature = "concurrent_validation")]
 use crate::utils::channel::make_channel;
@@ -20,8 +17,14 @@ use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTim
 #[cfg(feature = "channel_monitoring")]
 use super::channel_monitor::ChannelMonitor;
 
-pub type TransactionValidationResult = Result<(), String>;
-pub type TxWithValidationAck = (ProtoTransactionOp, oneshot::Sender<TransactionValidationResult>);
+// TODO: This return value needs to be generalized. right now it only works for SCITT that only performs one read (policy)
+// It should be a map of keys and values, but scitt does not really work that way (at least not yet).
+pub type ReadSet = (TXID,TXID); // tx that reads, tx that is read
+pub type TransactionValidationResult = Result<Option<ReadSet>, String>;
+pub type BlockValidationResult = Result<(), Vec<(TXID,String)>>;
+pub type TxWithValidationAck = (ProtoTransactionOp, TXID, oneshot::Sender<TransactionValidationResult>);
+// for now this is just an ok/err, later it could return the faulty txs and allow for some smarter retrying logic
+pub type PostValidationResult = Result<(), String>;
 
 #[cfg(all(feature = "policy_validation", not(any(feature = "concurrent_validation", feature = "sequential_validation"))))]
 compile_error!("policy_validation requires exactly one of: concurrent_validation, sequential_validation");
@@ -32,7 +35,7 @@ pub enum AppCommand {
     ByzCommit(Vec<CachedBlock> /* all blocks from old_bci + 1 to new_bci */, ProtoQuorumCertificate /* most recent QC */),
     Rollback(u64 /* new last block */),
     #[cfg(feature = "policy_validation")]
-    Validate(CachedBlock, oneshot::Sender<TransactionValidationResult>),
+    Validate(u64 /* block number */, Vec<ProtoTransaction>, oneshot::Sender<BlockValidationResult>),
 }
 
 pub trait AppEngine {
@@ -44,7 +47,9 @@ pub trait AppEngine {
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
     #[cfg(feature = "policy_validation")]
-    fn handle_validation(&self, tx: &ProtoTransactionOp) -> TransactionValidationResult;
+    fn handle_validation(&self, tx: &ProtoTransactionOp, txid: TXID) -> TransactionValidationResult;
+    #[cfg(feature = "concurrent_validation")]
+    fn handle_post_validation(&self, readsets: Vec<ReadSet>) -> PostValidationResult;
     fn get_current_state(&self) -> Self::State;
 }
 
@@ -154,15 +159,10 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
 
     phantom: PhantomData<&'a E>,
 
-
-    #[cfg(feature = "policy_validation")]
-    validation_rx: Receiver<TxWithValidationAck>,
     #[cfg(feature = "concurrent_validation")]
     validation_handles: JoinSet<()>,
     #[cfg(feature = "concurrent_validation")]
     validation_txs: Vec<Sender<TxWithValidationAck>>,
-    #[cfg(feature = "concurrent_validation")]
-    last_tx: usize,
 }
 
 
@@ -176,8 +176,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
         twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         #[cfg(feature = "channel_monitoring")]
         channel_monitor: Arc<Mutex<ChannelMonitor>>,
-        #[cfg(feature = "policy_validation")]
-        validation_rx: Receiver<TxWithValidationAck>,
     ) -> Self {
         let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
         let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
@@ -212,14 +210,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
             
             #[cfg(feature = "channel_monitoring")]
             channel_monitor: channel_monitor,
-            #[cfg(feature = "policy_validation")]
-            validation_rx,
             #[cfg(feature = "concurrent_validation")]
             validation_handles: JoinSet::new(),
             #[cfg(feature = "concurrent_validation")]
             validation_txs: Vec::new(),
-            #[cfg(feature = "concurrent_validation")]
-            last_tx: 0,
         }
     }
 
@@ -232,8 +226,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
             application.validation_txs.push(tx);
             let engine_clone = Arc::clone(&application.engine);
             application.validation_handles.spawn(async move {
-                while let Some((tx, reply_tx)) = rx.recv().await {
-                    let _ = reply_tx.send(engine_clone.read().await.handle_validation(&tx));
+                while let Some((tx, txid, reply_tx)) = rx.recv().await {
+                    let _ = reply_tx.send(engine_clone.read().await.handle_validation(&tx, txid));
                 }
             });
         }
@@ -254,7 +248,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
     }
 
     async fn worker(&mut self) -> Result<(), ()> {
-        #[cfg(not(feature = "policy_validation"))]
         tokio::select! {
             biased;
             cmd = self.staging_rx.recv() => {
@@ -279,46 +272,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 self.log_stats().await;
             }
         }
-        #[cfg(feature = "policy_validation")]
-        tokio::select! {
-            biased;
-            cmd = self.staging_rx.recv() => {
-                if cmd.is_none() {
-                    return Err(());
-                }
-                self.handle_staging_command(cmd.unwrap()).await;
-            },
-            req = self.unlogged_rx.recv() => {
-                if req.is_none() {
-                    return Err(());
-                }
-
-                let (req, reply_tx) = req.unwrap();
-
-                self.handle_unlogged_request(req, reply_tx).await;
-            },
-            txwva = self.validation_rx.recv() => {
-                if txwva.is_none() {
-                    return Err(());
-                }
-                #[cfg(feature = "concurrent_validation")] {
-                    let (tx, reply_tx) = txwva.unwrap();
-                    self.validation_txs[self.last_tx].send((tx, reply_tx)).await.unwrap();
-                    self.last_tx = (self.last_tx + 1) % self.validation_txs.len();
-                }
-                #[cfg(feature = "sequential_validation")] {
-                    let (tx, reply_tx) = txwva.unwrap();
-                    reply_tx.send(self.engine.handle_validation(&tx)).unwrap();
-                }
-            },
-            _ = self.checkpoint_timer.wait() => {
-                self.checkpoint().await;
-            },
-            _ = self.log_timer.wait() => {
-                self.log_stats().await;
-            }
-        }
-
         Ok(())
     }
 
@@ -470,7 +423,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                     (block.block_hash.clone(), block.block.n)
                 }).collect::<(Vec<_>, Vec<_>)>();
                 let qc_n = qc.n;
-                let _ = self.issuer_tx.send(IssuerCommand::NewQC(qc)).await;
+                self.issuer_tx.send(IssuerCommand::NewQC(qc)).await.unwrap();
+                if blocks.len() == 0 {
+                    return;
+                }
 
                 #[allow(unused_mut)]
                 let mut results;
@@ -521,47 +477,77 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 }
             }
             #[cfg(feature = "policy_validation")]
-            AppCommand::Validate(_block, reply_tx) => {
+            AppCommand::Validate(_block_number, _txs, reply_tx) => {
                 #[cfg(feature = "concurrent_validation")] {
                     let mut i = 0;
                     let mut replies = vec![];
-                    for tx in unwrap_tx_list(&_block.block) {
+                    let mut validated = true;
+                    for (tx_n, tx) in _txs.iter().enumerate() {
                         let Some(phase) = &tx.on_crash_commit else {
                             continue;
+                        };
+                        // this could break if tx has multiple ops... txid shouuld probably be a tuple of (block_n, tx_n, op_n)
+                        let txid = TXID {
+                            block_n: _block_number,
+                            tx_idx: tx_n,
                         };
                         for op in &phase.ops {
                             let (tx, rx) = oneshot::channel();
                             replies.push(rx);
                             self.validation_txs[i % self.validation_txs.len()]
-                                .send((op.clone(), tx)).await.unwrap();
+                                .send((op.clone(), txid.clone(), tx)).await.unwrap();
                             i += 1;
                         }
                     }
+                    let mut readsets = Vec::new();
                     for reply_rx in replies {
                         let res = reply_rx.await.unwrap();
-                        if res.is_err() {
-                            reply_tx.send(res).unwrap();
-                            return;
+                        match res {
+                            Ok(Some(readset)) => readsets.push(readset),
+                            Ok(None) => continue,
+                            Err(_err) => {
+                                validated = false;
+                            }
                         }
-
                     }
+                    if validated && self.engine.read().await.handle_post_validation(readsets).is_ok() {
+                        reply_tx.send(Ok(())).unwrap();
+                        return;
+                    }
+                    // otherwise, we do it sequentially
                 }
-                #[cfg(feature = "sequential_validation")]
-                for tx in unwrap_tx_list(&_block.block) {
+
+                let mut invalid_txs = Vec::new();
+                for (tx_n, tx) in _txs.iter().enumerate() {
                     let Some(phase) = &tx.on_crash_commit else {
                         continue;
                     };
+
+                    // this could break if tx has multiple ops... txid should probably be a tuple of (block_n, tx_n, op_n)
+                    let txid = TXID {
+                        block_n: _block_number,
+                        tx_idx: tx_n,
+                    };
+
                     for op in &phase.ops {
-                        let res = self.engine.handle_validation(op);
-                        if res.is_err() {
-                            reply_tx.send(res).unwrap();
-                            return;
+                        #[cfg(feature = "concurrent_validation")]
+                        let res = self.engine.read().await.handle_validation(op, txid.clone());
+                        #[cfg(not(feature = "concurrent_validation"))]
+                        let res = self.engine.handle_validation(op, txid.clone());
+                        if let Err(err) = res {
+                            invalid_txs.push((txid, err));
+                            break;
                         }
                     }
 
                 }
-                reply_tx.send(Ok(())).unwrap();
-            }
+
+                if invalid_txs.is_empty() {
+                    reply_tx.send(Ok(())).unwrap();
+                } else {
+                    reply_tx.send(Err(invalid_txs)).unwrap();
+                }
+            },
         }
     }
 }

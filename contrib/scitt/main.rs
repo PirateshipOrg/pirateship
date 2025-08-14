@@ -48,15 +48,11 @@ async fn run_main(
     config: Config,
     batch_proposer_tx: Sender<TxWithAckChanTag>,
     batch_proposer_rx: Receiver<TxWithAckChanTag>,
-    #[cfg(feature = "concurrent_validation")]
-    validation_rx: Receiver<consensus::app::TxWithValidationAck>,
 ) -> io::Result<()> {
     let mut node = consensus::ConsensusNode::<SCITTAppEngine>::mew(
         config.clone(),
         batch_proposer_tx,
         batch_proposer_rx,
-        #[cfg(feature = "concurrent_validation")]
-        validation_rx,
     );
 
     let mut handles = node.run().await;
@@ -113,10 +109,6 @@ fn main() {
     let (batch_proposer_tx, batch_proposer_rx) =
         make_channel(cfg.rpc_config.channel_depth as usize);
 
-    #[cfg(feature = "concurrent_validation")]
-    let (validation_tx, validation_rx) =
-        make_channel(cfg.rpc_config.channel_depth as usize);
-
     let start_idx = start_idx * consensus_threads;
 
     let i = Box::pin(AtomicUsize::new(0));
@@ -146,8 +138,6 @@ fn main() {
         cfg.clone(),
         batch_proposer_tx.clone(),
         batch_proposer_rx,
-        #[cfg(feature = "concurrent_validation")]
-        validation_rx
     ));
 
     let frontend_runtime = runtime::Builder::new_multi_thread()
@@ -159,8 +149,6 @@ fn main() {
         cfg,
         batch_proposer_tx,
         actix_threads,
-        #[cfg(feature = "concurrent_validation")]
-        validation_tx,
     )) {
         Ok(_) => println!("Frontend server ran successfully."),
         Err(e) => eprintln!("Frontend server error: {:?}", e),
