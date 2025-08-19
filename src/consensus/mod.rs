@@ -284,11 +284,11 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
 
         let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx.clone(), fork_receiver_command_tx.clone(), vote_tx.clone(), view_change_tx.clone(), backfill_request_tx.clone());
-        let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx.clone(), client_reply_command_tx.clone(), unlogged_tx.clone(), batch_proposer_command_rx,
+        let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx.clone(), client_reply_command_tx.clone(), unlogged_tx.clone(), batch_proposer_command_rx);
+        let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx.clone(), client_reply_tx.clone(), block_maker_crypto,
             #[cfg(feature = "policy_validation")]
             app_tx.clone()
         );
-        let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx.clone(), client_reply_tx.clone(), block_maker_crypto);
         let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, staging_tx.clone(), fork_receiver_command_tx.clone(), app_tx.clone());
         let staging = Staging::new(config.clone(), staging_client.into(), staging_crypto, staging_rx, vote_rx, pacemaker_cmd_rx, pacemaker_cmd_tx2.clone(), client_reply_command_tx.clone(), app_tx.clone(), broadcaster_control_command_tx.clone(), control_command_tx.clone(), fork_receiver_command_tx.clone(), qc_tx, batch_proposer_command_tx.clone(), logserver_tx.clone(), staging_storage,
             #[cfg(feature = "extra_2pc")]

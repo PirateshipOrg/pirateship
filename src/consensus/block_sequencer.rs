@@ -7,6 +7,15 @@ use log::{trace, warn};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, Mutex};
 
+#[cfg(feature = "policy_validation")]
+use crate::{
+    consensus::app::AppCommand,
+    proto::client::ProtoClientReply
+};
+
+#[cfg(feature = "policy_validation")]
+use prost::Message;
+
 use crate::utils::PerfCounter;
 use crate::{
     config::AtomicConfig,
@@ -45,6 +54,9 @@ pub struct BlockSequencer {
     block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
+    #[cfg(feature = "policy_validation")]
+    app_tx: Sender<AppCommand>,
+
     crypto: CryptoServiceConnector,
     parent_hash_rx: FutureHash,
     seq_num: u64,
@@ -70,6 +82,8 @@ impl BlockSequencer {
         block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
+        #[cfg(feature = "policy_validation")]
+        app_tx: Sender<AppCommand>,
     ) -> Self {
         let signature_timer = ResettableTimer::new(Duration::from_millis(
             config.get().consensus_config.signature_max_delay_ms,
@@ -109,6 +123,8 @@ impl BlockSequencer {
             perf_counter_unsigned,
             __last_qc_n_seen: 0,
             __blocks_proposed_in_this_view: 0,
+            #[cfg(feature = "policy_validation")]
+            app_tx
         };
 
         #[cfg(not(feature = "view_change"))]
@@ -306,15 +322,31 @@ impl BlockSequencer {
         Ok(())
     }
 
+    #[allow(unused_mut)] // ignore warning for unused muts (needed for policy validation, otherwise we would need to copy stuff around needlessly)
     async fn handle_new_batch(
         &mut self,
-        batch: RawBatch,
-        replies: Vec<MsgAckChanWithTag>,
+        mut batch: RawBatch,
+        mut replies: Vec<MsgAckChanWithTag>,
         fork_validation: Vec<ProtoForkValidation>,
         perf_entry_id: u64,
     ) {
         self.seq_num += 1;
         let n = self.seq_num;
+
+        #[cfg(feature = "policy_validation")] {
+            let (tx, rx) = oneshot::channel();
+            self.app_tx.send(AppCommand::Validate(n, batch.clone(), tx)).await.unwrap();
+            if let Err(mut validation_errors) = rx.await.unwrap() {
+                // sort in descending order so that removal does not break indexes
+                validation_errors.sort_by(|a, b| b.0.tx_idx.cmp(&a.0.tx_idx));
+                for (txid, err) in validation_errors {
+                    // take index txid.tx_idx from the current_raw_batch and current_reply_vec
+                    let _tx = batch.remove(txid.tx_idx);
+                    let ack_chan = replies.remove(txid.tx_idx);
+                    Self::reply_validation_failed(ack_chan, err).await;
+                }
+            }
+        }
 
         let config = self.config.get();
 
@@ -384,6 +416,30 @@ impl BlockSequencer {
 
         self.perf_deregister(perf_entry_id);
         trace!("Sequenced: {}", n);
+    }
+
+    #[cfg(feature = "policy_validation")]
+    async fn reply_validation_failed(ack_chan: MsgAckChanWithTag, description: String) {
+        let (ack_chan, client_tag, _) = ack_chan;
+
+        let reply = ProtoClientReply {
+            reply: Some(
+                crate::proto::client::proto_client_reply::Reply::ErrorResponse(
+                    crate::proto::client::ProtoErrorResponse {
+                        error: crate::proto::client::ErrorType::ValidationFailure as i32,
+                        message: description,
+                    }
+                )
+            ),
+            client_tag
+        };
+
+        let reply_ser = reply.encode_to_vec();
+        let _sz = reply_ser.len();
+        let reply_msg = crate::rpc::PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+        let latency_profile = crate::rpc::server::LatencyProfile::new();
+        
+        let _ = ack_chan.send((reply_msg, latency_profile)).await;
     }
 
     async fn add_qcs(&mut self, mut qcs: Vec<ProtoQuorumCertificate>) {

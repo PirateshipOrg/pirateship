@@ -6,8 +6,6 @@ use std::io::ErrorKind;
 use log::warn;
 use prost::Message as _;
 use crate::config::NodeInfo;
-#[cfg(feature = "policy_validation")]
-use crate::consensus::app::AppCommand;
 use crate::proto::client::{ProtoClientReply, ProtoCurrentLeader};
 use crate::proto::execution::ProtoTransactionResult;
 use crate::rpc::server::LatencyProfile;
@@ -39,9 +37,6 @@ pub struct BatchProposer {
     reply_tx: Sender<ClientReplyCommand>,
     unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
-    #[cfg(feature = "policy_validation")]
-    app_tx: Sender<AppCommand>,
-
     current_raw_batch: Option<RawBatch>, // So that I can take()
     current_reply_vec: Vec<MsgAckChanWithTag>,
     batch_timer: Arc<Pin<Box<ResettableTimer>>>,
@@ -63,8 +58,6 @@ impl BatchProposer {
         block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
         reply_tx: Sender<ClientReplyCommand>, unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         cmd_rx: Receiver<BatchProposerCommand>,
-        #[cfg(feature = "policy_validation")]
-        app_tx: Sender<AppCommand>,
     ) -> Self {
         let batch_timer = ResettableTimer::new(
             Duration::from_millis(config.get().consensus_config.batch_max_delay_ms)
@@ -92,8 +85,6 @@ impl BatchProposer {
             current_leader: String::new(),
             cmd_rx,
             last_batch_proposed: Instant::now(),
-            #[cfg(feature = "policy_validation")]
-            app_tx,
         };
 
         #[cfg(not(feature = "view_change"))]
@@ -234,39 +225,35 @@ impl BatchProposer {
         let max_batch_size = self.config.get().consensus_config.max_backlog_batch_size;
 
         if self.current_raw_batch.as_ref().unwrap().len() >= max_batch_size || (self.make_new_batches && batch_timer_tick) {
-
-            #[cfg(feature = "policy_validation")]
-            self.validate_block().await;
-
             self.propose_new_batch().await;
         }
 
         Ok(())
     }
 
-    #[cfg(feature = "policy_validation")]
-    async fn validate_block(&mut self) {
-        let (tx, rx) = oneshot::channel();
-        self.app_tx.send(AppCommand::Validate(std::u64::MAX, self.current_raw_batch.as_ref().unwrap().clone(), tx)).await.unwrap();
-        if let Err(validation_errors) = rx.await.unwrap() {
-            for (txid, err) in validation_errors {
-                // take index txid.tx_idx from the current_raw_batch and current_reply_vec
-                let _tx = self.current_raw_batch.as_mut().unwrap().remove(txid.tx_idx);
-                let ack_chan = self.current_reply_vec.remove(txid.tx_idx);
-                self.reply_validation_failed(ack_chan, err).await;
-            }
-        }
+    async fn register_reply_malformed(&mut self, ack_chan: MsgAckChanWithTag) {
+        let (ack_chan, client_tag, _) = ack_chan;
+
+        let reply = ProtoClientReply {
+            reply: Some(
+                crate::proto::client::proto_client_reply::Reply::ErrorResponse(
+                    crate::proto::client::ProtoErrorResponse {
+                        error: crate::proto::client::ErrorType::MalformedRequest as i32,
+                        message: "Malformed request".to_string(),
+                    }
+                )
+            ),
+            client_tag
+        };
+
+        let reply_ser = reply.encode_to_vec();
+        let _sz = reply_ser.len();
+        let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+        let latency_profile = LatencyProfile::new();
+        
+        let _ = ack_chan.send((reply_msg, latency_profile)).await;
     }
 
-    // async fn 
-
-    async fn register_reply_malformed(&mut self, _ack_chan: MsgAckChanWithTag) {
-        todo!()
-    }
-
-    async fn reply_validation_failed(&mut self, _ack_chan: MsgAckChanWithTag, _error: String) {
-        todo!();
-    }
 
     async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) { // TODO
         let (ack_chan, client_tag, _) = new_tx.1;

@@ -1,5 +1,6 @@
 use hashbrown::HashMap;
 use std::fmt::Display;
+use std::sync::RwLock;
 
 use log::{error, trace};
 use serde::{Deserialize, Serialize};
@@ -31,13 +32,26 @@ use crate::{
     utils::unwrap_tx_list,
 };
 
-#[derive(std::fmt:: Debug, Clone, Serialize, Deserialize)]
+#[derive(std::fmt:: Debug, Serialize, Deserialize)]
 pub struct SCITTState {
     pub crash_committed_claims: HashMap<TXID, Vec<u8>>,
     pub byz_committed_claims: HashMap<TXID, Vec<u8>>,
-    pub speculative_policies: Vec<(TXID, Vec<u8>)>,
+    #[serde(skip)]
+    pub speculative_policies: RwLock<Vec<(TXID, Vec<u8>)>>,
     pub crash_committed_policies: Vec<(TXID, Vec<u8>)>,
     pub byz_committed_policies: Vec<(TXID, Vec<u8>)>,
+}
+
+impl Clone for SCITTState {
+    fn clone(&self) -> Self {
+        Self {
+            crash_committed_claims: self.crash_committed_claims.clone(),
+            byz_committed_claims: self.byz_committed_claims.clone(),
+            speculative_policies: RwLock::new(self.speculative_policies.read().unwrap().clone()),
+            crash_committed_policies: self.crash_committed_policies.clone(),
+            byz_committed_policies: self.byz_committed_policies.clone(),
+        }
+    }
 }
 
 impl Display for SCITTState {
@@ -98,7 +112,7 @@ impl AppEngine for SCITTAppEngine {
             state: SCITTState {
                 crash_committed_claims: HashMap::new(),
                 byz_committed_claims: HashMap::new(),
-                speculative_policies: Vec::new(),
+                speculative_policies: RwLock::new(Vec::new()),
                 crash_committed_policies: Vec::new(),
                 byz_committed_policies: Vec::new(),
             },
@@ -158,6 +172,13 @@ impl AppEngine for SCITTAppEngine {
                             SCITTWriteType::Policy => {
                                 let policy = &op.operands[1];
 
+                                let mut speculative_policies = self.state.speculative_policies.write().unwrap();
+                                speculative_policies.iter().position(|(version, _)| {
+                                    version.block_n == txid.block_n && version.tx_idx == txid.tx_idx
+                                }).map(|index| {
+                                    speculative_policies.remove(index);
+                                });
+                                
                                 self.state.crash_committed_policies.push((txid.clone(), policy.clone()));
 
                                 txn_result.result.push(ProtoTransactionOpResult {
@@ -288,7 +309,7 @@ impl AppEngine for SCITTAppEngine {
         //roll back ci_state to rolled_back_blocks (block.n)
         self.state.crash_committed_claims.retain(|v, _| v.block_n <= rolled_back_blocks);
         self.state.crash_committed_policies.retain(|(v, _)| v.block_n <= rolled_back_blocks);
-        self.state.speculative_policies.clear();
+        self.state.speculative_policies.write().unwrap().clear();
     }
 
     fn handle_unlogged_request(
@@ -369,6 +390,7 @@ impl AppEngine for SCITTAppEngine {
             if let Err(err) = JS_RUNTIME.with(|runtime| validate_policy(runtime, argument)) {
                 return Err(err);
             }
+            self.state.speculative_policies.write().unwrap().push((txid.clone(), argument.to_vec()));
             return Ok(None);
         }
 
@@ -445,17 +467,32 @@ impl SCITTAppEngine {
     }
 
     #[cfg(feature = "policy_validation")]
-    fn get_current_policy(&self, reader: &TXID) -> Option<&(TXID, Vec<u8>)> {
-        for versioned_policy in self.state.speculative_policies.iter().rev() {
+    fn get_current_policy(&self, reader: &TXID) -> Option<(TXID, Vec<u8>)> {
+        let speculative_policies = self.state.speculative_policies.read().unwrap();
+        
+        let mut current: Option<(TXID, Vec<u8>)> = None;
+        for versioned_policy in speculative_policies.iter() {
             let version = &versioned_policy.0;
-            if version.block_n <= reader.block_n || (version.block_n == reader.block_n && version.tx_idx <= reader.tx_idx) {
-                return Some(versioned_policy);
+            if version.block_n < reader.block_n || (version.block_n == reader.block_n && version.tx_idx <= reader.tx_idx) {
+                if current.is_none() {
+                    current = Some(versioned_policy.clone());
+                } else {
+                    let current_version = &current.as_ref().unwrap().0;
+                    if version.block_n > current_version.block_n || 
+                        (version.block_n == current_version.block_n && version.tx_idx > current_version.tx_idx) {
+                        current = Some(versioned_policy.clone());
+                    }
+                }
             }
         }
+        if current.is_some() {
+            return current;
+        }
+        
         if let Some(versioned_policy) = self.state.crash_committed_policies.last() {
-            Some(versioned_policy)
+            Some(versioned_policy.clone())
         } else if let Some(policy) = self.state.byz_committed_policies.last() {
-                Some(policy)
+            Some(policy.clone())
         } else {
             None
         }

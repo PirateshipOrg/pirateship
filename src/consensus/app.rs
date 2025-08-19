@@ -477,18 +477,18 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 }
             }
             #[cfg(feature = "policy_validation")]
-            AppCommand::Validate(_block_number, _txs, reply_tx) => {
+            AppCommand::Validate(block_number, txs, reply_tx) => {
                 #[cfg(feature = "concurrent_validation")] {
                     let mut i = 0;
                     let mut replies = vec![];
                     let mut validated = true;
-                    for (tx_n, tx) in _txs.iter().enumerate() {
+                    for (tx_n, tx) in txs.iter().enumerate() {
                         let Some(phase) = &tx.on_crash_commit else {
                             continue;
                         };
                         // this could break if tx has multiple ops... txid shouuld probably be a tuple of (block_n, tx_n, op_n)
                         let txid = TXID {
-                            block_n: _block_number,
+                            block_n: block_number,
                             tx_idx: tx_n,
                         };
                         for op in &phase.ops {
@@ -518,14 +518,14 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 }
 
                 let mut invalid_txs = Vec::new();
-                for (tx_n, tx) in _txs.iter().enumerate() {
+                for (tx_n, tx) in txs.iter().enumerate() {
                     let Some(phase) = &tx.on_crash_commit else {
                         continue;
                     };
 
                     // this could break if tx has multiple ops... txid should probably be a tuple of (block_n, tx_n, op_n)
                     let txid = TXID {
-                        block_n: _block_number,
+                        block_n: block_number,
                         tx_idx: tx_n,
                     };
 

@@ -25,7 +25,6 @@ use pft::{
 
 use crate::cbor_utils::operation_props_to_cbor;
 
-
 static AUDIT_RECEIPT: bool = cfg!(not(feature = "commit_receipts"));
 
 pub trait ReceiptToCose {
@@ -318,7 +317,10 @@ async fn get_receipt(
         } else {
             pft::proto::execution::ProtoTransactionOpType::ProbeCommit.into()
         },
-        operands: vec![txid.block_n.to_be_bytes().to_vec(), txid.tx_idx.to_be_bytes().to_vec()],
+        operands: vec![
+            txid.block_n.to_be_bytes().to_vec(),
+            txid.tx_idx.to_be_bytes().to_vec(),
+        ],
     };
 
     let transaction_phase = ProtoTransactionPhase {
@@ -435,6 +437,12 @@ fn unwrap_response(
             Err(HttpResponse::InternalServerError()
                 .body("Audit receipt not expected in this context"))
         }
+        client::proto_client_reply::Reply::ErrorResponse(proto_error_response) => {
+            Err(HttpResponse::InternalServerError().body(format!(
+                "Request error: {:?}",
+                proto_error_response
+            )))
+        }
     }
 }
 
@@ -466,6 +474,12 @@ fn unwrap_receipt(
             Err(HttpResponse::Accepted().body(format!(
                 "Transaction accepted but not yet committed: {} {}",
                 proto_tentative_response.block_n, proto_tentative_response.tx_n
+            )))
+        }
+        client::proto_client_reply::Reply::ErrorResponse(proto_error_response) => {
+            Err(HttpResponse::InternalServerError().body(format!(
+                "Requested error: {:?}",
+                proto_error_response
             )))
         }
     }
