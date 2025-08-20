@@ -180,6 +180,8 @@ locust -f {self.remote_workdir}/configs/locustfile.py \
     --run-time {self.duration} \
     --csv {self.remote_workdir}/logs/{repeat_num}/{bin} \
     --csv-full-history {'--skip-confirmation' if self.base_client_config.get('skip_confirmation', False) else ''}\
+    --validation-policy {self.remote_workdir}/configs/cts_policy.js \
+    --policy-update-rate 0 \
     --scitt-statements {self.remote_workdir}/configs/cose  > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err
 EOF
 
