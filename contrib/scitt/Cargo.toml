@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "platforms", "policy_validation"], default-features = false }
+pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "platforms", "policy_validation", "receipts"], default-features = false }
 scitt-cose = { path = "../../extras/scitt-cose" }
 rustls = "0.20"
 actix-web = {version = "4.0.1", features = ["rustls"]}

@@ -1,12 +1,25 @@
-use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
+#[allow(unused_imports)]
 use log::{error, info, trace};
 use prost::Message as _;
 use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
 
-use crate::{config::{AtomicConfig, NodeInfo}, consensus::issuer::{IssuerCommand, ProofChain}, crypto::{HashType, MerkleInclusionProof}, proto::{client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTransactionResponse, ProtoTryAgain}, consensus::ProtoQuorumCertificate, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
+use crate::{config::{AtomicConfig, NodeInfo}, crypto::HashType, proto::{client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionResponse, ProtoTryAgain}, execution::ProtoTransactionResult}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::Receiver};
 
 use super::batch_proposal::MsgAckChanWithTag;
+
+#[cfg(feature = "receipts")]
+use crate::{
+    consensus::issuer::{IssuerCommand, ProofChain},
+    crypto::MerkleInclusionProof,
+    proto::client::ProtoTransactionReceipt,
+    proto::consensus::ProtoQuorumCertificate,
+    utils::channel::Sender,
+};
+#[cfg(feature = "receipts")]
+use std::collections::BTreeMap;
+
 
 pub enum ClientReplyCommand {
     CancelAllRequests,
@@ -22,6 +35,7 @@ enum ReplyProcessorCommand {
     CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>),
     ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
+    #[cfg(feature = "receipts")]
     Probe(bool /* is_audit */, u64 /* block_n */, ProofChain, Vec<ProtoQuorumCertificate>, Vec<(MsgAckChanWithTag, u64 /* tx_n */, MerkleInclusionProof)>),
 }
 pub struct ClientReplyHandler {
@@ -29,6 +43,7 @@ pub struct ClientReplyHandler {
 
     batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
     reply_command_rx: Receiver<ClientReplyCommand>,
+    #[cfg(feature = "receipts")]
     issuer_tx: Sender<IssuerCommand>,
 
     reply_map: HashMap<HashType, Vec<MsgAckChanWithTag>>,
@@ -42,7 +57,9 @@ pub struct ClientReplyHandler {
     reply_processors: JoinSet<()>,
     reply_processor_queue: (async_channel::Sender<ReplyProcessorCommand>, async_channel::Receiver<ReplyProcessorCommand>),
 
+    #[cfg(feature = "receipts")]
     probe_audit_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
+    #[cfg(feature = "receipts")]
     probe_commit_buffer: BTreeMap<u64 /* block_n */, Vec<(MsgAckChanWithTag, u64 /* tx_n */)>>,
     acked_bci: u64,
     last_qc: u64,
@@ -55,6 +72,7 @@ impl ClientReplyHandler {
         config: AtomicConfig,
         batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         reply_command_rx: Receiver<ClientReplyCommand>,
+        #[cfg(feature = "receipts")]
         issuer_tx: Sender<IssuerCommand>,
     ) -> Self {
         let _chan_depth = config.get().rpc_config.channel_depth as usize;
@@ -62,6 +80,7 @@ impl ClientReplyHandler {
             config,
             batch_rx,
             reply_command_rx,
+            #[cfg(feature = "receipts")]
             issuer_tx,
             reply_map: HashMap::new(),
             byz_reply_map: HashMap::new(),
@@ -70,7 +89,9 @@ impl ClientReplyHandler {
             reply_processors: JoinSet::new(),
             reply_processor_queue: async_channel::unbounded(),
             byz_response_store: HashMap::new(),
+            #[cfg(feature = "receipts")]
             probe_audit_buffer: BTreeMap::new(),
+            #[cfg(feature = "receipts")]
             probe_commit_buffer: BTreeMap::new(),
             acked_bci: 0,
             last_qc: 0,
@@ -135,6 +156,7 @@ impl ClientReplyHandler {
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         },
 
+                        #[cfg(feature = "receipts")]
                         ReplyProcessorCommand::Probe(is_audit, _block_n, proof_chain, qcs, reply_vec) => {
                             for ((reply_chan, client_tag, _sender), _tx_n, inclusion_proof) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
@@ -236,6 +258,7 @@ impl ClientReplyHandler {
             self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses)).await.unwrap();
         }
 
+        #[cfg(feature = "receipts")]
         self.maybe_clear_probe_buf().await;
     }
 
@@ -257,6 +280,7 @@ impl ClientReplyHandler {
             self.acked_bci = n;
         }
 
+        #[cfg(feature = "receipts")]
         self.maybe_clear_probe_buf().await;
     }
 
@@ -310,6 +334,7 @@ impl ClientReplyHandler {
                 let sender = sender.2;
                 self.reply_processor_queue.0.send(ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, client_tag, sender))).await.unwrap();
             },
+            #[cfg(feature = "receipts")]
             ClientReplyCommand::ProbeRequestAck(block_n, tx_n, is_audit, sender) => {
                 let buffer = if is_audit {
                     &mut self.probe_audit_buffer
@@ -324,9 +349,15 @@ impl ClientReplyHandler {
 
                 self.maybe_clear_probe_buf().await;
             },
+            #[cfg(not(feature = "receipts"))]
+            ClientReplyCommand::ProbeRequestAck(_block_n, _tx_n, _is_audit, _sender) => {
+                // no-op for now if receipts are disabled
+                // ideally error back
+            }
         }
     }
 
+    #[cfg(feature = "receipts")]
     async fn maybe_clear_probe_buf(&mut self) {
         let mut ready_for_audit_receipt = vec![];
         let mut ready_for_commit_receipt = vec![];

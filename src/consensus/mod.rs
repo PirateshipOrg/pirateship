@@ -8,6 +8,7 @@ pub mod engines;
 pub mod client_reply;
 mod logserver;
 mod pacemaker;
+#[cfg(feature = "receipts")]
 mod issuer;
 pub mod extra_2pc;
 #[cfg(feature = "channel_monitoring")]
@@ -28,6 +29,7 @@ use extra_2pc::TwoPCHandler;
 use fork_receiver::{ForkReceiver, ForkReceiverCommand};
 use log::{debug, info, warn};
 use logserver::LogServer;
+#[cfg(feature = "receipts")]
 use issuer::Issuer;
 use pacemaker::Pacemaker;
 use prost::Message;
@@ -178,6 +180,7 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     client_reply: Arc<Mutex<ClientReplyHandler>>,
     logserver: Arc<Mutex<LogServer>>,
     pacemaker: Arc<Mutex<Pacemaker>>,
+    #[cfg(feature = "receipts")]
     issuer: Arc<Mutex<Issuer>>,
 
     #[cfg(feature = "extra_2pc")]
@@ -264,6 +267,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (backfill_request_tx, backfill_request_rx) = make_channel(_chan_depth);
         let (gc_tx, gc_rx) = make_channel(_chan_depth);
         let (logserver_query_tx, logserver_query_rx) = make_channel(_chan_depth);
+        #[cfg(feature = "receipts")]
         let (issuer_tx, issuer_rx) = make_channel(_chan_depth);
 
         let block_maker_crypto = crypto.get_connector();
@@ -297,6 +301,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             #[cfg(feature = "extra_2pc")]
             extra_2pc_staging_rx,
         );
+        #[cfg(feature = "receipts")]
         let issuer = Issuer::new(config.clone(), issuer_rx, logserver_query_tx.clone());
         let fork_receiver = ForkReceiver::new(config.clone(), fork_receiver_crypto, fork_receiver_client.into(), fork_rx, fork_receiver_command_rx, other_block_tx.clone(), logserver_query_tx.clone());
         
@@ -336,16 +341,19 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             Arc::new(Mutex::new(channel_mon))
         };
 
-        let app = Application::new(config.clone(), app_rx, unlogged_rx, client_reply_command_tx, issuer_tx.clone(), gc_tx,
-
+        let app = Application::new(config.clone(), app_rx, unlogged_rx, client_reply_command_tx, gc_tx,
+            #[cfg(feature = "receipts")]
+            issuer_tx.clone(), 
             #[cfg(feature = "extra_2pc")]
             extra_2pc_phase_message_tx,
-
             #[cfg(feature = "channel_monitoring")]
             channel_monitor.clone(),
         );
 
-        let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx, issuer_tx);
+        let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx, 
+            #[cfg(feature = "receipts")]
+            issuer_tx
+        );
         let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
         let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
 
@@ -367,6 +375,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             client_reply: Arc::new(Mutex::new(client_reply)),
             logserver: Arc::new(Mutex::new(logserver)),
             pacemaker: Arc::new(Mutex::new(pacemaker)),
+            #[cfg(feature = "receipts")]
             issuer: Arc::new(Mutex::new(issuer)),
 
             #[cfg(feature = "extra_2pc")]
@@ -397,7 +406,6 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let fork_receiver = self.fork_receiver.clone();
         let logserver = self.logserver.clone();
         let pacemaker = self.pacemaker.clone();
-        let issuer = self.issuer.clone();
 
         let mut handles = JoinSet::new();
 
@@ -447,9 +455,13 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             Pacemaker::run(pacemaker).await;
         });
 
-        handles.spawn(async move {
-            Issuer::run(issuer).await;
-        });
+        #[cfg(feature = "receipts")]
+        {
+            let issuer = self.issuer.clone();
+            handles.spawn(async move {
+                Issuer::run(issuer).await;
+            });
+        }
 
         #[cfg(feature = "extra_2pc")]
         {

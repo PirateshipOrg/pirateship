@@ -8,7 +8,11 @@ use tokio::{sync::{oneshot, Mutex}};
 #[cfg(feature = "concurrent_validation")]
 use tokio::{sync::RwLock, task::JoinSet};
 
-use crate::{config::AtomicConfig, consensus::{engines::TXID, issuer::IssuerCommand}, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+#[cfg(feature = "receipts")]
+use crate::consensus::issuer::IssuerCommand;
+
+
+use crate::{config::AtomicConfig, consensus::engines::TXID, crypto::{default_hash, CachedBlock, HashType}, proto::{client::ProtoByzResponse, consensus::ProtoQuorumCertificate, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
 
 #[cfg(feature = "concurrent_validation")]
 use crate::utils::channel::make_channel;
@@ -144,6 +148,8 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
     client_reply_tx: Sender<ClientReplyCommand>,
+            
+    #[cfg(feature = "receipts")]
     issuer_tx: Sender<IssuerCommand>,
 
 
@@ -170,8 +176,9 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
     pub fn new(
         config: AtomicConfig,
         staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-        client_reply_tx: Sender<ClientReplyCommand>, issuer_tx: Sender<IssuerCommand>, gc_tx: Sender<u64>,
-
+        client_reply_tx: Sender<ClientReplyCommand>,  gc_tx: Sender<u64>,
+        #[cfg(feature = "receipts")]
+        issuer_tx: Sender<IssuerCommand>,
         #[cfg(feature = "extra_2pc")]
         twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         #[cfg(feature = "channel_monitoring")]
@@ -197,7 +204,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
             staging_rx,
             unlogged_rx,
             client_reply_tx,
-            issuer_tx,
             checkpoint_timer,
             log_timer,
             perf_counter,
@@ -207,7 +213,9 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
             twopc_tx,
 
             phantom: PhantomData,
-            
+
+            #[cfg(feature = "receipts")]
+            issuer_tx,
             #[cfg(feature = "channel_monitoring")]
             channel_monitor: channel_monitor,
             #[cfg(feature = "concurrent_validation")]
@@ -310,6 +318,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
 
         if self.stats.bci > 1 {
             self.gc_tx.send(self.stats.bci - 1).await.unwrap();
+
+            #[cfg(feature = "receipts")]
             let _ = self.issuer_tx.send(IssuerCommand::GC(self.stats.bci)).await;
         } 
     }
@@ -384,6 +394,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                     (block.block_hash.clone(), block.block.n)
                 }).collect::<(Vec<_>, Vec<_>)>();
 
+                #[cfg(feature = "receipts")]
                 let _ = self.issuer_tx.send(IssuerCommand::NewChunk(blocks.clone())).await;
 
                 #[allow(unused_mut)]
@@ -423,6 +434,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                     (block.block_hash.clone(), block.block.n)
                 }).collect::<(Vec<_>, Vec<_>)>();
                 let qc_n = qc.n;
+                #[cfg(feature = "receipts")]
                 self.issuer_tx.send(IssuerCommand::NewQC(qc)).await.unwrap();
                 if blocks.len() == 0 {
                     return;
@@ -467,6 +479,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                 }
 
                 self.stats.last_n = new_last_block;
+                #[cfg(feature = "receipts")]
                 let _ = self.issuer_tx.send(IssuerCommand::Rollback(new_last_block)).await;
 
                 #[cfg(feature = "concurrent_validation")] {
