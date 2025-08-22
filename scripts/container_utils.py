@@ -18,8 +18,10 @@ def get_full_image_name(acr_prefix, image_name):
 def build_image(full_image_name, docker_folder, ssh_public_key):
     print("Building docker image {}".format(full_image_name))
     try: 
-        print(execute_command(f"cp {ssh_public_key} {docker_folder}"))
-        print(execute_command("docker build -t " + full_image_name + " " + docker_folder))
+        auth_keys_format = execute_command(f"ssh-keygen -f {ssh_public_key} -i -mPKCS8")
+        with open(f"{docker_folder}/{os.path.basename(ssh_public_key)}", "w") as f:
+            f.write(auth_keys_format)
+        print(execute_command("docker build -t " + full_image_name + " --build-arg PEM_KEY=" + os.path.basename(ssh_public_key) + " " + docker_folder))
     # print(executeCommand("docker build --no-cache -t " + fullImageName + " " + dockerFolder))
         print("Docker image built")
     except subprocess.CalledProcessError as e:

@@ -65,30 +65,12 @@ class AciDeployment(Deployment):
         self.mode = config["mode"]
 
         self.ssh_user = config["ssh_user"]
-        if os.path.isabs(config["ssh_pub_key"]):
-             # Extract final name of file, removing path
-            ssh_key_name = os.path.basename(config["ssh_pub_key"])
-            print(ssh_key_name)
-            # Copy the key into workdir/deployment
-            print(execute_command_args(["mkdir", "-p", os.path.join(workdir, "deployment")]))
-            print(execute_command_args(["cp", config["ssh_pub_key"], os.path.join(workdir, "deployment",ssh_key_name)]))
-            self.ssh_pub_key = os.path.join(workdir, "deployment", ssh_key_name)
-            print(f"SSH KEY IS {self.ssh_pub_key}")
-        else:
-            print("Using SSH public key from config file")
-            self.ssh_pub_key = os.path.join(workdir, "deployment", config["ssh_pub_key"])
+        print(execute_command_args(["mkdir", "-p", os.path.join(workdir, "deployment")]))
 
-        if os.path.isabs(config["ssh_key"]):
-             # Extract final name of file, removing path
-            ssh_key_name = os.path.basename(config["ssh_key"])
-            print(ssh_key_name)
-            # Copy the key into workdir/deployment
-            print(execute_command_args(["mkdir", "-p", os.path.join(workdir, "deployment")]))
-            print(execute_command_args(["cp", config["ssh_key"], os.path.join(workdir, "deployment",ssh_key_name)]))
-            self.ssh_key = os.path.join(workdir, "deployment", ssh_key_name)
-            print(f"SSH KEY IS {self.ssh_key}")
-        else:
-            self.ssh_key = os.path.join(workdir, "deployment", config["ssh_key"])
+        self.ssh_pub_key = os.path.join(workdir, "deployment/deployment_pub_key.pem")
+        print(execute_command_args(["cp", config["ssh_pub_key"], self.ssh_pub_key]))
+        self.ssh_key = os.path.join(workdir, "deployment/deployment_priv_key.pem")
+        print(execute_command_args(["cp", config["ssh_key"], self.ssh_key]))
 
         self.node_port_base = int(config["node_port_base"])
 
