@@ -68,18 +68,18 @@ impl MerkleTree {
         let mut level_size = padded_leaves.len();
 
         while level_size > 1 {
-            let mut next_level = Vec::with_capacity(level_size / 2);
+            let mut current_level_size = 0;
             let mut i = 0;
             while i < level_size {
                 let mut hasher = Sha::new();
                 hasher.update(&tree[level_start + i]);
                 hasher.update(&tree[level_start + i + 1]);
-                next_level.push(hasher.finalize().to_vec());
+                tree.push(hasher.finalize().to_vec());
                 i += 2;
+                current_level_size += 1;
             }
-            tree.extend(next_level.iter().cloned());
             level_start += level_size;
-            level_size = next_level.len();
+            level_size = current_level_size;
         }
 
         let root = tree.last().cloned().unwrap_or(default_hash());

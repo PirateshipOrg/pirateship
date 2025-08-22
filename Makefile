@@ -119,6 +119,10 @@ pirateship_scitt_concurrent_nofast:
 receipt_validator:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/receipt_validator/Cargo.toml
 
+.PHONY: pirateship_receipts
+pirateship_receipts:
+	CC=clang CXX=clang++ cargo build --release --features receipts
+
 .PHONY: bench
 bench:
 	CC=clang CXX=clang++ cargo bench
