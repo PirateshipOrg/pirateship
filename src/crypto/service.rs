@@ -9,7 +9,13 @@ use rand::{thread_rng, Rng};
 use sha2::{Digest, Sha256, Sha512};
 use tokio::{sync::{mpsc::{channel, Receiver, Sender}, oneshot}, task::JoinSet};
 
-use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats, MultipartFork}, crypto::{default_hash, MerkleTree, DIGEST_LENGTH}, proto::consensus::{HalfSerializedBlock, ProtoBlock, ProtoQuorumCertificate, ProtoViewChange}, utils::{deserialize_proto_block, get_block_size_from_ser, serialize_proto_block_nascent, update_parent_hash_in_proto_block_ser, update_signature_in_proto_block_ser, PerfCounter, BLOCK_OFFSET, PARENT_OFFSET}};
+use crate::{config::AtomicConfig, consensus::fork_receiver::{AppendEntriesStats, MultipartFork}, crypto::{default_hash, DIGEST_LENGTH}, proto::consensus::{HalfSerializedBlock, ProtoBlock, ProtoQuorumCertificate, ProtoViewChange}, utils::{deserialize_proto_block, serialize_proto_block_nascent, update_parent_hash_in_proto_block_ser, update_signature_in_proto_block_ser, PerfCounter, BLOCK_OFFSET, PARENT_OFFSET}};
+
+#[cfg(feature = "receipts")]
+use crate::{
+    utils::get_block_size_from_ser,
+    crypto::MerkleTree,
+};
 
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
 
@@ -23,6 +29,8 @@ pub struct __CachedBlock {
     pub block: ProtoBlock,
     pub block_ser: Vec<u8>,
     pub block_hash: HashType,
+    
+    #[cfg(feature = "receipts")]
     pub merkle_tree: MerkleTree,
 }
 
@@ -38,12 +46,16 @@ impl Deref for CachedBlock {
 }
 
 impl CachedBlock {
-    pub fn new(block: ProtoBlock, block_ser: Vec<u8>, block_hash: HashType, merkle_tree: MerkleTree) -> Self {
+    pub fn new(block: ProtoBlock, block_ser: Vec<u8>, block_hash: HashType, 
+        #[cfg(feature = "receipts")]
+        merkle_tree: MerkleTree
+    ) -> Self {
         Self(Arc::new(Box::pin(
             __CachedBlock {
                 block,
                 block_ser,
                 block_hash,
+                #[cfg(feature = "receipts")]
                 merkle_tree
             }
         )))
@@ -67,7 +79,12 @@ impl FutureHash {
 
 pub fn hash_proto_block_ser(data: &[u8]) -> HashType {
     let mut hasher = Sha::new();
-    hasher.update(&data[BLOCK_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(data)]);
+    #[cfg(feature = "receipts")] {
+        hasher.update(&data[BLOCK_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(data)]);
+    }
+    #[cfg(not(feature = "receipts"))] {
+        hasher.update(&data[BLOCK_OFFSET..]);
+    }
     hasher.update(&data[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
     hasher.update(&data[..SIGNATURE_LENGTH]);
     hasher.finalize().to_vec()
@@ -212,6 +229,7 @@ impl CryptoService {
                     break;
                 },
                 CryptoServiceCommand::PrepareBlock(mut proto_block, block_tx, hash_tx, hash_tx2, must_sign, parent_hash_rx) => {
+                    #[cfg(feature = "receipts")]
                     let merkle_tree = MerkleTree::from_block(&proto_block);
 
                     let (perf_counter, event_order, mut event_num) = if must_sign {
@@ -237,12 +255,25 @@ impl CryptoService {
                     proto_block.sig = None;
                     proto_block.parent.clear();
 
-                    let (mut buf, block_size) = serialize_proto_block_nascent(&proto_block, &merkle_tree.root()).unwrap();
-                    perf_event!();
-
+                    let mut buf;
                     let mut hasher = Sha::new();
-                    hasher.update(&buf[BLOCK_OFFSET..BLOCK_OFFSET + block_size]);
-                    perf_event!();
+
+                    #[allow(unused_mut, unused_variables)]
+                    let mut block_size: usize;
+
+                    #[cfg(feature = "receipts")] {
+                        (buf, block_size) = serialize_proto_block_nascent(&proto_block, &merkle_tree.root()).unwrap();
+                        perf_event!();
+                        hasher.update(&buf[BLOCK_OFFSET..BLOCK_OFFSET + block_size]);
+                        perf_event!();
+                    }
+                    #[cfg(not(feature = "receipts"))] {
+                        buf = serialize_proto_block_nascent(&proto_block).unwrap();
+                        perf_event!();
+                        hasher.update(&buf[BLOCK_OFFSET..]);
+                        perf_event!();
+                    }
+
 
                     // Memory fence to prevent reordering.
                     fence(std::sync::atomic::Ordering::SeqCst);
@@ -260,8 +291,16 @@ impl CryptoService {
                     block.parent = parent;
                     hasher.update(&buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH+DIGEST_LENGTH]);
                     if must_sign {
-                        // Signature is on the (parent_hash || block) part of the serialized block (without the detached transactions)
-                        let partial_hsh = hash(&buf[PARENT_OFFSET..BLOCK_OFFSET + block_size]);
+                        #[allow(unused_mut)]
+                        let mut partial_hsh;
+                        #[cfg(feature = "receipts")] {
+                            // Signature is on the (parent_hash || block) part of the serialized block (without the detached transactions)
+                            partial_hsh = hash(&buf[PARENT_OFFSET..BLOCK_OFFSET + block_size]);
+                        }
+                        #[cfg(not(feature = "receipts"))] {
+                            // Signature is on the (parent_hash || block) part of the serialized block, **including transaction**
+                            partial_hsh = hash(&buf[PARENT_OFFSET..]);
+                        }
                         let keystore = keystore.get();
                         let sig = keystore.sign(&partial_hsh);
                         block.sig = Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig.to_vec()));
@@ -276,7 +315,10 @@ impl CryptoService {
 
                     let _ = hash_tx.send(hsh.clone());
                     let _ = hash_tx2.send(hsh.clone());
-                    let _ = block_tx.send(CachedBlock::new(block, buf, hsh, merkle_tree));
+                    let _ = block_tx.send(CachedBlock::new(block, buf, hsh, 
+                        #[cfg(feature = "receipts")]
+                        merkle_tree
+                    ));
                     perf_event!();
                     perf_counter.deregister_entry(&perf_entry);
                 },
@@ -298,8 +340,13 @@ impl CryptoService {
 
                     match block {
                         Ok(block) => {
-                            let mt = MerkleTree::from_block(&block);
-                            block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh, mt))).unwrap();
+                            #[cfg(feature = "receipts")] {
+                                let mt = MerkleTree::from_block(&block);
+                                block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh, mt))).unwrap();
+                            }
+                            #[cfg(not(feature = "receipts"))] {
+                                block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh))).unwrap();
+                            }
                         },
                         Err(_) => {
                             block_tx.send(Err(Error::new(ErrorKind::InvalidData, "Decode error"))).unwrap();
@@ -313,10 +360,16 @@ impl CryptoService {
                     // TODO: If view_is_stable = False, verify ProtoForkValidation
                     match block {
                         Ok(block) => {
-                            let mt = MerkleTree::from_block(&block);
                             // Verify signature
                             if let Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig)) = &block.sig {
-                                let partial_hsh = hash(&block_ser[PARENT_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(&block_ser)]);
+                                #[allow(unused_mut)]
+                                let mut partial_hsh;
+                                #[cfg(feature = "receipts")] {
+                                    partial_hsh = hash(&block_ser[PARENT_OFFSET..BLOCK_OFFSET + get_block_size_from_ser(&block_ser)]);
+                                }
+                                #[cfg(not(feature = "receipts"))] {
+                                    partial_hsh = hash(&block_ser[PARENT_OFFSET..]);
+                                }
                                 let keystore = keystore.get();
                                 let view = block.view;
                                 let leader_for_view = config.get().consensus_config.get_leader_for_view(view);
@@ -363,7 +416,13 @@ impl CryptoService {
                                     continue;
                                 }
                             }
-                            block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh.clone(), mt))).unwrap();
+                            #[cfg(feature = "receipts")] {
+                                let mt = MerkleTree::from_block(&block);
+                                block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh.clone(), mt))).unwrap();
+                            }
+                            #[cfg(not(feature = "receipts"))] {
+                                block_tx.send(Ok(CachedBlock::new(block, block_ser, hsh.clone()))).unwrap();
+                            }
                             let _ = hash_tx.send(Ok(hsh));
                         },
                         Err(_) => {
