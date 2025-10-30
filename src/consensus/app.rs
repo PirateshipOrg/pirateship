@@ -172,7 +172,7 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
 }
 
 
-impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
+impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     pub fn new(
         config: AtomicConfig,
         staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
@@ -440,14 +440,15 @@ impl<'a, E: AppEngine + Send + Sync + 'a + 'static> Application<'a, E> {
                     return;
                 }
 
-                #[allow(unused_mut)]
-                let mut results;
-                #[cfg(feature = "concurrent_validation")] {
-                    results = self.engine.write().await.handle_byz_commit(blocks);
-                }
-                #[cfg(not(feature = "concurrent_validation"))] {
-                    results = self.engine.handle_byz_commit(blocks);
-                }
+                let results = {
+                    #[cfg(feature = "concurrent_validation")] {
+                        self.engine.write().await.handle_byz_commit(blocks)
+                    }
+                    
+                    #[cfg(not(feature = "concurrent_validation"))] {
+                        self.engine.handle_byz_commit(blocks)
+                    }
+                };
 
                 self.stats.total_byz_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
                 self.stats.bci = new_bci;

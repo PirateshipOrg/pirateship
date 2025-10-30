@@ -409,8 +409,6 @@ impl AppEngine for SCITTAppEngine {
             return Err(err);
         }
         return Ok(Some((txid, versioned_policy.0.clone())));
-        
-        
     }
 
     #[cfg(feature = "concurrent_validation")]

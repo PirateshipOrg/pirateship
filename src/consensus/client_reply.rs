@@ -166,6 +166,7 @@ impl ClientReplyHandler {
                                         if is_audit { 
                                             crate::proto::client::proto_client_reply::Reply::AuditReceipt(
                                                 ProtoTransactionReceipt {
+                                                    k: inclusion_proof.k() as u64,
                                                     chain: proof_chain.clone(),
                                                     proof: inclusion_proof.as_vec(),
                                                     qcs: qcs.clone(),
@@ -174,6 +175,7 @@ impl ClientReplyHandler {
                                         } else {
                                             crate::proto::client::proto_client_reply::Reply::CommitReceipt(
                                                 ProtoTransactionReceipt {
+                                                    k: inclusion_proof.k() as u64,
                                                     chain: proof_chain.clone(),
                                                     proof: inclusion_proof.as_vec(),
                                                     qcs: qcs.clone(),

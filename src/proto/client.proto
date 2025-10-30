@@ -36,7 +36,8 @@ message ProtoTransactionResponse {
 message ProtoTransactionReceipt {
     repeated proto.consensus.ProtoBlock chain = 1;
     repeated bytes proof = 2;
-    repeated proto.consensus.ProtoQuorumCertificate qcs = 3;
+    uint64 k = 3;
+    repeated proto.consensus.ProtoQuorumCertificate qcs = 4;
 }
 
 message ProtoTentativeResponse {

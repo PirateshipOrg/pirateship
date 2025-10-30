@@ -10,23 +10,31 @@ use crate::{
 use sha2::{Digest, Sha256, Sha512};
 
 #[derive(Clone, Debug)]
-pub struct MerkleInclusionProof(Vec<HashType>);
+pub struct MerkleInclusionProof(Vec<HashType>, usize);
 
 impl MerkleInclusionProof {
-    pub fn validate(self, leaf: &HashType, index: usize, root: &HashType) -> bool {
+    pub fn validate(self, leaf: &HashType, mut index: usize, root: &HashType) -> bool {
         let mut current_hash = leaf.clone();
-        let mut index = index;
-        for sibling in self.0.iter() {
-            let mut hasher = Sha::new();
-            if index % 2 == 0 {
-                hasher.update(&current_hash);
-                hasher.update(&sibling);
-            } else {
-                hasher.update(&sibling);
-                hasher.update(&current_hash);
+        let mut level_size = self.1;
+        let mut proof_iter = self.0.iter();
+        while level_size > 1 {
+            if index % 2 != 0 || index + 1 < level_size { // has sibling
+                let sibling = match proof_iter.next() {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let mut hasher = Sha::new();
+                if index % 2 == 0 {
+                    hasher.update(&current_hash);
+                    hasher.update(sibling);
+                } else {
+                    hasher.update(sibling);
+                    hasher.update(&current_hash);
+                }
+                current_hash = hasher.finalize().to_vec();
             }
-            current_hash = hasher.finalize().to_vec();
             index /= 2;
+            level_size = level_size / 2 + (level_size % 2);
         }
         current_hash == *root
     }
@@ -35,12 +43,16 @@ impl MerkleInclusionProof {
         self.0
     }
 
-    pub fn default() -> Self {
-        MerkleInclusionProof(vec![])
+    pub fn k(&self) -> usize {
+        self.1
     }
 
-    pub fn new(proof: Vec<HashType>) -> Self {
-        MerkleInclusionProof(proof)
+    pub fn default() -> Self {
+        MerkleInclusionProof(vec![], 0)
+    }
+
+    pub fn new(proof: Vec<HashType>, k: usize) -> Self {
+        MerkleInclusionProof(proof, k)
     }
 }
 
@@ -49,28 +61,21 @@ pub struct MerkleTree {
     root: HashType,
     tree: Vec<HashType>,
     n_leaves: usize,
-    n_padded_leaves: usize,
 }
 
 impl MerkleTree {
     pub fn new(leaves: Vec<HashType>) -> Self {
         let n_leaves = leaves.len();
-        let n_padded_leaves = n_leaves.next_power_of_two();
-        let mut padded_leaves = leaves;
-        if n_leaves < n_padded_leaves {
-            padded_leaves
-                .extend(std::iter::repeat(default_hash()).take(n_padded_leaves - n_leaves));
-        }
-        let mut tree = Vec::with_capacity(padded_leaves.len() * 2); // upper bound
-        tree.extend(padded_leaves.iter().cloned());
-
+        let mut tree = Vec::with_capacity(n_leaves * 2); // upper bound
+        tree.extend(leaves.iter().cloned());
+    
         let mut level_start = 0;
-        let mut level_size = padded_leaves.len();
-
+        let mut level_size = n_leaves;
+    
         while level_size > 1 {
             let mut current_level_size = 0;
             let mut i = 0;
-            while i < level_size {
+            while i + 1 < level_size {
                 let mut hasher = Sha::new();
                 hasher.update(&tree[level_start + i]);
                 hasher.update(&tree[level_start + i + 1]);
@@ -78,17 +83,23 @@ impl MerkleTree {
                 i += 2;
                 current_level_size += 1;
             }
+    
+            // push overhang up the tree
+            if i < level_size {
+                tree.push(tree[level_start + i].clone());
+                current_level_size += 1;
+            }
+    
             level_start += level_size;
             level_size = current_level_size;
         }
-
-        let root = tree.last().cloned().unwrap_or(default_hash());
-
+    
+        let root = tree.last().cloned().unwrap_or_else(default_hash);
+    
         Self {
             root,
             tree,
             n_leaves,
-            n_padded_leaves,
         }
     }
 
@@ -110,11 +121,15 @@ impl MerkleTree {
 
         let mut current_index = block_n;
         let mut level_start = 0;
-        let mut level_size = self.n_padded_leaves;
+        let mut level_size = self.n_leaves;
 
         while level_size > 1 {
             let sibling_index = if current_index % 2 == 0 {
-                Some(current_index + 1)
+                if current_index + 1 < level_size {
+                    Some(current_index + 1)
+                } else {
+                    None
+                }
             } else {
                 Some(current_index - 1)
             };
@@ -125,43 +140,55 @@ impl MerkleTree {
             }
             current_index /= 2;
             level_start += level_size;
-            level_size /= 2;
+            level_size = level_size / 2 + (level_size % 2);
         }
-
-        MerkleInclusionProof::new(proof)
+    
+        MerkleInclusionProof::new(proof, self.n_leaves)
     }
 
     /// benchmarks show that this is actually slightly slower than calling `generate_inclusion_proof` N times... left it for future reference
     pub fn generate_all_inclusion_proofs(&self) -> Vec<MerkleInclusionProof> {
         let mut proofs: Vec<Vec<HashType>> = vec![vec![]; self.n_leaves];
-        
-        let h = (self.n_padded_leaves as f64).log2() as usize;
+    
         let mut level_start = 0;
-        let mut level_size = self.n_padded_leaves;
-        
-        for level in 0..h {
-            for i in 0..level_size {
-            let sibling_index = i ^ 1; // Flip last bit to get sibling
-            if sibling_index < level_size {
-                let sibling_hash = &self.tree[level_start + sibling_index];
-                
-                // Determine which leaf indices this node contributes to
-                let group_size = 1 << level;
-                let base_leaf_index = (i / 2) * group_size * 2;
-                
-                for offset in 0..group_size {
-                    let leaf_index = base_leaf_index + offset + (i % 2) * group_size;
-                    if leaf_index < self.n_leaves {
-                        proofs[leaf_index].push(sibling_hash.clone());
-                    }
+        let mut level_size = self.n_leaves;
+        let mut index_map: Vec<Vec<usize>> = (0..self.n_leaves).map(|i| vec![i]).collect();
+    
+        while level_size > 1 {
+            let mut next_index_map = Vec::new();
+            let mut i = 0;
+    
+            while i + 1 < level_size {
+                let left_idx = i;
+                let right_idx = i + 1;
+    
+                let left_leaves = &index_map[left_idx];
+                let right_leaves = &index_map[right_idx];
+    
+                for &leaf_idx in left_leaves {
+                    proofs[leaf_idx].push(self.tree[level_start + right_idx].clone());
                 }
+                for &leaf_idx in right_leaves {
+                    proofs[leaf_idx].push(self.tree[level_start + left_idx].clone());
+                }
+    
+                let mut combined = left_leaves.clone();
+                combined.extend(right_leaves.iter().cloned());
+                next_index_map.push(combined);
+    
+                i += 2;
             }
+    
+            if i < level_size {
+                next_index_map.push(index_map[i].clone());
             }
+    
             level_start += level_size;
-            level_size /= 2;
+            level_size = next_index_map.len();
+            index_map = next_index_map;
         }
-        
-        proofs.into_iter().map(|proof| MerkleInclusionProof::new(proof)).collect()
+    
+        proofs.into_iter().map(|x| MerkleInclusionProof::new(x, self.n_leaves)).collect()
     }
 
     pub fn root(&self) -> &HashType {

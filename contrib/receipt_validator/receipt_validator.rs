@@ -139,7 +139,7 @@ fn validate_ps_receipt(
 ) -> Result<(), String> {
     let receipt = ProtoTransactionReceipt::decode(data).expect("Failed to decode PS receipt");
 
-    let proof = MerkleInclusionProof::new(receipt.proof);
+    let proof = MerkleInclusionProof::new(receipt.proof, receipt.k);
     if !proof.validate(
         &tx_digest.to_vec(),
         tx_n,

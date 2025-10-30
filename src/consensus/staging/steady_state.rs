@@ -1061,8 +1061,6 @@ impl Staging {
             return;
         }
 
-        // warn!("Byzantine commit from {} to {}. QC {}", old_bci, new_bci, qc.n);
-
         self.bci = new_bci;
 
         // Invariant: All blocks in pending_blocks is in order.
