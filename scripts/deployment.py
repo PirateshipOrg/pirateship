@@ -68,7 +68,11 @@ class Deployment:
         self.ssh_user = config["ssh_user"]
 
         if os.path.isabs(config["ssh_key"]):
-            self.ssh_key = config["ssh_key"]
+            # Extract final name of file, removing path
+            ssh_key_name = os.path.basename(config["ssh_key"])
+            # Copy the key into workdir/deployment
+            execute_command_args(["cp", config["ssh_key"], os.path.join(workdir, "deployment",ssh_key_name)])
+            self.ssh_key = os.path.join(workdir, "deployment", ssh_key_name)
         else:
             self.ssh_key = os.path.join(workdir, "deployment", config["ssh_key"])
         self.node_port_base = int(config["node_port_base"])
@@ -158,6 +162,16 @@ class Deployment:
         if self.mode == "manual":
             # Manual must mean there is a nodelist specified in the toml file.
             # There is no need to deploy.
+            # Install dev dependencies on dev VM
+            self.prepare_dev_vm()
+
+            # Save myself
+            with open(os.path.join(self.workdir, "deployment", "deployment.pkl"), "wb") as f:
+                pickle.dump(self, f)
+
+            # Rewrite deployment.txt
+            with open(os.path.join(self.workdir, "deployment", "deployment.txt"), "w") as f:
+                pprint(self, f)
             return
         
         # Terraform deploy
@@ -487,3 +501,4 @@ echo "Done {job_file}" >> status.txt
         if wait_till_end:
             self.wait_till_end(len(cmds))
             
+

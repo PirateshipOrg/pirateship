@@ -3,7 +3,16 @@
 
 [workspace]
 resolver = "2"
-members = [".", "contrib"]
+members = [
+    ".",
+    "contrib/kms",
+    "contrib/receipt_validator",
+    "contrib/scitt",
+    "contrib/smallbank",
+    "contrib/svr3",
+    "extras/didx509-sys",
+    "extras/scitt-cose"
+]
 
 [package]
 name = "pft"
@@ -41,7 +50,7 @@ crossbeam = "0.8.4"
 clap = { version = "4.5.15", features = ["derive", "cargo"] }
 rocksdb = "0.22.0"
 lz4_flex = { version = "0.11" }
-gluesql = "0.15"
+gluesql = "0.17.0"
 zipf = "7.0.1"
 kanal = "0.1.0-pre8"
 bincode = "1.3.3"
@@ -52,6 +61,9 @@ itertools = "0.14.0"
 async-channel = "2.3.1"
 hashbrown = {version = "0.15.2", features = ["serde", "allocator-api2", "default-hasher", "equivalent", "inline-more", "raw-entry"]}
 snmalloc-rs = "0.3.8"
+rquickjs = {version = "0.9.0", optional = true}
+scitt-cose = {path = "extras/scitt-cose", optional = true}
+base64 = {version = "0.22.1", optional = true}
 
 [build-dependencies]
 prost-build = { version = "0.12" }
@@ -59,6 +71,7 @@ prost-build = { version = "0.12" }
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
 memory-stats = "1.2.0"
+pprof = { version = "0.13", features = ["flamegraph"] }
 
 [[bench]]
 name = "sign_bench"
@@ -69,17 +82,16 @@ name = "verify_bench"
 harness = false
 
 [[bench]]
-name = "tx_serde_bench"
+name = "merkle_proof"
 harness = false
 
 [[bench]]
-name = "storage"
+name = "scitt_cose_bench"
 harness = false
 
 [[bench]]
-name = "crypto_service_bench"
+name = "scitt_policy_validation"
 harness = false
-
 
 [features]
 # Perf counters
@@ -92,6 +104,7 @@ fixed_leader = []
 always_sign = []
 never_sign = []
 dynamic_sign = []
+sha256 = []
 # Other features
 storage = []
 disk_wal = []
@@ -103,11 +116,20 @@ evil = []
 extra_2pc = []
 no_pipeline = []
 extra_qc_check = []
+channel_monitoring = []
+receipts = []
+dummy_receipts = []
+# validation stuff
+policy_validation = ["rquickjs", "scitt-cose", "base64"]
+concurrent_validation = ["policy_validation"]
+sequential_validation = ["policy_validation"]
+null_validation = ["policy_validation", "sequential_validation"]
 
 # Applications
 app_logger = []
 app_kvs = []
 app_sql = []
+app_scitt = []
 # Protocols specs
 lucky_raft = ["fixed_leader", "never_sign", "no_qc"]
 signed_raft = ["fixed_leader", "dynamic_sign", "no_qc"]

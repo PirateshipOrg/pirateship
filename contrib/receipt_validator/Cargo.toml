@@ -1,0 +1,26 @@
+[package]
+name = "receipt-validator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pft = { path = "../../", features = ["pirateship"], default-features = false }
+scitt-cose = { path = "../../extras/scitt-cose" }
+clap = { version = "4.0", features = ["derive"] }
+prost = "0.12"
+prost-types = "0.12"
+ed25519-dalek = {version = "2.1.1", features = ["alloc", "fast", "std", "zeroize", "pem", "pkcs8", "batch"]}
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[[bin]]
+name = "receipt-validator"
+path = "receipt_validator.rs"
+
+[[bin]]
+name = "json2digest"
+path = "json2digest.rs"

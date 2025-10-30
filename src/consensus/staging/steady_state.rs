@@ -1,19 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use async_recursion::async_recursion;
+#[cfg(feature = "extra_2pc")]
 use bytes::{BufMut as _, BytesMut};
-use futures::{future::try_join_all, FutureExt};
+use futures::future::try_join_all;
 use log::{debug, error, info, trace, warn};
 use prost::Message;
-use tokio::{sync::oneshot, task::spawn_local};
+use tokio::sync::oneshot;
 
 use crate::{
-    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
+    consensus::{logserver::LogServerCommand, pacemaker::PacemakerCommand},
+    crypto::CachedBlock,
+    proto::{
         consensus::{
             proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
             ProtoSignatureArrayEntry, ProtoVote,
         },
         rpc::ProtoPayload,
-    }, rpc::{client::PinnedClient, PinnedMessage, SenderType}, utils::StorageAck
+    },
+    rpc::{client::PinnedClient, PinnedMessage, SenderType},
 };
 
 use super::{
@@ -27,6 +31,12 @@ use super::{
     CachedBlockWithVotes, Staging,
 };
 
+#[cfg(feature = "extra_2pc")]
+use crate::{
+    consensus::extra_2pc::{EngraftTwoPCFuture, EngraftActionAfterFutureDone, TwoPCCommand},
+    crypto::DIGEST_LENGTH
+};
+
 impl Staging {
     pub(super) fn i_am_leader(&self) -> bool {
         let config = self.config.get();
@@ -34,29 +44,29 @@ impl Staging {
         leader == config.net_config.name
     }
 
-    fn perf_register_block(&self, block: &CachedBlock) {
+    fn perf_register_block(&self, _block: &CachedBlock) {
         #[cfg(feature = "perf")]
-        if let Some(Sig::ProposerSig(_)) = block.block.sig {
+        if let Some(Sig::ProposerSig(_)) = _block.block.sig {
             self.leader_perf_counter_signed
                 .borrow_mut()
-                .register_new_entry(block.block.n);
+                .register_new_entry(_block.block.n);
         } else {
             self.leader_perf_counter_unsigned
                 .borrow_mut()
-                .register_new_entry(block.block.n);
+                .register_new_entry(_block.block.n);
         }
     }
 
-    fn perf_deregister_block(&self, block: &CachedBlock) {
+    fn perf_deregister_block(&self, _block: &CachedBlock) {
         #[cfg(feature = "perf")]
-        if let Some(Sig::ProposerSig(_)) = block.block.sig {
+        if let Some(Sig::ProposerSig(_)) = _block.block.sig {
             self.leader_perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&block.block.n);
+                .deregister_entry(&_block.block.n);
         } else {
             self.leader_perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&block.block.n);
+                .deregister_entry(&_block.block.n);
         }
     }
 
@@ -82,6 +92,7 @@ impl Staging {
     #[cfg(not(feature = "perf"))]
     fn perf_add_event(&self, _block: &CachedBlock, _event: &str) {}
 
+    #[cfg(feature = "perf")]
     fn perf_add_event_from_perf_stats(&self, signed: bool, block_n: u64, event: &str) {
         #[cfg(feature = "perf")]
         if signed {
@@ -201,7 +212,6 @@ impl Staging {
 
     async fn vote_on_last_block_for_self(
         &mut self,
-        storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
         let name = self.config.get().net_config.name.clone();
 
@@ -210,14 +220,9 @@ impl Staging {
             None => return Err(()),
         };
 
-        // Wait for it to be stored.
         // Invariant: I vote => I stored
-        for ack in self.__storage_ack_buffer.drain(..) {
-            let _ = ack.await.unwrap();
-        }
-        let _ = storage_ack.await.unwrap();
-
-        self.perf_add_event(&last_block.block, "Storage");
+        // THIS IS NOT THE CASE NO MORE: WE WRITE AFTER AGREEMENT
+        // delaying the write guarantees the host cannot generate receipts for blocks before agreement.
 
         let mut vote = ProtoVote {
             sig_array: Vec::with_capacity(1),
@@ -287,19 +292,11 @@ impl Staging {
 
     async fn send_vote_on_last_block_to_leader(
         &mut self,
-        storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
         let last_block = match self.pending_blocks.back() {
             Some(b) => b,
             None => return Err(()),
         };
-
-        // Wait for it to be stored.
-        // Invariant: I vote => I stored
-        for ack in self.__storage_ack_buffer.drain(..) {
-            let _ = ack.await.unwrap();
-        }
-        let _ = storage_ack.await.unwrap();
 
         // I will resend all the signatures in pending_blocks that I have not received a QC for.
         // But only if the last block was signed.
@@ -401,7 +398,6 @@ impl Staging {
     pub(super) async fn process_block_as_leader(
         &mut self,
         block: CachedBlock,
-        storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
         this_is_final_block: bool,
     ) -> Result<(), ()> {
@@ -502,12 +498,12 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_leader(block, ae_stats, this_is_final_block)
                     .await;
             } else {
 
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_follower(block, ae_stats, this_is_final_block)
                     .await;
             }
 
@@ -519,8 +515,8 @@ impl Staging {
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && i_am_leader
-        let block_view_is_stable = block.block.view_is_stable;
-        let block_view = block.block.view;
+        // let block_view_is_stable = block.block.view_is_stable;
+        // let block_view = block.block.view;
 
         let block_with_votes = CachedBlockWithVotes {
             block,
@@ -548,11 +544,8 @@ impl Staging {
         // }
 
         if this_is_final_block {
-            self.vote_on_last_block_for_self(storage_ack).await?;
-        } else {
-            self.__storage_ack_buffer.push_back(storage_ack);
+            self.vote_on_last_block_for_self().await?;
         }
-
 
         Ok(())
     }
@@ -562,7 +555,6 @@ impl Staging {
     pub(super) async fn process_block_as_follower(
         &mut self,
         block: CachedBlock,
-        storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
         this_is_final_block: bool
     ) -> Result<(), ()> {
@@ -653,12 +645,31 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_leader(block, ae_stats, this_is_final_block)
                     .await;
             } else {
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_block_as_follower(block, ae_stats, this_is_final_block)
                     .await;
+            }
+        }
+        #[cfg(feature = "policy_validation")] {
+            // When using validation, we need to guarantee that we check using the most up-to-date policy
+            // if we only do `do_crash_commit` after validation, then the policy write and claim check will race
+            // and that can lead to failing validations and consequently to unnecessary view changes.
+            // This might be suboptimal because we end up crash committing one block at a time instead of processing
+            // chunks of the chain, and because of that we only enable this for policy validation.
+
+            use crate::utils::unwrap_tx_list;
+            self.do_crash_commit(self.ci, ae_stats.ci).await;
+            let (tx, rx) = oneshot::channel();
+            self.app_tx
+                .send(AppCommand::Validate(block.block.n, unwrap_tx_list(&block.block).clone(), tx))
+                .await
+                .unwrap();
+            if rx.await.unwrap().is_err() { // here we do not care which txs failed, the leader should guarantee that all txs are valid
+                error!("Policy validation failed for block {}, not voting in favor of it", block.block.n);
+                return Ok(());
             }
         }
 
@@ -676,8 +687,10 @@ impl Staging {
         self.pending_blocks.push_back(block_with_votes);
 
         // Now crash commit blindly
-        if this_is_final_block {
-            self.do_crash_commit(self.ci, ae_stats.ci).await;
+        #[cfg(not(feature = "policy_validation"))] {
+            if this_is_final_block {
+                self.do_crash_commit(self.ci, ae_stats.ci).await;
+            }
         }
 
         let old_view_is_stable = self.view_is_stable;
@@ -708,9 +721,7 @@ impl Staging {
 
         // Reply vote to the leader.
         if this_is_final_block {
-            self.send_vote_on_last_block_to_leader(storage_ack).await?;
-        } else {
-            self.__storage_ack_buffer.push_back(storage_ack);
+            self.send_vote_on_last_block_to_leader().await?;
         }
 
         let (hard_gap, soft_gap) = {
@@ -845,6 +856,8 @@ impl Staging {
             .map(|e| e.block.clone())
             .collect::<Vec<_>>();
 
+        let storage_ack = self.storage.put_blocks(blocks.clone()).await;
+
         #[cfg(feature = "perf")]
         let mut block_perf_stats = Vec::new();
         #[cfg(feature = "perf")]
@@ -860,6 +873,8 @@ impl Staging {
         for (signed, block_n) in block_perf_stats {
             self.perf_add_event_from_perf_stats(signed, block_n, "Send Crash Commit to App");
         }
+
+        let _ = storage_ack.await.unwrap();
     }
 
     async fn maybe_crash_commit(&mut self) -> Result<(), ()> {
@@ -1004,6 +1019,7 @@ impl Staging {
         };
 
         // Slow path: 2-hop rule
+        #[allow(unused_mut)]
         let mut new_bci_slow_path = self
             .pending_blocks
             .iter()
@@ -1033,12 +1049,15 @@ impl Staging {
 
         let new_bci = new_bci_fast_path.max(new_bci_slow_path);
 
-        self.do_byzantine_commit(old_bci, new_bci).await;
+        self.do_byzantine_commit(old_bci, new_bci, incoming_qc).await;
         Ok(())
     }
 
-    pub(crate) async fn do_byzantine_commit(&mut self, old_bci: u64, new_bci: u64) {
+    pub(crate) async fn do_byzantine_commit(&mut self, old_bci: u64, new_bci: u64, qc: ProtoQuorumCertificate) {
+        // warn!("BEFORE: Byzantine commit from {} to {}. QC {}", old_bci, new_bci, qc.n);
+
         if new_bci <= old_bci {
+            let _ = self.app_tx.send(AppCommand::ByzCommit(vec![], qc)).await;
             return;
         }
 
@@ -1063,7 +1082,7 @@ impl Staging {
             byz_blocks.push(block);
         }
 
-        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks)).await;
+        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks, qc)).await;
         let _ = self.logserver_tx.send(LogServerCommand::UpdateBCI(self.bci)).await;
     }
 
@@ -1080,6 +1099,7 @@ impl Staging {
         self.logserver_tx.send(LogServerCommand::Rollback(n)).await.unwrap();
     }
 
+    #[cfg(feature = "extra_2pc")]
     pub(crate) async fn process_2pc_result(&mut self, cmd: EngraftActionAfterFutureDone) -> Result<(), ()> {
         match cmd {
             EngraftActionAfterFutureDone::None => {},

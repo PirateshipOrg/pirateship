@@ -23,8 +23,11 @@ from crypto import *
 from app_experiments import AppExperiment
 from ssh_utils import *
 from deployment import Deployment
-from experiments import Experiment
+from deployment_aci import AciDeployment
+from experiments import BaseExperiment, PirateShipExperiment, NetPerfExperiment
 from autobahn_experiments import AutobahnExperiment
+from scitt_experiments import ScittExperiment
+from ccf_experiments import CCFExperiment
 from results import *
 import pickle
 import re
@@ -116,7 +119,14 @@ def parse_config(path, workdir=None, existing_experiments=None):
         curr_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
         workdir = os.path.join(toml_dict["workdir"], curr_time)
 
-    deployment = Deployment(toml_dict["deployment_config"], workdir)
+    # Create Deployment (Terraform, ACI, etc.)
+    # TODO(natacha): Add a way for Hybrid deployments (as a way to facilitate ACI + VM testing)
+    type = toml_dict["deployment_config"].get("type")
+    if (type is None) or  type == "vm":
+        # Default to VM deployment
+        deployment = Deployment(toml_dict["deployment_config"], workdir)
+    else:
+        deployment = AciDeployment(toml_dict["deployment_config"], workdir)
 
     base_node_config = toml_dict["node_config"]
     base_client_config = toml_dict["client_config"]
@@ -130,12 +140,19 @@ def parse_config(path, workdir=None, existing_experiments=None):
         controller_must_run = e.get("controller_must_run", False)
         git_hash_override = e.get("git_hash", None)
         experiment_type = e.get("type", "pirateship")
+        measure_resources = e.get("measure_resources", False)
         if experiment_type == "pirateship":
-            klass = Experiment
+            klass = PirateShipExperiment
+        elif experiment_type == "netperf":
+            klass = NetPerfExperiment
         elif experiment_type == "app":
             klass = AppExperiment
         elif experiment_type == "autobahn":
             klass = AutobahnExperiment
+        elif experiment_type == "scitt":
+            klass = ScittExperiment
+        elif experiment_type == "ccf":
+            klass = CCFExperiment
         project_home = toml_dict["project_home"]
 
         if "sweeping_parameters" in e:
@@ -171,7 +188,10 @@ def parse_config(path, workdir=None, existing_experiments=None):
                     _e.get("build_command", "make"),
                     git_hash_override,
                     project_home,
-                    controller_must_run
+                    controller_must_run,
+                    measure_resources,
+                    _e.get("loop_type", "closed"),
+                    _e.get("request_rate", 1000.0)
                 ))
         else:
             seq_start = int(e.get("seq_start", 0))
@@ -190,7 +210,10 @@ def parse_config(path, workdir=None, existing_experiments=None):
                 e.get("build_command", "make"),
                 git_hash_override,
                 project_home,
-                controller_must_run
+                controller_must_run,
+                measure_resources,
+                _e.get("loop_type", "closed"),
+                _e.get("request_rate", 1000.0)
             ))
 
     results = []
@@ -209,7 +232,7 @@ def parse_config(path, workdir=None, existing_experiments=None):
 
 @click.group(cls=DefaultGroup, default='all', default_if_no_args=True, help="Run experiment pipeline (runs all if no subcommand is provided)")
 @click.pass_context
-def main(ctx):
+def main(ctx):#
     if ctx.invoked_subcommand is None:
         # Run all()
         ctx.invoke(all)
@@ -389,6 +412,7 @@ def deploy(config, workdir):
     deployment, _, _ = parse_config(config, workdir)
     pprint(deployment)
     deployment.deploy()
+    print("Deployment done. Working directory:", deployment.workdir)
 
 
 @main.command()
@@ -414,7 +438,7 @@ def deploy_experiments(config, workdir):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     if len(experiments) == 0:
@@ -423,6 +447,12 @@ def deploy_experiments(config, workdir):
     cached_git_hash = ""
     cached_diff = ""
     cached_build_cmd = ""
+
+    must_reset_quota = False
+    if isinstance(deployment, AciDeployment) and deployment.local:
+        deployment.lift_dev_cpu_quota()
+        must_reset_quota = True
+
     for experiment in experiments:
         try:
             experiment.deploy(deployment, last_git_hash=cached_git_hash, last_git_diff=cached_diff, last_build_command=cached_build_cmd)
@@ -441,6 +471,8 @@ def deploy_experiments(config, workdir):
     # Copy over the entire directory to all nodes
     deployment.copy_all_to_remote_public_ip()
 
+    if must_reset_quota:
+        deployment.reset_cpu_quota()
 
 @main.command()
 @click.option(
@@ -470,7 +502,7 @@ def run_experiments(config, workdir, name):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     script_lines = []
@@ -611,7 +643,7 @@ def clean_logs(config, workdir):
         if "experiment_pristine.pkl" in files:
             with open(os.path.join(root, "experiment_pristine.pkl"), "rb") as f:
                 experiment = pickle.load(f)
-                assert isinstance(experiment, Experiment)
+                assert isinstance(experiment, BaseExperiment)
             
             with open(os.path.join(root, "experiment.pkl"), "wb") as f:
                 pickle.dump(experiment, f)
@@ -627,7 +659,10 @@ def clean_logs(config, workdir):
     "-d", "--workdir", required=True,
     type=click.Path(file_okay=False, resolve_path=True)
 )
-def results(config, workdir):
+@click.option(
+    "--extra", is_flag=True, default=False,
+)
+def results(config, workdir, extra):
     # Try to get deployment from the pickle file
     pickle_path = os.path.join(workdir, "deployment", "deployment.pkl")
     with open(pickle_path, "rb") as f:
@@ -641,7 +676,7 @@ def results(config, workdir):
             if f == "experiment.pkl":
                 with open(os.path.join(root, f), "rb") as f:
                     experiment = pickle.load(f)
-                    assert isinstance(experiment, Experiment)
+                    assert isinstance(experiment, BaseExperiment)
                     experiments.append(experiment)
 
     script_lines = []
@@ -658,7 +693,6 @@ def results(config, workdir):
 
     # deployment.sync_local_to_dev_vm()
 
-
     _, _, results = parse_config(config, workdir=workdir, existing_experiments=experiments)
     for result in results:
         if force_redo_results:
@@ -666,7 +700,6 @@ def results(config, workdir):
             print("Forcing parse")
             
         result.output()
-
 
 @main.command()
 @click.option(

@@ -53,11 +53,12 @@ message ProtoTransactionList {
 }
 
 message ProtoBlock {
-    repeated proto.execution.ProtoTransaction tx_list = 1;
-    // oneof tx {
+    // repeated proto.execution.ProtoTransaction tx_list = 1;
+    oneof payload {
         // ProtoTransactionList tx_list = 1;    // list of transactions
-        // bytes tx_list_hash = 11;             // hash of the list of transactions  
-    // }
+        ProtoTransactionList tx_list = 1;    // list of transactions
+        bytes merkle_root = 11;             // hash of the list of transactions  
+    }
     uint64 n = 2;                            // sequence number; u64 => don't worry about wrap-around.
     bytes parent = 3;                        // Hash chain parent
     uint64 view = 4;                         // proposer must be Leader(view)

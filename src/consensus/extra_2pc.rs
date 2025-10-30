@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc};
 
 use bytes::{BufMut as _, BytesMut};
-use log::{error, info, trace, warn};
+use log::{error, trace, warn};
 use prost::Message;
 use tokio::sync::{Mutex, oneshot};
 
@@ -178,7 +178,7 @@ impl TwoPCHandler {
 
         let val = op.operands[1].clone();
 
-        let op_type = ProtoTransactionOpType::from_i32(op.op_type);
+        let op_type = ProtoTransactionOpType::try_from(op.op_type).ok();
 
         match op_type {
             Some(ProtoTransactionOpType::Write) => {
@@ -301,8 +301,8 @@ impl TwoPCHandler {
 
             let reply = reply.unwrap();
             match reply {
-                crate::proto::client::proto_client_reply::Reply::Receipt(proto_transaction_receipt) => {
-                    let results = proto_transaction_receipt.results;
+                crate::proto::client::proto_client_reply::Reply::Response(proto_transaction_response) => {
+                    let results = proto_transaction_response.results;
                     if results.is_none() {
                         warn!("Results is none");
                         return false;

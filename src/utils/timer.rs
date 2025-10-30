@@ -3,8 +3,7 @@
 
 use std::{pin::Pin, sync::{atomic::AtomicBool, Arc}, time::Duration};
 
-use log::info;
-use rand::{distributions::{uniform::{UniformDuration, UniformSampler}, Uniform}, Rng};
+use rand::{distributions::Uniform, Rng};
 use tokio::{sync::{mpsc, Mutex}, task::JoinHandle, time::sleep};
 
 pub struct ResettableTimer {

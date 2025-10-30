@@ -3,12 +3,11 @@ use std::time::Instant;
 use std::{io::Error, pin::Pin, sync::Arc, time::Duration};
 
 use std::io::ErrorKind;
-use log::{info, warn};
+use log::warn;
 use prost::Message as _;
 use crate::config::NodeInfo;
 use crate::proto::client::{ProtoClientReply, ProtoCurrentLeader};
 use crate::proto::execution::ProtoTransactionResult;
-use crate::proto::rpc::ProtoPayload;
 use crate::rpc::server::LatencyProfile;
 use crate::rpc::{PinnedMessage, SenderType};
 use crate::utils::channel::{Sender, Receiver};
@@ -17,7 +16,6 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{config::AtomicConfig, utils::timer::ResettableTimer, proto::execution::ProtoTransaction, rpc::server::MsgAckChan};
 
-use super::app::AppCommand;
 use super::client_reply::ClientReplyCommand;
 
 pub type RawBatch = Vec<ProtoTransaction>;
@@ -120,7 +118,7 @@ impl BatchProposer {
         batch_timer_handle.abort();
     }
 
-    fn perf_register_random(&mut self, entry: usize) {
+    fn perf_register_random(&mut self, _entry: usize) {
         #[cfg(not(feature = "perf"))]
         return;
 
@@ -142,21 +140,21 @@ impl BatchProposer {
             if !should_register {
                 return;
             }
-            self.perf_counter.borrow_mut().register_new_entry(entry);
+            self.perf_counter.borrow_mut().register_new_entry(_entry);
 
         }
     }
 
-    fn perf_add_event(&mut self, entry: usize, event: &str) {
+    fn perf_add_event(&mut self, _entry: usize, _event: &str) {
 
         #[cfg(feature = "perf")]
-        self.perf_counter.borrow_mut().new_event(event, &entry);
+        self.perf_counter.borrow_mut().new_event(_event, &_entry);
     }
 
-    fn perf_event_and_deregister_all(&mut self, event: &str) {
+    fn perf_event_and_deregister_all(&mut self, _event: &str) {
         #[cfg(feature = "perf")]
         {
-            self.perf_counter.borrow_mut().new_event_for_all(event);
+            self.perf_counter.borrow_mut().new_event_for_all(_event);
             self.perf_counter.borrow_mut().deregister_all();
         }
     }
@@ -234,8 +232,28 @@ impl BatchProposer {
     }
 
     async fn register_reply_malformed(&mut self, ack_chan: MsgAckChanWithTag) {
-        // TODO
+        let (ack_chan, client_tag, _) = ack_chan;
+
+        let reply = ProtoClientReply {
+            reply: Some(
+                crate::proto::client::proto_client_reply::Reply::ErrorResponse(
+                    crate::proto::client::ProtoErrorResponse {
+                        error: crate::proto::client::ErrorType::MalformedRequest as i32,
+                        message: "Malformed request".to_string(),
+                    }
+                )
+            ),
+            client_tag
+        };
+
+        let reply_ser = reply.encode_to_vec();
+        let _sz = reply_ser.len();
+        let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+        let latency_profile = LatencyProfile::new();
+        
+        let _ = ack_chan.send((reply_msg, latency_profile)).await;
     }
+
 
     async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) { // TODO
         let (ack_chan, client_tag, _) = new_tx.1;
@@ -290,51 +308,57 @@ impl BatchProposer {
 
             let (res_tx, res_rx) = oneshot::channel();
 
-            let (is_probe, block_n) = self.is_probe_tx(&tx);
+            let (is_probe, block_n, tx_n, is_audit) = self.is_probe_tx(&tx);
 
             if !is_probe {
                 self.unlogged_tx.send((tx, res_tx)).await.unwrap();
                 self.reply_tx.send(ClientReplyCommand::UnloggedRequestAck(res_rx, ack_chan)).await.unwrap();
             } else {
-                self.reply_tx.send(ClientReplyCommand::ProbeRequestAck(block_n, ack_chan)).await.unwrap();
+                self.reply_tx.send(ClientReplyCommand::ProbeRequestAck(block_n, tx_n, is_audit, ack_chan)).await.unwrap();
             }
                 
-
-
             return None;
         }
-
 
         Some((Some(tx), ack_chan))
 
     }
 
-    fn is_probe_tx(&self, tx: &ProtoTransaction) -> (bool, u64) {
+    fn is_probe_tx(&self, tx: &ProtoTransaction) -> (bool, u64, u64, bool) { // Returns (is_probe, block_n, tx_n, is_audit)
         if tx.on_receive.is_none() {
-            return (false, 0);
+            return (false, 0, 0, false);
         }
 
         if tx.on_receive.as_ref().unwrap().ops.len() != 1 {
-            return (false, 0);
+            return (false, 0, 0, false);
         }
 
-        if tx.on_receive.as_ref().unwrap().ops[0].op_type != crate::proto::execution::ProtoTransactionOpType::Probe as i32 {
-            return (false, 0);
-        }
+        let op = &tx.on_receive.as_ref().unwrap().ops[0];
 
-        if tx.on_receive.as_ref().unwrap().ops[0].operands.len() != 1 {
-            return (false, 0);
-        }
-
-        let block_n = tx.on_receive.as_ref().unwrap().ops[0].operands[0].clone();
-
-        let block_n = match block_n.as_slice().try_into() {
-            Ok(arr) => u64::from_be_bytes(arr),
-            Err(_) => return (false, 0),
+        let is_audit = if op.op_type == crate::proto::execution::ProtoTransactionOpType::ProbeAudit as i32 {
+            true
+        } else if op.op_type == crate::proto::execution::ProtoTransactionOpType::ProbeCommit as i32 {
+            false
+        } else {
+            return (false, 0, 0, false);
         };
 
-        (true, block_n)
+        if op.operands.len() != 2 {
+            return (false, 0, 0, false);
+        }
 
+        let block_n = op.operands[0].clone();
+        let block_n = match block_n.as_slice().try_into() {
+            Ok(arr) => u64::from_be_bytes(arr),
+            Err(_) => return (false, 0, 0, false),
+        };
+        let tx_n = op.operands[1].clone();
+        let tx_n = match tx_n.as_slice().try_into() {
+            Ok(arr) => u64::from_be_bytes(arr),
+            Err(_) => return (false, 0, 0, false),
+        };
+
+        (true, block_n, tx_n, is_audit)
     }
 
 }

@@ -1,0 +1,152 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "name": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the deployment group."
+      }
+    },
+    "registry": {
+      "type": "string",
+      "metadata": {
+        "description": "Registry (qualified name) to pull images from."
+      }
+    },
+    "primary-image": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/mirror/docker/library/ubuntu:24.04",
+      "metadata": {
+        "description": "Container image to deploy. Should be of the form repoName/imagename:tag for images stored in public Docker Hub, or a fully qualified URI for other registries. Images from private registries require additional registry credentials."
+      }
+    },
+    "ssh": {
+      "type": "securestring",
+      "metadata": {
+        "description": "SSH key for access"
+      }
+    },
+    "acr-token": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Access token for ACR if necessary"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "West US",
+      "metadata": {
+        "description": "Location for all resources."
+      }
+    },
+    "port": {
+      "type": "string",
+      "defaultValue": "3000",
+      "metadata": {
+        "description": "Server Socket Port on which nodes will listen."
+      }
+    },
+    "sku-type": {
+      "type": "string",
+      "defaultValue": "Standard",
+      "allowedValues": [
+        "Standard",
+        "Confidential"
+      ],
+      "metadata": {
+        "description": "SKU type for the container group. Choose 'Standard' for regular containers or 'Confidential' for confidential containers."
+      }
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "type": "Microsoft.ContainerInstance/containerGroups",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[parameters('name')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "sku": "[parameters('sku-type')]",
+        "restartPolicy": "Never",
+        "osType": "Linux",
+        "ipAddress": {
+          "ports": [
+            {
+              "protocol": "TCP",
+              "port": "22"
+            },
+            {
+              "protocol": "TCP",
+              "port": "[parameters('port')]"
+            },
+            {
+              "protocol": "TCP",
+              "port": "[add(int(parameters('port')), 1000)]"
+            }
+          ],
+          "type": "Public"
+        },
+        "volumes": [
+          {
+            "name": "attest-uds",
+            "emptyDir": {}
+          }
+        ],
+        "imageRegistryCredentials": [
+          {
+            "server": "[parameters('registry')]",
+            "username": "00000000-0000-0000-0000-000000000000",
+            "password": "[parameters('acr-token')]"
+          }
+        ],
+        "containers": [
+          {
+            "name": "[format('{0}-main', parameters('name'))]",
+            "properties": {
+              "image": "[parameters('primary-image')]",
+              "ports": [
+                {
+                  "protocol": "TCP",
+                  "port": "[parameters('port')]"
+                },
+                {
+                  "protocol": "TCP",
+                  "port": "22"
+                },
+                {
+                  "protocol": "TCP",
+                  "port": "[add(int(parameters('port')), 1000)]"
+                }
+              ],
+              "environmentVariables": [
+                {
+                  "name": "SSH_ADMIN_KEY",
+                  "value": "[parameters('ssh')]"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "attest-uds",
+                  "mountPath": "/mnt/uds"
+                }
+              ],
+              "resources": {
+                "requests": {
+                  "memoryInGB": 64,
+                  "cpu": 16 
+                }
+              },
+              "securityContext": {
+                "privileged": true
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

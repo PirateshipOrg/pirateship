@@ -3,14 +3,17 @@ use std::cmp::Eq;
 use std::hash::Hash;
 
 use indexmap::IndexMap;
+#[allow(unused_imports)]
 use log::info;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PerfEntry {
     total_time: Duration,
     count: usize,
 }
 
+#[allow(dead_code)]
 impl PerfEntry {
     fn new() -> Self {
         Self {
@@ -33,6 +36,7 @@ impl PerfEntry {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PerfCounter<K> {
     name: String,
@@ -50,14 +54,14 @@ impl<K: Eq + Hash> PerfCounter<K> {
         }
     }
 
-    pub fn register_new_entry(&mut self, entry: K) {
+    pub fn register_new_entry(&mut self, _entry: K) {
         #[cfg(feature = "perf")]
-        self.entry_starts.insert(entry, Instant::now());
+        self.entry_starts.insert(_entry, Instant::now());
     }
 
-    pub fn deregister_entry(&mut self, entry: &K) {
+    pub fn deregister_entry(&mut self, _entry: &K) {
         #[cfg(feature = "perf")]
-        self.entry_starts.remove(entry);
+        self.entry_starts.remove(_entry);
     }
 
     pub fn deregister_all(&mut self) {
@@ -66,22 +70,22 @@ impl<K: Eq + Hash> PerfCounter<K> {
     }
 
 
-    pub fn new_event(&mut self, event: &str, entry: &K) {
+    pub fn new_event(&mut self, _event: &str, _entry: &K) {
         #[cfg(feature = "perf")]
-        if let Some(entry) = self.entry_starts.get(entry) {
+        if let Some(entry) = self.entry_starts.get(_entry) {
             let elapsed = entry.elapsed();
-            let event_stats = self.event_stats.get_mut(event);
+            let event_stats = self.event_stats.get_mut(_event);
             if let Some(event_stats) = event_stats {
                 event_stats.add_time(elapsed);
             }
         }
     }
 
-    pub fn new_event_for_all(&mut self, event: &str) {
+    pub fn new_event_for_all(&mut self, _event: &str) {
         #[cfg(feature = "perf")]
         for (_entry, start) in self.entry_starts.iter() {
             let elapsed = start.elapsed();
-            let event_stats = self.event_stats.get_mut(event);
+            let event_stats = self.event_stats.get_mut(_event);
             if let Some(event_stats) = event_stats {
                 event_stats.add_time(elapsed);
             }

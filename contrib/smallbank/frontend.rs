@@ -320,8 +320,8 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
     let mut result: Vec<Vec<u8>> = Vec::new();
     let block_n =
     match decoded_payload.reply.unwrap() {
-        pft::proto::client::proto_client_reply::Reply::Receipt(receipt) => {
-            if let Some(tx_result) = receipt.results {
+        pft::proto::client::proto_client_reply::Reply::Response(response) => {
+            if let Some(tx_result) = response.results {
                 if tx_result.result.is_empty() {
                     return Ok(result);
                 }
@@ -334,7 +334,7 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
                     }
                 }
             }
-            receipt.block_n
+            response.block_n
         },
         _ => {
             return Err(HttpResponse::NotFound().json(serde_json::json!({
@@ -350,7 +350,7 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
         let probe_transaction = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
-                    op_type: pft::proto::execution::ProtoTransactionOpType::Probe.into(),
+                    op_type: pft::proto::execution::ProtoTransactionOpType::ProbeAudit.into(),
                     operands: vec![block_n.to_be_bytes().to_vec()],
                 }]
             }),

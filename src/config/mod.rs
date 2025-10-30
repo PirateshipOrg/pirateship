@@ -88,6 +88,7 @@ impl ConsensusConfig {
         #[cfg(feature = "round_robin_leader")]
         {
             let n = self.node_list.len() as u64;
+            let view = if view == 0 { 1 } else { view }; // view 0 creates problems, race condition only occurs on debug builds
             self.node_list[((view - 1) % n) as usize].clone()
         }
 
@@ -114,6 +115,7 @@ impl ConsensusConfig {
 pub struct AppConfig {
     pub logger_stats_report_ms: u64,
     pub checkpoint_interval_ms: u64,
+    pub validation_workers: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -149,11 +151,25 @@ pub struct ClientRpcConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum LoopType {
+    Closed,
+    Open { request_rate: f64 },
+}
+
+impl Default for LoopType {
+    fn default() -> Self {
+        LoopType::Closed
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WorkloadConfig {
     pub num_clients: usize,
     pub duration: u64,
     pub max_concurrent_requests: usize,
-    pub request_config: RequestConfig
+    pub request_config: RequestConfig,
+    #[serde(default)]
+    pub loop_type: LoopType,
 }
 
 
@@ -222,6 +238,7 @@ impl ClientConfig {
             app_config: AppConfig {
                 logger_stats_report_ms: 100,
                 checkpoint_interval_ms: 60000,
+                validation_workers: 1,
             },
             
             #[cfg(feature = "evil")]

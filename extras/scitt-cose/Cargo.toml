@@ -1,0 +1,14 @@
+[package]
+name = "scitt-cose"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+coset = "0.3.8"
+minicbor = "1.0.0"
+x509-parser = "0.16"
+p256 = { version = "0.13", features = ["ecdsa"] }
+thiserror = "1.0"
+didx509-sys = { path = "../didx509-sys" }
+base64 = "0.22.1"
+serde_json = "1.0.140"

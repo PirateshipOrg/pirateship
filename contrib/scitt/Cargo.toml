@@ -1,0 +1,47 @@
+[package]
+name = "scitt"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pft = { path = "../../", features = ["pirateship", "app_logger", "storage", "platforms", "policy_validation", "receipts"], default-features = false }
+scitt-cose = { path = "../../extras/scitt-cose" }
+rustls = "0.20"
+actix-web = {version = "4.0.1", features = ["rustls"]}
+rustls-pemfile = "1.0.0"
+reqwest = { version = "0.12", features = ["json"] }
+ed25519-dalek = {version = "2.1.1", features = ["alloc", "fast", "std", "zeroize", "pem", "pkcs8", "batch"]}
+log = "0.4.22"
+rand = "0.8.5"
+# rustls-pemfile = "2.1.2"
+serde = {version = "1.0.203", features = ["derive"]}
+serde_cbor = "0.11.2"
+serde_json = "1.0.120"
+tokio = {version = "1.38.0", features = ["full"]}
+tokio-rustls = "0.26.0"
+prost = "0.12"
+prost-types = "0.12"
+sha2 = "0.10.8"
+hex = "0.4.3"
+futures = "0.3.30"
+core_affinity = "0.8.1"
+log4rs = "1.3.0"
+chrono= "0.4.40"
+iso8601 = "0.6.2"
+async-recursion = "1.1.1"
+
+[features]
+commit_receipts = []
+null_validation = ["pft/null_validation"]
+dummy_receipts = ["pft/dummy_receipts"]
+fast_path = ["pft/fast_path"]
+concurrent_validation = ["pft/concurrent_validation"]
+sequential_validation = ["pft/sequential_validation"]
+sha256 = ["pft/sha256"]
+
+default = ["sequential_validation", "fast_path"]
+concurrent = ["concurrent_validation", "fast_path"]
+
+[[bin]]
+name = "scitt"
+path = "main.rs"

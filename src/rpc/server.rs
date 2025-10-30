@@ -1,11 +1,11 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-use std::{collections::HashMap, fs::File, future::Future, io::{self, Cursor, Error}, path, sync::{atomic::AtomicBool, Arc}, time::{Duration, Instant}};
+use std::{collections::HashMap, fs::File, future::Future, io::{self, Cursor, Error}, path, sync::Arc, time::{Duration, Instant}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, KeyStore}, rpc::auth, utils::AtomicStruct};
 use indexmap::IndexMap;
-use tokio::{io::{BufWriter, ReadHalf}, sync::{mpsc, oneshot}};
+use tokio::{io::{BufWriter, ReadHalf}, sync::mpsc};
 use log::{debug, info, trace, warn};
 use rustls::{
     crypto::aws_lc_rs,
@@ -284,7 +284,7 @@ where
     pub async fn handle_auth(
         server: Arc<Self>,
         stream: &mut TlsStream<TcpStream>,
-        addr: core::net::SocketAddr
+        _addr: core::net::SocketAddr
     ) -> io::Result<(SenderType, bool, u64)> {
         let mut sender = SenderType::Anon;
         let mut reply_chan = false;
@@ -293,13 +293,13 @@ where
             let res = auth::handshake_server(&server, stream).await;
             let name = match res {
                 Ok((nam, is_reply_chan, _client_sub_id)) => {
-                    trace!("Authenticated {} at Addr {}", nam, addr);
                     reply_chan = is_reply_chan;
                     client_sub_id = _client_sub_id;
                     nam
                 }
                 Err(e) => {
-                    warn!("Problem authenticating: {}", e);
+                    // TODO(natacha): Make error printing consistent with rest of code
+                    println!("Problem authenticating: {}", e);
                     return Err(e);
                 }
             };
@@ -454,13 +454,45 @@ where
         let mut parked_streams = HashMap::new();
 
         loop {
-            let (socket, addr) = listener.accept().await?;
+            let (socket, addr) = match listener.accept().await {
+                Ok(s) => s,
+                Err(e) => {
+                   println!("Error accepting connection: {}", e);
+                   continue;
+                }
+            };
             socket.set_nodelay(true)?;
             let acceptor = tls_acceptor.clone();
             let server_ = server.clone();
-            let mut stream = acceptor.accept(socket).await?;
-            let (sender, is_reply_chan, client_sub_id) = Self::handle_auth(server.clone(), &mut stream, addr).await?;
-            
+
+            // Tries to perform TLS handshake with the client, with a timeout.
+            // TODO(natacha): Make this timeout configurable.
+            let tls_handshake_timeout_seconds: u64 = 1;
+            let tls_stream_future = acceptor.accept(socket);
+            let tls_stream = tokio::time::timeout(
+                std::time::Duration::from_secs(tls_handshake_timeout_seconds),
+                tls_stream_future
+            ).await;
+
+            let mut stream = match tls_stream {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    warn!("Client TLS connect fail: {:?}", e);
+                    continue;
+                }
+                Err(_) => {
+                    warn!("Client TLS handshake timeout after {} seconds", tls_handshake_timeout_seconds);
+                    continue;
+                }
+            };
+
+            let (sender, is_reply_chan, client_sub_id) =  match Self::handle_auth(server.clone(), &mut stream, addr).await {
+                Ok((s, is_reply_chan, client_sub_id)) => (s, is_reply_chan, client_sub_id),
+                Err(e) => {
+                    println!("Error during auth: {}", e);
+                    continue;
+                }
+            };
             let map_name = sender.to_string() + "#" + &client_sub_id.to_string();
             
             if is_reply_chan {

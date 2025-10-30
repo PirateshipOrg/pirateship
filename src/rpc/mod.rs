@@ -51,7 +51,7 @@ impl Message {
         Message(Arc::new(arr), sz, sender)
     }
 
-    pub fn as_ref(&self) -> MessageRef {
+    pub fn as_ref<'a>(&'a self) -> MessageRef<'a> {
         MessageRef(self.0.as_ref(), self.1, &self.2)
     }
 }
@@ -93,7 +93,7 @@ impl PinnedMessage {
         PinnedMessage(Arc::new(Box::pin((arr, sz, sender))))
     }
 
-    pub fn as_ref(&self) -> MessageRef {
+    pub fn as_ref<'a>(&'a self) -> MessageRef<'a> {
         MessageRef(self.0 .0.as_ref(), self.0 .1, &self.0 .2)
     }
 }

@@ -1,0 +1,5 @@
+platforms: 
+ - location: "East US"
+   nodepool_count: "7"
+   clientpool_count: "3"
+ 

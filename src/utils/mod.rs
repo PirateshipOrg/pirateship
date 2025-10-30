@@ -19,10 +19,13 @@ pub use serialize::*;
 mod perf;
 pub use perf::*;
 
+use crate::crypto::HashType;
+
 pub mod timer;
 
 
 pub mod channel {
+    #[allow(dead_code)]
     mod channel_tokio {
         pub type Sender<T> = tokio::sync::mpsc::Sender<T>;
         pub type Receiver<T> = tokio::sync::mpsc::Receiver<T>;
@@ -76,7 +79,13 @@ pub mod channel {
                     Err(_) => None,
                 }
             }
+
+            #[cfg(feature = "channel_monitoring")]
+            pub fn len(&self) -> usize {
+                self.0.len()
+            }
         }
+
 
         impl <T> AsyncSenderWrapper<T> {
 
@@ -91,7 +100,10 @@ pub mod channel {
                 self.0.send((Instant::now(), e)).await
             }
 
-
+            #[cfg(feature = "channel_monitoring")]
+            pub fn len(&self) -> usize {
+                self.0.len()
+            }
         }
 
 
@@ -111,6 +123,7 @@ pub mod channel {
 
 
     /// Kanal doesn't seem to have ordered delivery sometimes.
+    #[allow(dead_code)]
     mod channel_kanal {
         pub struct AsyncReceiverWrapper<T>(kanal::AsyncReceiver<T>);
         impl<T> AsyncReceiverWrapper<T> {
@@ -132,4 +145,34 @@ pub mod channel {
 
     pub use channel_async::*;
 
+}
+
+
+// These are utility functions just to avoid having to write the same unwrapping logic everywhere
+pub fn unwrap_tx_list(
+    block: &crate::proto::consensus::ProtoBlock,
+) -> &Vec<crate::proto::execution::ProtoTransaction> {
+    match &block.payload {
+        Some(crate::proto::consensus::proto_block::Payload::TxList(txs)) => &txs.tx_list,
+        _ => panic!("Expected ProtoTransactionList, got None"),
+    }
+}
+
+pub fn unwrap_and_take_tx_list(
+    block: &mut crate::proto::consensus::ProtoBlock,
+) -> Vec<crate::proto::execution::ProtoTransaction> {
+    match block.payload.take() {
+        Some(crate::proto::consensus::proto_block::Payload::TxList(txs)) => txs.tx_list,
+        _ => panic!("Expected ProtoTransactionList, got None"),
+    }
+}
+
+
+pub fn unwrap_merkle_root(
+    block: &crate::proto::consensus::ProtoBlock,
+) -> &HashType {
+    match &block.payload {
+        Some(crate::proto::consensus::proto_block::Payload::MerkleRoot(root)) => root,
+        _ => panic!("Expected ProtoMerkleRoot, got None"),
+    }
 }

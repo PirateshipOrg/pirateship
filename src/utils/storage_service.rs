@@ -8,7 +8,8 @@ use super::{channel::{make_channel, Receiver, Sender}, StorageEngine};
 
 enum StorageServiceCommand {
     Put(HashType /* key */, Vec<u8> /* val */, oneshot::Sender<Result<(), Error>>),
-    Get(HashType /* key */, oneshot::Sender<Result<Vec<u8>, Error>>)
+    Get(HashType /* key */, oneshot::Sender<Result<Vec<u8>, Error>>),
+    PutAll(Vec<HashType> /* keys */, Vec<Vec<u8>> /* vals */, oneshot::Sender<Result<(), Error>>),
 }
 
 pub struct StorageService<S: StorageEngine> {
@@ -56,6 +57,22 @@ impl<S: StorageEngine> StorageService<S> {
                     let res = self.db.get_block(&key);
                     let _ = val_chan.send(res);
                 },
+                StorageServiceCommand::PutAll(keys, vals, ok_chan) => {
+                    #[cfg(feature = "storage")]
+                    {
+                        for (val, key) in vals.iter().zip(keys.iter()) {
+                            let res = self.db.put_block(&val, &key);
+                            if res.is_err() {
+                                let _ = ok_chan.send(res);
+                                return;
+                            }
+                        }
+                        let _ = ok_chan.send(Ok(()));
+                    }
+
+                    #[cfg(not(feature = "storage"))]
+                    let _ = ok_chan.send(Ok(()));
+                },
             }
         }
         self.db.destroy();
@@ -76,6 +93,13 @@ impl StorageServiceConnector {
     pub async fn put_block(&self, block: &CachedBlock) -> oneshot::Receiver<StorageAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx.send(StorageServiceCommand::Put(block.block_hash.clone(), block.block_ser.clone(), tx)).await.unwrap();
+
+        rx
+    }
+
+    pub async fn put_blocks(&self, blocks: Vec<CachedBlock>) -> oneshot::Receiver<StorageAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx.send(StorageServiceCommand::PutAll(blocks.iter().map(|b| b.block_hash.clone()).collect(), blocks.iter().map(|b| b.block_ser.clone()).collect(), tx)).await.unwrap();
 
         rx
     }

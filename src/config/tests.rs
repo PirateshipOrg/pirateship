@@ -6,7 +6,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{join, time::sleep};
 
-use crate::config::{AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, EvilConfig, KVReadWriteUniform, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig};
+use crate::config::{AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, KVReadWriteUniform, LoopType, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig, RequestConfig};
+
+#[cfg(feature = "evil")]
+use crate::config::EvilConfig;
 
 use super::AtomicConfig;
 
@@ -70,8 +73,10 @@ fn test_nodeconfig_serialize() {
     let app_config = AppConfig {
         logger_stats_report_ms: 100,
         checkpoint_interval_ms: 60000,
+        validation_workers: 1
     };
 
+    #[cfg(feature = "evil")]
     let evil_config = EvilConfig {
         simulate_byzantine_behavior: true,
         byzantine_start_block: 20000,
@@ -136,7 +141,8 @@ fn test_clientconfig_serialize() {
             num_clients: 100,
             duration: 60,
             max_concurrent_requests: 10,
-            request_config: crate::config::RequestConfig::KVReadWriteUniform(KVReadWriteUniform {
+            loop_type: LoopType::Closed,
+            request_config: RequestConfig::KVReadWriteUniform(KVReadWriteUniform {
                 num_keys: 1000,
                 val_size: 10000,
                 read_ratio: 0.1,
@@ -226,8 +232,10 @@ async fn test_atomic_config_access() {
     let app_config = AppConfig {
         logger_stats_report_ms: 100,
         checkpoint_interval_ms: 60000,
+        validation_workers: 1
     };
 
+    #[cfg(feature = "evil")]
     let evil_config = EvilConfig {
         simulate_byzantine_behavior: true,
         byzantine_start_block: 20000,

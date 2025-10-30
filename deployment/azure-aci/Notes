@@ -1,0 +1,5 @@
+docker run -d -P --name test debugimage
+
+docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' test
+
+

@@ -5,10 +5,9 @@ use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType}, proto::{checkpoint::ProtoBackfillNack, consensus::{HalfSerializedBlock, ProtoAppendEntries}, rpc::ProtoPayload}, rpc::{client::PinnedClient, MessageRef, SenderType}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser}};
+use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::{checkpoint::ProtoBackfillNack, consensus::{HalfSerializedBlock, ProtoAppendEntries}, rpc::ProtoPayload}, rpc::{client::PinnedClient, MessageRef, SenderType}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser}};
 
 use super::logserver::LogServerQuery;
-use futures::FutureExt;
 
 
 pub enum ForkReceiverCommand {
@@ -110,6 +109,7 @@ impl ForkReceiver {
         broadcaster_tx: Sender<MultipartFork>,
         logserver_query_tx: Sender<LogServerQuery>,
     ) -> Self {
+        #[allow(unused_mut)]
         let mut ret = Self {
             config,
             crypto,

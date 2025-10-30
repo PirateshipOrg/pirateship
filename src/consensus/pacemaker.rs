@@ -9,6 +9,7 @@ use crate::{config::AtomicConfig, crypto::CryptoServiceConnector, proto::{checkp
 use super::logserver::LogServerQuery;
 
 
+#[allow(dead_code)]
 pub enum PacemakerCommand {
     /// Pacemaker usese it to poke the staging to change views.
     UpdateView(u64 /* new view num */, u64 /* config num */),
@@ -28,7 +29,7 @@ pub enum PacemakerCommand {
 pub struct Pacemaker {
     config: AtomicConfig,
     client: PinnedClient,
-    crypto: CryptoServiceConnector,
+    _crypto: CryptoServiceConnector,
 
     view_change_rx: Receiver<(ProtoViewChange, SenderType /* Sender */)>,
     staging_tx: Sender<PacemakerCommand>, // To send pacemaker commands to staging
@@ -67,7 +68,7 @@ impl Pacemaker {
         Pacemaker {
             config,
             client,
-            crypto,
+            _crypto: crypto,
             view_change_rx,
             staging_tx,
             staging_rx,

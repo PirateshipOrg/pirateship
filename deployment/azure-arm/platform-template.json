@@ -1,0 +1,448 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "ARM template for single Pirateship platform deployment"
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "sevVmCount": {
+      "type": "int",
+      "defaultValue": 2,
+      "metadata": {
+        "description": "Number of SEV VMs to deploy"
+      }
+    },
+    "clientVmCount": {
+      "type": "int",
+      "defaultValue": 1,
+      "metadata": {
+        "description": "Number of client VMs to deploy"
+      }
+    },
+    "sshPublicKey": {
+      "type": "string",
+      "metadata": {
+        "description": "SSH public key for VM access"
+      }
+    },
+    "username": {
+      "type": "string",
+      "defaultValue": "pftadmin",
+      "metadata": {
+        "description": "Admin username for VMs"
+      }
+    },
+    "sevVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D4s_v3",
+      "metadata": {
+        "description": "VM size for SEV VMs"
+      }
+    },
+    "enableConfidentialComputing": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable confidential computing for SEV VMs"
+      }
+    },
+    "clientVmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D2s_v3",
+      "metadata": {
+        "description": "VM size for client VMs"
+      }
+    }
+  },
+  "variables": {
+    "uniqueSuffix": "[substring(uniqueString(resourceGroup().id), 0, 6)]",
+    "vnetName": "[concat('pft-vnet-', variables('uniqueSuffix'))]",
+    "nsgName": "[concat('pft-nsg-', variables('uniqueSuffix'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('vnetName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": [
+            "10.1.0.0/16"
+          ]
+        },
+        "subnets": [
+          {
+            "name": "sevSubnet",
+            "properties": {
+              "addressPrefix": "10.1.1.0/24"
+            }
+          },
+          {
+            "name": "clientSubnet",
+            "properties": {
+              "addressPrefix": "10.1.2.0/24"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2023-04-01",
+      "name": "[variables('nsgName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "SSH",
+            "properties": {
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "22",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "K3S",
+            "properties": {
+              "priority": 110,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRanges": ["6443", "10250", "2379", "2380"],
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "K3SFlannel",
+            "properties": {
+              "priority": 120,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Udp",
+              "sourcePortRange": "*",
+              "destinationPortRanges": ["8472", "51820", "51821"],
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          },
+          {
+            "name": "PFT",
+            "properties": {
+              "priority": 130,
+              "direction": "Inbound",
+              "access": "Allow",
+              "protocol": "Tcp",
+              "sourcePortRange": "*",
+              "destinationPortRange": "2000-9000",
+              "sourceAddressPrefix": "*",
+              "destinationAddressPrefix": "*"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[greater(parameters('sevVmCount'), 0)]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-04-01",
+      "name": "[concat('sev-ip-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "sevPublicIPLoop",
+        "count": "[parameters('sevVmCount')]"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Dynamic"
+      }
+    },
+    {
+      "condition": "[greater(parameters('sevVmCount'), 0)]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-04-01",
+      "name": "[concat('sev-nic-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "sevNicLoop",
+        "count": "[parameters('sevVmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', concat('sev-ip-', copyIndex()))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat('sev-ip-', copyIndex()))]"
+              },
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'sevSubnet')]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        }
+      }
+    },
+    {
+      "condition": "[greater(parameters('sevVmCount'), 0)]",
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2023-04-02",
+      "name": "[concat('sev-disk-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "sevDiskLoop",
+        "count": "[parameters('sevVmCount')]"
+      },
+      "sku": {
+        "name": "Premium_LRS"
+      },
+      "properties": {
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "diskSizeGB": 2048
+      }
+    },
+    {
+      "condition": "[greater(parameters('sevVmCount'), 0)]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-03-01",
+      "name": "[concat('sev-vm-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "sevVMLoop",
+        "count": "[parameters('sevVmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', concat('sev-nic-', copyIndex()))]",
+        "[resourceId('Microsoft.Compute/disks', concat('sev-disk-', copyIndex()))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('sevVmSize')]"
+        },
+        "securityProfile": "[if(parameters('enableConfidentialComputing'), createObject('uefiSettings', createObject('secureBootEnabled', true(), 'vTpmEnabled', true()), 'securityType', 'ConfidentialVM'), null())]",
+        "osProfile": {
+          "computerName": "[concat('sev', copyIndex())]",
+          "adminUsername": "[parameters('username')]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "[concat('/home/', parameters('username'), '/.ssh/authorized_keys')]",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "storageProfile": {
+          "imageReference": "[if(parameters('enableConfidentialComputing'), createObject('publisher', 'Canonical', 'offer', 'ubuntu-24_04-lts', 'sku', 'cvm', 'version', 'latest'), createObject('publisher', 'Canonical', 'offer', 'ubuntu-24_04-lts', 'sku', 'server', 'version', 'latest'))]",
+          "osDisk": {
+            "name": "[concat('sev-os-disk-', copyIndex())]",
+            "caching": "ReadWrite",
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS",
+              "securityProfile": "[if(parameters('enableConfidentialComputing'), createObject('securityEncryptionType', 'VMGuestStateOnly'), null())]"
+            }
+          },
+          "dataDisks": [
+            {
+              "lun": 42,
+              "caching": "ReadOnly",
+              "createOption": "Attach",
+              "managedDisk": {
+                "id": "[resourceId('Microsoft.Compute/disks', concat('sev-disk-', copyIndex()))]"
+              }
+            }
+          ]
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat('sev-nic-', copyIndex()))]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "condition": "[greater(parameters('clientVmCount'), 0)]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2023-04-01",
+      "name": "[concat('client-ip-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "clientPublicIPLoop",
+        "count": "[parameters('clientVmCount')]"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Dynamic"
+      }
+    },
+    {
+      "condition": "[greater(parameters('clientVmCount'), 0)]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2023-04-01",
+      "name": "[concat('client-nic-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "clientNicLoop",
+        "count": "[parameters('clientVmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', concat('client-ip-', copyIndex()))]",
+        "[resourceId('Microsoft.Network/virtualNetworks', variables('vnetName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIPAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIPAddresses', concat('client-ip-', copyIndex()))]"
+              },
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('vnetName'), 'clientSubnet')]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('nsgName'))]"
+        }
+      }
+    },
+    {
+      "condition": "[greater(parameters('clientVmCount'), 0)]",
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2023-04-02",
+      "name": "[concat('client-disk-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "clientDiskLoop",
+        "count": "[parameters('clientVmCount')]"
+      },
+      "sku": {
+        "name": "StandardSSD_LRS"
+      },
+      "properties": {
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "diskSizeGB": 4
+      }
+    },
+    {
+      "condition": "[greater(parameters('clientVmCount'), 0)]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2023-03-01",
+      "name": "[concat('client-vm-', copyIndex())]",
+      "location": "[parameters('location')]",
+      "copy": {
+        "name": "clientVMLoop",
+        "count": "[parameters('clientVmCount')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces', concat('client-nic-', copyIndex()))]",
+        "[resourceId('Microsoft.Compute/disks', concat('client-disk-', copyIndex()))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('clientVmSize')]"
+        },
+        "osProfile": {
+          "computerName": "[concat('client', copyIndex())]",
+          "adminUsername": "[parameters('username')]",
+          "linuxConfiguration": {
+            "disablePasswordAuthentication": true,
+            "ssh": {
+              "publicKeys": [
+                {
+                  "path": "[concat('/home/', parameters('username'), '/.ssh/authorized_keys')]",
+                  "keyData": "[parameters('sshPublicKey')]"
+                }
+              ]
+            }
+          }
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "Canonical",
+            "offer": "0001-com-ubuntu-server-focal",
+            "sku": "20_04-lts-gen2",
+            "version": "20.04.202410020"
+          },
+          "osDisk": {
+            "name": "[concat('client-os-disk-', copyIndex())]",
+            "caching": "ReadWrite",
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "StandardSSD_LRS"
+            }
+          },
+          "dataDisks": [
+            {
+              "lun": 42,
+              "caching": "ReadOnly",
+              "createOption": "Attach",
+              "managedDisk": {
+                "id": "[resourceId('Microsoft.Compute/disks', concat('client-disk-', copyIndex()))]"
+              }
+            }
+          ]
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', concat('client-nic-', copyIndex()))]"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[resourceGroup().name]"
+    },
+    "location": {
+      "type": "string",
+      "value": "[parameters('location')]"
+    },
+    "sevVmCount": {
+      "type": "int",
+      "value": "[parameters('sevVmCount')]"
+    },
+    "clientVmCount": {
+      "type": "int",
+      "value": "[parameters('clientVmCount')]"
+    }
+  }
+}

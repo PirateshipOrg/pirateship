@@ -1,18 +1,27 @@
 use std::cell::RefCell;
 use std::{pin::Pin, sync::Arc, time::Duration};
 
-use crate::crypto::{default_hash, FutureHash};
+use crate::crypto::FutureHash;
 use crate::utils::channel::{Receiver, Sender};
-use log::{debug, info, trace, warn};
+use log::{trace, warn};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, Mutex};
+
+#[cfg(feature = "policy_validation")]
+use crate::{
+    consensus::app::AppCommand,
+    proto::client::ProtoClientReply
+};
+
+#[cfg(feature = "policy_validation")]
+use prost::Message;
 
 use crate::utils::PerfCounter;
 use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector, HashType},
     proto::consensus::{
-        DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate,
+        DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate, ProtoTransactionList
     },
     utils::timer::ResettableTimer,
 };
@@ -45,6 +54,9 @@ pub struct BlockSequencer {
     block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
+    #[cfg(feature = "policy_validation")]
+    app_tx: Sender<AppCommand>,
+
     crypto: CryptoServiceConnector,
     parent_hash_rx: FutureHash,
     seq_num: u64,
@@ -70,6 +82,8 @@ impl BlockSequencer {
         block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
+        #[cfg(feature = "policy_validation")]
+        app_tx: Sender<AppCommand>,
     ) -> Self {
         let signature_timer = ResettableTimer::new(Duration::from_millis(
             config.get().consensus_config.signature_max_delay_ms,
@@ -87,6 +101,7 @@ impl BlockSequencer {
         let perf_counter_unsigned =
             RefCell::new(PerfCounter::new("BlockSequencerUnsigned", &event_order));
 
+        #[allow(unused_mut)]
         let mut ret = Self {
             config,
             control_command_rx,
@@ -108,6 +123,8 @@ impl BlockSequencer {
             perf_counter_unsigned,
             __last_qc_n_seen: 0,
             __blocks_proposed_in_this_view: 0,
+            #[cfg(feature = "policy_validation")]
+            app_tx
         };
 
         #[cfg(not(feature = "view_change"))]
@@ -146,53 +163,53 @@ impl BlockSequencer {
         leader == config.net_config.name
     }
 
-    fn perf_register(&mut self, entry: u64) {
+    fn perf_register(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
         {
             self.perf_counter_signed
                 .borrow_mut()
-                .register_new_entry(entry);
+                .register_new_entry(_entry);
             self.perf_counter_unsigned
                 .borrow_mut()
-                .register_new_entry(entry);
+                .register_new_entry(_entry);
         }
     }
 
-    fn perf_fix_signature(&mut self, entry: u64, signed: bool) {
+    fn perf_fix_signature(&mut self, _entry: u64, _signed: bool) {
         #[cfg(feature = "perf")]
-        if signed {
+        if _signed {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         } else {
             self.perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         }
     }
 
-    fn perf_add_event(&mut self, entry: u64, event: &str, signed: bool) {
+    fn perf_add_event(&mut self, _entry: u64, _event: &str, _signed: bool) {
         #[cfg(feature = "perf")]
-        if signed {
+        if _signed {
             self.perf_counter_signed
                 .borrow_mut()
-                .new_event(event, &entry);
+                .new_event(_event, &_entry);
         } else {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .new_event(event, &entry);
+                .new_event(_event, &_entry);
         }
     }
 
-    fn perf_deregister(&mut self, entry: u64) {
+    fn perf_deregister(&mut self, _entry: u64) {
         #[cfg(feature = "perf")]
         {
             self.perf_counter_unsigned
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
             self.perf_counter_signed
                 .borrow_mut()
-                .deregister_entry(&entry);
+                .deregister_entry(&_entry);
         }
     }
 
@@ -205,12 +222,15 @@ impl BlockSequencer {
         // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
         // This limits the depth of pipeline (ie, max number of inflight blocks).
 
+        #[allow(unused_mut)]
         let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
+        #[allow(unused_mut)]
         let mut blocked_for_qc_pass = false;
 
         #[cfg(not(feature = "no_qc"))]
         {
             // Is there a QC I can get?
+            #[allow(unused_mut)]
             let mut qc_check_cond = self.qc_rx.len() > 0;
             #[cfg(feature = "no_pipeline")]
             {
@@ -302,15 +322,31 @@ impl BlockSequencer {
         Ok(())
     }
 
+    #[allow(unused_mut)] // ignore warning for unused muts (needed for policy validation, otherwise we would need to copy stuff around needlessly)
     async fn handle_new_batch(
         &mut self,
-        batch: RawBatch,
-        replies: Vec<MsgAckChanWithTag>,
+        mut batch: RawBatch,
+        mut replies: Vec<MsgAckChanWithTag>,
         fork_validation: Vec<ProtoForkValidation>,
         perf_entry_id: u64,
     ) {
         self.seq_num += 1;
         let n = self.seq_num;
+
+        #[cfg(feature = "policy_validation")] {
+            let (tx, rx) = oneshot::channel();
+            self.app_tx.send(AppCommand::Validate(n, batch.clone(), tx)).await.unwrap();
+            if let Err(mut validation_errors) = rx.await.unwrap() {
+                // sort in descending order so that removal does not break indexes
+                validation_errors.sort_by(|a, b| b.0.tx_idx.cmp(&a.0.tx_idx));
+                for (txid, err) in validation_errors {
+                    // take index txid.tx_idx from the current_raw_batch and current_reply_vec
+                    let _tx = batch.remove(txid.tx_idx);
+                    let ack_chan = replies.remove(txid.tx_idx);
+                    Self::reply_validation_failed(ack_chan, err).await;
+                }
+            }
+        }
 
         let config = self.config.get();
 
@@ -349,7 +385,9 @@ impl BlockSequencer {
             fork_validation,
             view_is_stable: self.view_is_stable,
             config_num: self.config_num,
-            tx_list: batch,
+            payload: Some(crate::proto::consensus::proto_block::Payload::TxList(ProtoTransactionList {
+                tx_list: batch,
+            })),
             sig: Some(crate::proto::consensus::proto_block::Sig::NoSig(
                 DefferedSignature {},
             )),
@@ -378,6 +416,30 @@ impl BlockSequencer {
 
         self.perf_deregister(perf_entry_id);
         trace!("Sequenced: {}", n);
+    }
+
+    #[cfg(feature = "policy_validation")]
+    async fn reply_validation_failed(ack_chan: MsgAckChanWithTag, description: String) {
+        let (ack_chan, client_tag, _) = ack_chan;
+
+        let reply = ProtoClientReply {
+            reply: Some(
+                crate::proto::client::proto_client_reply::Reply::ErrorResponse(
+                    crate::proto::client::ProtoErrorResponse {
+                        error: crate::proto::client::ErrorType::ValidationFailure as i32,
+                        message: description,
+                    }
+                )
+            ),
+            client_tag
+        };
+
+        let reply_ser = reply.encode_to_vec();
+        let _sz = reply_ser.len();
+        let reply_msg = crate::rpc::PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+        let latency_profile = crate::rpc::server::LatencyProfile::new();
+        
+        let _ = ack_chan.send((reply_msg, latency_profile)).await;
     }
 
     async fn add_qcs(&mut self, mut qcs: Vec<ProtoQuorumCertificate>) {

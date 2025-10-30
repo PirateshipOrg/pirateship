@@ -1,0 +1,17 @@
+{
+  "on_receive": null,
+  "on_crash_commit": {
+    "ops": [
+      {
+        "op_type": "WRITE",
+        "operands": [
+          {"SCITTWriteType": "Claim"},
+          {"FilePath": "benches/assets/claim.cose"}
+        ]
+      }
+    ]
+  },
+  "on_byzantine_commit": null,
+  "is_reconfiguration": false,
+  "is_2pc": false
+}

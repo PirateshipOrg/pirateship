@@ -1,0 +1,157 @@
+workdir = "deployment_artifacts"
+project_home = "https://github.com/grapheo12/pirateship"
+
+[deployment_config]
+type = "caci"
+mode = "lan"
+ssh_pub_key = "cluster_key_pub.pem"
+ssh_key = "cluster_key.pem"
+ssh_user = "pftadmin"
+node_port_base = 3000
+template = "arm-template.json"
+registry_name = "tjgoncalvesregistry"
+resource_group = "t-jgoncalves-group"
+image_name = "pftimage"
+local = false
+docker_ssh = 2222
+confidential = true
+
+[node_config]
+
+[node_config.net_config]
+client_max_retry = 10
+
+[node_config.rpc_config]
+recv_buffer_size = 32768
+channel_depth = 1000
+
+[node_config.consensus_config]
+commit_index_gap_soft = 250
+commit_index_gap_hard = 500
+liveness_u = 2
+max_backlog_batch_size = 1000
+signature_max_delay_blocks = 10
+signature_max_delay_ms = 102 # roughly batch_max_delay_ms * signature_max_delay_blocks
+num_crypto_workers = 5
+view_timeout_ms = 4000
+batch_max_delay_ms = 2
+
+[node_config.consensus_config.log_storage_config.RocksDB]
+write_buffer_size = 2147483648
+max_write_buffer_number = 1
+max_write_buffers_to_merge = 1
+
+[node_config.app_config]
+logger_stats_report_ms = 100
+checkpoint_interval_ms = 120000
+validation_workers = 4
+
+[node_config.evil_config]
+simulate_byzantine_behavior = false
+byzantine_start_block = 0
+
+
+[client_config]
+full_duplex = true
+client_sub_id = 0       # This is filled up later by the caller code.
+
+[client_config.net_config]
+client_max_retry = 10
+
+[client_config.workload_config]
+num_requests = 100_000_000
+request_config = "Blanks"
+max_concurrent_requests = 32
+
+[[experiments]]
+name = "pirateshipmem"
+git_hash = "f8137c8db31a4b0a48aaa8bfa619fb756a0e7cd4"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make pirateship_logger_nostorage"
+#build_command = "make"
+duration = 30
+measure_resources = true
+
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 50, 100, 150, 200]
+#num_clients = [10, 20]
+
+[[experiments]]
+name = "pirateshipmem_now"
+git_hash = "d2135c3822cdcd5477235cc900540a98125ed0b9"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make pirateship_logger_nostorage"
+#build_command = "make"
+duration = 30
+measure_resources = true
+
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 50, 100, 150, 200]
+#num_clients = [10, 20]
+
+[[experiments]]
+name = "pirateship"
+git_hash = "f8137c8db31a4b0a48aaa8bfa619fb756a0e7cd4"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make"
+duration = 30
+measure_resources = true
+
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 50, 100, 150, 200]
+#num_clients = [10, 20]
+
+
+[[experiments]]
+name = "pirateship_now"
+git_hash = "d2135c3822cdcd5477235cc900540a98125ed0b9"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make"
+duration = 30
+measure_resources = true
+
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 50, 100, 150, 200]
+#num_clients = [10, 20]
+
+[[experiments]]
+name = "pirateship_now_without_receipts_merkle"
+repeats = 1
+num_nodes = 7 
+node_distribution = "uniform"
+build_command = "make"
+duration = 30
+measure_resources = true
+
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 50, 100, 150, 200]
+#num_clients = [10, 20]
+
+
+[[results]]
+name = "tput_latency_client_sweep"
+plotter = "tput_latency_sweep"
+ramp_up = 10
+ramp_down = 10
+output = "lan_experiment.pdf"
+force_parse = true
+skip_indices = [3, 4,5,6]
+
+[results.legends]
+# Experiment group to legend mapping
+pirateship = "before+byz"
+pirateship_now = "now w/merkle,receipts+byz"
+pirateship_now_without_receipts_merkle = "now+byz"
+# pirateshipmem_now = "now_mem+byz"
+# pirateshipmem = "before_mem+byz"
+
+[results.font]
+size = 55

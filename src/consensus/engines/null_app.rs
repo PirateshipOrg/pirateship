@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-use crate::{consensus::app::AppEngine, proto::{client::ProtoByzResponse, execution::{ProtoTransactionOpResult, ProtoTransactionPhase, ProtoTransactionResult}}};
+use crate::{consensus::app::AppEngine, proto::{client::ProtoByzResponse, execution::{ProtoTransactionOpResult, ProtoTransactionPhase, ProtoTransactionResult}}, utils::unwrap_tx_list};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NullApp;
@@ -11,7 +11,7 @@ impl std::fmt::Display for NullApp {
     }
 }
 
-impl AppEngine  for NullApp {
+impl AppEngine for NullApp {
     type State = Self;
 
     fn new(_config: crate::config::AtomicConfig) -> Self {
@@ -20,7 +20,7 @@ impl AppEngine  for NullApp {
 
     fn handle_crash_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::execution::ProtoTransactionResult>> {
         blocks.iter().map(|block| {
-            block.block.tx_list.iter().map(|tx| {
+            unwrap_tx_list(&block.block).iter().map(|tx| {
                 ProtoTransactionResult {
                     result: tx.on_crash_commit.as_ref().unwrap_or(&ProtoTransactionPhase::default())
                         .ops.iter().map(|_| ProtoTransactionOpResult {
@@ -34,7 +34,7 @@ impl AppEngine  for NullApp {
 
     fn handle_byz_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::client::ProtoByzResponse>> {
         blocks.iter().map(|block| {
-            block.block.tx_list.iter().enumerate().map(|(tx_n, tx)| {
+            unwrap_tx_list(&block.block).iter().enumerate().map(|(tx_n, _tx)| {
                 ProtoByzResponse {
                     block_n: block.block.n,
                     tx_n: tx_n as u64,
@@ -58,8 +58,17 @@ impl AppEngine  for NullApp {
         }
     }
 
+    #[cfg(feature = "policy_validation")]
+    fn handle_validation(&self, _tx: &crate::proto::execution::ProtoTransactionOp, _txid: super::TXID) -> crate::consensus::app::TransactionValidationResult {
+        Ok(None)
+    }
+
     fn get_current_state(&self) -> Self::State {
         self.clone()
     }
-}
 
+    #[cfg(feature = "concurrent_validation")]
+    fn handle_post_validation(&self, _readsets: Vec<crate::consensus::app::ReadSet>) -> crate::consensus::app::PostValidationResult {
+        Ok(())
+    }
+}

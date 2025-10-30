@@ -15,18 +15,21 @@ enum ProtoTransactionOpType {
     INCREMENT = 3;
     CAS = 4;
     // DECREMENT = 4; <-- For decrement send, INCREMENT with negative value
+    SCAN = 5;
 
     // For reconfiguration
-    ADD_LEARNER = 5;
-    UPGRADE_FULL_NODE = 6;
-    DEL_LEARNER = 7;
-    DOWNGRADE_FULL_NODE = 8;
+    ADD_LEARNER = 6;
+    UPGRADE_FULL_NODE = 7;
+    DEL_LEARNER = 8;
+    DOWNGRADE_FULL_NODE = 9;
 
     // For SQL and other operations
-    CUSTOM = 9;
+    CUSTOM = 10;
 
-    // To check for byz commit
-    PROBE = 10;
+    // To get commit receipt
+    PROBE_COMMIT = 11;
+    // To get audit receipt
+    PROBE_AUDIT = 12;
 }
 
 message ProtoTransactionOp {

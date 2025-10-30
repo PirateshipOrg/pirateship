@@ -1,0 +1,549 @@
+use base64::{engine::general_purpose, Engine as _};
+use coset::{cbor::Value, Algorithm, CborSerializable, ContentType, CoseSign1, Label, CoseSign1Builder, HeaderBuilder};
+use didx509_sys;
+use minicbor::decode::Decoder;
+use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+use p256::EncodedPoint;
+use serde_json;
+use x509_parser::prelude::*;
+
+const CWT_LABEL_ISS: i64 = 1;
+const CWT_LABEL_SUB: i64 = 2;
+const CWT_LABEL_IAT: i64 = 6;
+const CWT_LABEL_SVN: i64 = 7;
+#[allow(dead_code)]
+const LABEL_ALG: i64 = 1;
+const LABEL_CRIT: i64 = 2;
+#[allow(dead_code)]
+const LABEL_CTY: i64 = 3;
+const LABEL_KID: i64 = 4;
+#[allow(dead_code)]
+const LABEL_IV: i64 = 5;
+#[allow(dead_code)]
+const LABEL_PARTIAL_IV: i64 = 6;
+#[allow(dead_code)]
+const LABEL_COUNTER_SIG: i64 = 7;
+const LABEL_CWT: i64 = 15;
+const LABEL_X5CHAIN: i64 = 33;
+#[allow(dead_code)]
+const LABEL_ISSUER: i64 = 391;
+const LABEL_FEED: i64 = 392;
+const LABEL_SCITT_RECEIPTS: i64 = 394;
+#[allow(dead_code)]
+const LABEL_VDS: i64 = 395;
+const LABEL_VDP: i64 = 396;
+const LABEL_PS_RECEIPT: i64 = -99;
+
+#[allow(dead_code)]
+pub struct CWT {
+    pub iss: Option<String>,
+    pub sub: Option<String>,
+    pub iat: Option<i128>,
+    pub svn: Option<i128>,
+}
+
+pub enum CBORType {
+    Text(String),
+    Int(i128),
+}
+
+#[allow(dead_code)]
+pub struct ProtectedHeader {
+    pub alg: Option<i64>,
+    pub cty: Option<String>,
+    pub cwt: Option<CWT>,
+    pub x5chain: Option<Vec<Vec<u8>>>,
+    pub feed: Option<String>,
+    pub kid: Option<String>,
+    pub scitt_receipts: Option<Vec<String>>,
+    pub crit: Option<Vec<CBORType>>,
+}
+
+#[allow(dead_code)]
+pub struct UnprotectedHeader {
+    pub x5chain: Option<Vec<Vec<u8>>>,
+}
+
+#[allow(dead_code)]
+pub struct COSEHeaders {
+    pub phdr: ProtectedHeader,
+    pub uhdr: UnprotectedHeader,
+}
+
+fn decode_cwt(cwt_map: &Vec<(Value, Value)>) -> Option<CWT> {
+    let mut iss = None;
+    let mut sub = None;
+    let mut iat = None;
+    let mut svn = None;
+
+    for (label, value) in cwt_map.iter() {
+        match label {
+            Value::Integer(i) => {
+                match i128::from(*i) as i64 {
+                    CWT_LABEL_ISS => {
+                        iss = match value {
+                            Value::Text(s) => Some(s.to_string()),
+                            _ => None,
+                        };
+                    }
+                    CWT_LABEL_SUB => {
+                        sub = match value {
+                            Value::Text(s) => Some(s.to_string()),
+                            _ => None,
+                        };
+                    }
+                    CWT_LABEL_IAT => {
+                        iat = match value {
+                            Value::Integer(i) => Some(i128::from(*i)),
+                            _ => None,
+                        };
+                    }
+                    CWT_LABEL_SVN => {
+                        svn = match value {
+                            Value::Integer(i) => Some(i128::from(*i)),
+                            _ => None,
+                        };
+                    }
+                    _ => continue,
+                };
+            }
+            _ => {
+                continue;
+            }
+        }
+    }
+
+    Some(CWT { iss, sub, iat, svn })
+}
+
+fn decode_cose_headers(cose: &CoseSign1) -> COSEHeaders {
+    let mut cwt = None;
+    let mut x5chain = None;
+    let mut feed = None;
+    let mut kid = None;
+    let mut scitt_receipts = None;
+    let mut crit = None;
+    for (label, value) in cose.protected.header.rest.iter() {
+        match label {
+            Label::Int(LABEL_CWT) => {
+                cwt = match value {
+                    Value::Map(map) => decode_cwt(map),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_X5CHAIN) => {
+                x5chain = match value {
+                    Value::Array(arr) => arr
+                        .iter()
+                        .map(|v| match v {
+                            Value::Bytes(bytes) => {
+                                if bytes.is_empty() {
+                                    None
+                                } else {
+                                    Some(bytes.to_vec())
+                                }
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_FEED) => {
+                feed = match value {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_KID) => {
+                kid = match value {
+                    Value::Text(s) => Some(s.to_string()),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_SCITT_RECEIPTS) => {
+                scitt_receipts = match value {
+                    Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| match v {
+                                Value::Text(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+            }
+            Label::Int(LABEL_CRIT) => {
+                crit = match value {
+                    Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| match v {
+                                Value::Integer(i) => Some(CBORType::Int(i128::from(*i))),
+                                Value::Text(s) => Some(CBORType::Text(s.to_string())),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+            }
+            _ => {
+                println!("Unknown label in protected header: {:?}", label);
+                continue;
+            }
+        }
+    }
+
+    let phdr = ProtectedHeader {
+        alg: match cose.protected.header.alg {
+            Some(Algorithm::Assigned(alg)) => Some(alg as i64),
+            _ => None,
+        },
+        cty: match cose.protected.header.content_type.clone() {
+            Some(s) => match s {
+                ContentType::Text(t) => Some(t.to_string()),
+                ContentType::Assigned(a) => match a {
+                    // if this is not always json set then we will have match iana::CoapContentFormat
+                    _ => None,
+                },
+            },
+            _ => None,
+        },
+        cwt: cwt,
+        x5chain: x5chain,
+        feed: feed,
+        kid: kid,
+        scitt_receipts: scitt_receipts,
+        crit: crit,
+    };
+
+    let uhdr = UnprotectedHeader { x5chain: None };
+
+    COSEHeaders { phdr, uhdr }
+}
+
+fn parse_certificate_chain<'a>(
+    x5chain: &'a Option<Vec<Vec<u8>>>,
+) -> Result<(Vec<X509Certificate<'a>>, String), String> {
+    if let Some(chain) = x5chain {
+        let mut certificates = Vec::new();
+        let mut der_certificates = Vec::new();
+
+        for cert_bytes in chain.iter() {
+            match parse_x509_certificate(cert_bytes.as_slice()) {
+                Ok((_, cert)) => {
+                    certificates.push(cert);
+                    der_certificates.push(cert_bytes.to_vec());
+                }
+                Err(_e) => {
+                    if certificates.is_empty() {
+                        // If we can't parse certificates, try to handle PEM format
+                        return Err("Failed to parse certificate chain as DER, and PEM parsing is not implemented.".to_string());
+                    } else {
+                        // Warning: Could not parse remaining bytes in certificate chain
+                        break;
+                    }
+                }
+            }
+        }
+
+        if certificates.is_empty() {
+            Err("No valid certificates found in the chain".to_string())
+        } else {
+            Ok((
+                certificates,
+                der_certificates
+                    .iter()
+                    .map(|cert| {
+                        let b64 = general_purpose::STANDARD.encode(cert);
+                        format!(
+                            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----",
+                            b64
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ))
+        }
+    } else {
+        Err("X5Chain is missing".to_string())
+    }
+}
+
+fn verify_cose_sign1(cose: CoseSign1, cert: &X509Certificate) -> Result<(), String> {
+    let spki = &cert.tbs_certificate.subject_pki;
+    let pubkey_bytes = &spki.subject_public_key.data;
+    assert_eq!(pubkey_bytes[0], 0x04, "expected uncompressed EC point");
+    let x = &pubkey_bytes[1..33];
+    let y = &pubkey_bytes[33..65];
+
+    let encoded_point = EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
+    let verify_key = match VerifyingKey::from_encoded_point(&encoded_point) {
+        Ok(key) => key,
+        Err(e) => return Err(format!("Failed to create verifying key: {}", e)),
+    };
+
+    // TODO: should we support other algorithms?
+    match cose.protected.header.alg {
+        Some(Algorithm::Assigned(coset::iana::Algorithm::ES256)) => {}
+        _ => return Err("Unsupported algorithm".into()),
+    }
+
+    match cose.verify_signature(b"", |sig, data| {
+        let signature = match Signature::from_slice(&sig) {
+            Ok(sig) => sig,
+            Err(e) => return Err(format!("Failed to parse signature: {}", e)),
+        };
+        match verify_key.verify(data, &signature) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Signature verification failed: {}", e)),
+        }
+    }) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to verify COSE signature: {}", e)),
+    }
+}
+
+fn verify_statement(signed_statement: &[u8]) -> Result<COSEHeaders, String> {
+    if signed_statement.is_empty() {
+        return Err("Signed statement is empty".to_string());
+    }
+    let cose = CoseSign1::from_slice(signed_statement)
+        .map_err(|e| format!("Failed to parse COSE: {}", e))?;
+    if cose.protected.is_empty() {
+        return Err("Protected header is empty".to_string());
+    }
+    let headers = decode_cose_headers(&cose);
+    let cwt = headers
+        .phdr
+        .cwt
+        .as_ref()
+        .ok_or("Signed statement protected header must contain CWT_Claims")?;
+
+    let iss = cwt.iss.as_ref().ok_or(
+        "Signed statement protected header must contain CWT_Claims with at least an issuer",
+    )?;
+    if !iss.starts_with("did:x509") {
+        return Err("CWT_Claims issuer must start with 'did:x509'".to_string());
+    }
+
+    let (certificates, pem_chain) = parse_certificate_chain(&headers.phdr.x5chain)?;
+    if certificates.is_empty() {
+        return Err("No certificates found in X5Chain".to_string());
+    }
+    let leaf_cert = &certificates[0];
+    if let Err(e) = verify_cose_sign1(cose, leaf_cert) {
+        return Err(format!("COSE signature verification failed: {}", e));
+    }
+
+    let resolver = didx509_sys::DidX509Resolver::new();
+    let did_document_json = resolver
+        .resolve(&pem_chain, iss, true)
+        .map_err(|e| format!("Failed to resolve DID: {}", e))?;
+    let did_document: serde_json::Value = serde_json::from_str(&did_document_json)
+        .map_err(|e| format!("Failed to parse DID document JSON: {}", e))?;
+
+    let verification_method = &did_document["verificationMethod"];
+    if verification_method.is_null() {
+        return Err("Could not find verification method in resolved DID document".to_string());
+    }
+    let vm = verification_method
+        .as_array()
+        .ok_or("Verification method in resolved DID document is not an array")?;
+    if vm.len() != 1 {
+        return Err(
+            "Unexpected number of verification methods in resolved DID document".to_string(),
+        );
+    }
+    if &vm[0]["controller"] != iss {
+        return Err("Verification method controller does not match CWT issuer".to_string());
+    }
+    if vm[0]["publicKeyJwk"].is_null() {
+        return Err("Verification method does not contain publicKeyJwk".to_string());
+    }
+    let resolved_jwk = vm[0]["publicKeyJwk"]
+        .as_object()
+        .ok_or("Verification method publicKeyJwk is not an object")?;
+
+    let resolved_jwk_pem = match resolved_jwk["kty"].as_str() {
+        Some("EC") => {
+            let x = resolved_jwk["x"]
+                .as_str()
+                .ok_or("EC JWK missing 'x' field")?;
+            let y = resolved_jwk["y"]
+                .as_str()
+                .ok_or("EC JWK missing 'y' field")?;
+            let _curve = resolved_jwk["crv"]
+                .as_str()
+                .ok_or("EC JWK missing 'crv' field")?;
+
+            let x_bytes = general_purpose::URL_SAFE_NO_PAD
+                .decode(x)
+                .map_err(|e| format!("Failed to decode EC JWK 'x' field: {}", e))?;
+            let y_bytes = general_purpose::URL_SAFE_NO_PAD
+                .decode(y)
+                .map_err(|e| format!("Failed to decode EC JWK 'y' field: {}", e))?;
+
+            EncodedPoint::from_affine_coordinates(
+                &p256::FieldBytes::from_slice(&x_bytes),
+                &p256::FieldBytes::from_slice(&y_bytes),
+                false,
+            )
+        }
+        // TODO: support other key types?
+        _ => {
+            return Err("Unsupported JWK key type, only EC is supported".to_string());
+        }
+    };
+
+    if resolved_jwk_pem.as_bytes()
+        != leaf_cert
+            .tbs_certificate
+            .subject_pki
+            .subject_public_key
+            .data
+            .as_ref()
+    {
+        return Err("Resolved JWK public key does not match signing key PEM".to_string());
+    }
+
+    Ok(headers)
+}
+
+fn skip_cose_tag(tagged_cose_bytes: &[u8]) -> Result<&[u8], String> {
+    let mut dec = Decoder::new(tagged_cose_bytes);
+    let tag = dec.tag().map_err(|e| format!("Error decoding tag: {}", e))?;
+    if tag.as_u64() != 18 {
+        return Err(format!("Expected tag 18 for COSE_Sign1, got tag {}", tag));
+    }
+    let start = dec.position();
+    dec.skip().map_err(|e| format!("Error skipping COSE_Sign1: {}", e))?;
+    let end = dec.position();
+    Ok(&tagged_cose_bytes[start..end])
+}
+
+pub fn validate_scitt_cose_signed_statement(
+    tagged_cose_bytes: &[u8],
+) -> Result<COSEHeaders, String> {
+    let cose_bytes = match skip_cose_tag(tagged_cose_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Err(err);
+        }
+    };
+
+    match verify_statement(&cose_bytes) {
+        Ok(headers) => Ok(headers),
+        Err(err) => Err(format!("COSE verification failed: {}", err)),
+    }
+}
+
+pub fn create_cose_receipt(
+    receipt: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let cose_sign1 = CoseSign1Builder::new()
+        .payload(vec![])
+        .build();
+
+    let mut unprotected_header = HeaderBuilder::new();
+
+    let vdp_map = Value::Map(vec![
+    (
+        Value::Integer(LABEL_PS_RECEIPT.into()),
+        Value::Bytes(receipt),
+    ),
+    ]);
+    
+    unprotected_header = unprotected_header.value(LABEL_VDP, vdp_map);
+    
+    let cose_receipt = CoseSign1Builder::new()
+        .protected(cose_sign1.protected.header.clone())
+        .unprotected(unprotected_header.build())
+        .payload(cose_sign1.payload.unwrap_or_default())
+        .signature(cose_sign1.signature.clone())
+        .build();
+    
+    cose_receipt.to_vec()
+        .map_err(|e| format!("Failed to serialize COSE receipt: {}", e))
+}
+
+pub fn embed_receipt_in_statement(
+    cose_statement_bytes: &Vec<u8>,
+    cose_receipt_bytes: Vec<u8>,
+) -> Result<Vec<u8>, String> {
+    let original_cose = CoseSign1::from_slice(skip_cose_tag(cose_statement_bytes).unwrap())
+        .map_err(|e| format!("Failed to decode COSE statement: {}", e))?;
+    
+    let mut unprotected_header = HeaderBuilder::new();
+    
+    for (label, value) in &original_cose.unprotected.rest {
+        unprotected_header = unprotected_header.value(
+            match label {
+                coset::Label::Int(i) => *i,
+                coset::Label::Text(s) => {
+                    return Err(format!("Expected only int labels: {}", s));
+                }
+            },
+            value.clone()
+        );
+    }
+    
+    let receipt_value = Value::Bytes(cose_receipt_bytes);
+    let receipts_array = Value::Array(vec![receipt_value]);
+    
+    unprotected_header = unprotected_header.value(LABEL_SCITT_RECEIPTS, receipts_array);
+    
+    let cose_with_receipt = CoseSign1Builder::new()
+        .protected(original_cose.protected.header.clone())
+        .unprotected(unprotected_header.build())
+        .payload(original_cose.payload.unwrap_or_default())
+        .signature(original_cose.signature.clone())
+        .build();
+    
+    cose_with_receipt.to_vec()
+        .map_err(|e| format!("Failed to serialize COSE statement with receipt: {}", e))
+}
+
+pub fn extract_receipt_from_statement(
+    cose_statement_bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let cose = CoseSign1::from_slice(cose_statement_bytes)
+        .map_err(|e| format!("Failed to decode COSE statement: {}", e))?;
+    
+    // First, extract the COSE receipt from the SCITT receipts array
+    for (label, value) in &cose.unprotected.rest {
+        let Label::Int(i) = label else { continue };
+        if *i != LABEL_SCITT_RECEIPTS { continue }
+        
+        let Value::Array(receipts_array) = value else { continue };
+        if receipts_array.len() != 1 { continue }
+        
+        let Value::Bytes(cose_receipt_bytes) = &receipts_array[0] else { continue };
+        
+        // Now parse the COSE receipt to extract the actual receipt
+        let cose_receipt = CoseSign1::from_slice(cose_receipt_bytes)
+            .map_err(|e| format!("Failed to decode COSE receipt: {}", e))?;
+        
+        // Look for the VDP label in the unprotected header
+        for (receipt_label, receipt_value) in &cose_receipt.unprotected.rest {
+            let Label::Int(receipt_i) = receipt_label else { continue };
+            if *receipt_i != LABEL_VDP { continue }
+            
+            let Value::Map(vdp_map) = receipt_value else { continue };
+            
+            // Look for the PS_RECEIPT label in the VDP map
+            for (ps_label, ps_value) in vdp_map {
+                let Value::Integer(ps_i) = ps_label else { continue };
+                if i128::from(*ps_i) as i64 != LABEL_PS_RECEIPT { continue }
+                
+                let Value::Bytes(actual_receipt) = ps_value else { continue };
+                return Ok(actual_receipt.clone());
+            }
+        }
+        
+        return Err("No PS receipt found in COSE receipt VDP".to_string());
+    }
+    
+    Err("No SCITT receipts found in the COSE statement".to_string())
+}

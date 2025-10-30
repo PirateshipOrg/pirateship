@@ -4,6 +4,7 @@ deployment_setup = "docker"
 
 
 [deployment_config]
+type = "aci"#, "terraform"
 mode = "manual" # "lan", "dev", "wan", "lan-small", "lan-nontee" etc.
 ssh_key = "cluster_key.pem"
 ssh_user = "pftadmin"

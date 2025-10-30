@@ -1,0 +1,17 @@
+[package]
+name = "didx509-sys"
+version = "0.1.0"
+edition = "2021"
+description = "Low-level FFI bindings for didx509 C++ library"
+build = "build.rs"
+
+# This is a sys crate - it provides unsafe bindings
+categories = ["external-ffi-bindings"]
+keywords = ["ffi", "x509", "did", "crypto"]
+
+[build-dependencies]
+cc = "1.0"
+pkg-config = "0.3"
+
+[dependencies]
+thiserror = "1.0"  # For error types

@@ -1,0 +1,64 @@
+services:
+  node1:
+    image: pft:${TARGET}
+    ports:
+      - "3001:3001"
+      - "4001:4001"
+    volumes:
+      - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
+    entrypoint: ["/usr/local/bin/${TARGET}",  "/configs/node1_config_docker.json"]
+    networks:
+      cluster:
+        ipv4_address: 172.20.0.10
+
+  node2:
+    image: pft:${TARGET}
+    ports:
+      - "3002:3002"
+      - "4002:4002"
+    volumes:
+      - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
+    entrypoint: ["/usr/local/bin/${TARGET}", "/configs/node2_config_docker.json"]
+    networks:
+      cluster:
+        ipv4_address: 172.20.0.11
+
+  node3:
+    image: pft:${TARGET}
+    ports:
+      - "3003:3003"
+      - "4003:4003"
+    volumes:
+      - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
+    entrypoint: ["/usr/local/bin/${TARGET}", "/configs/node3_config_docker.json"]
+    networks:
+      cluster:
+        ipv4_address: 172.20.0.12
+
+  node4:
+    image: pft:${TARGET}
+    ports:
+      - "3004:3004"
+      - "4004:4004"
+    volumes:
+      - ./configs:/configs
+    environment:
+      RUST_BACKTRACE: "full"
+    entrypoint: ["/usr/local/bin/${TARGET}",  "/configs/node4_config_docker.json"]
+    networks:
+      cluster:
+        ipv4_address: 172.20.0.13
+
+networks:
+  cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+

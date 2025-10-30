@@ -2,11 +2,13 @@
 import collections
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 import os
 import pickle
+from statistics import mean
 from typing import Callable, Dict, List, OrderedDict, Tuple
 
-from experiments import Experiment
+from experiments import BaseExperiment
 from collections import defaultdict
 import re
 from dateutil.parser import isoparse
@@ -15,6 +17,7 @@ import numpy as np
 from pprint import pprint
 import matplotlib
 import matplotlib.pyplot as plt
+import pandas as pd
 
 plt.rc('font',**{'size': 100, 'family':'serif','serif':['Linux Libertine O']})
 # plt.rc('legend', fontsize=7)
@@ -140,6 +143,60 @@ def process_latencies(points, duration, ramp_up, ramp_down, latencies, byz=False
     else:
         latencies.extend([p[1] for p in points])
 
+RESOURCE_TYPES = ['cpu', 'memory', 'net_recv', 'net_send', 'disk_read', 'disk_write']
+def parse_stats_file(file_path: str, duration: int, ramp_up: int, ramp_down: int):
+    """Parse a single dool stats CSV file."""
+    try:
+        df = pd.read_csv(file_path, skiprows=5)
+        if len(df) == 0:
+            return None
+        
+        if duration > 0:
+            start_idx = ramp_up
+            end_idx = duration - ramp_down
+            if end_idx > len(df):
+                end_idx = len(df)
+            df = df[start_idx:end_idx]
+        
+        time_indices = list(range(len(df)))
+        
+        resources = {}
+        
+        # CPU: usr + sys
+        if 'usr' in df.columns and 'sys' in df.columns:
+            usr = pd.to_numeric(df['usr'], errors='coerce').fillna(0)
+            sys = pd.to_numeric(df['sys'], errors='coerce').fillna(0)
+            resources['cpu'] = list(zip(time_indices, usr + sys))
+        
+        # Memory usage (convert to MB)
+        if 'used' in df.columns:
+            mem = pd.to_numeric(df['used'], errors='coerce').fillna(0) / (1024*1024)
+            resources['memory'] = list(zip(time_indices, mem))
+        
+        # Network (convert to MB/s)
+        if 'recv' in df.columns:
+            net_recv = pd.to_numeric(df['recv'], errors='coerce').fillna(0) / (1024*1024)
+            resources['net_recv'] = list(zip(time_indices, net_recv))
+        
+        if 'send' in df.columns:
+            net_send = pd.to_numeric(df['send'], errors='coerce').fillna(0) / (1024*1024)
+            resources['net_send'] = list(zip(time_indices, net_send))
+        
+        # Disk I/O (convert to MB/s)
+        if 'read' in df.columns:
+            disk_read = pd.to_numeric(df['read'], errors='coerce').fillna(0) / (1024*1024)
+            resources['disk_read'] = list(zip(time_indices, disk_read))
+        
+        if 'writ' in df.columns:
+            disk_write = pd.to_numeric(df['writ'], errors='coerce').fillna(0) / (1024*1024)
+            resources['disk_write'] = list(zip(time_indices, disk_write))
+        
+        return resources
+        
+    except Exception as e:
+        print(f"Error parsing {file_path}: {e}")
+        return None
+
 
 @dataclass
 class Stats:
@@ -164,7 +221,7 @@ class Stats:
 class Result:
     name: str
     plotter_func: Callable
-    experiment_groups: Dict[str, List[Experiment]]
+    experiment_groups: Dict[str, List[BaseExperiment]]
     workdir: str
     kwargs: dict
 
@@ -231,7 +288,7 @@ class Result:
         latencies = []
         duration = experiment.duration
         for repeat_num in range(experiment.repeats):
-            log_dir = os.path.join(experiment.local_workdir, "logs", str(repeat_num))
+            log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
             # Find the first node log file and all client log files in log_dir
             node_log_files = list(sorted([f for f in os.listdir(log_dir) if f.startswith("node") and f.endswith(".log")]))
             client_log_files = [f for f in os.listdir(log_dir) if f.startswith("client") and f.endswith(".log")]
@@ -304,7 +361,7 @@ class Result:
         """
         For autobahn, we only take the first repeat.
         """
-        log_dir = os.path.join(experiment.local_workdir, "logs", "0")
+        log_dir = os.path.join(experiment.get_local_workdir(), "logs", "0")
         print(log_dir)
         try:
             result = AutobahnLogParser.process(log_dir).result()
@@ -592,7 +649,7 @@ class Result:
                     axes[ycoord, xcoord].set_ylim(ylim)
 
 
-    def tput_latency_sweep_plot(self, plot_dict: Dict[str, List[Stats]], output: str | None):
+    def tput_latency_sweep_plot(self, plot_dict: Dict[str, List[Stats]], output: str | None, logscale: bool = False, xlabel: str = "Throughput (k req/s)", ylabel: str = "Latency (ms)") -> None:
         # Find how many subfigures we need.
 
         bounding_boxes = {
@@ -741,12 +798,13 @@ class Result:
                 plot_dict_items = list(sorted(plot_dict.items()))
 
                 for i, (legend, stat_list) in enumerate(plot_dict_items):
-                    if "Slow" in legend:
-                        legend = "Slow Audit"
-                    elif "Fast" in legend:
-                        legend = "Fast Audit"
-                    elif "Crash Commit" in legend:
-                        legend = "Commit"
+                    # Joao: I disabled this. It is easy enough to set this correctly in the toml and otherwise breaks more complex legends.
+                    # if "Slow" in legend:
+                    #     legend = "Slow Audit"
+                    # elif "Fast" in legend:
+                    #     legend = "Fast Audit"
+                    # elif "Crash Commit" in legend:
+                    #     legend = "Commit"
                     tputs = [stat.mean_tput for stat in stat_list]
                     latencies = [stat.median_latency for stat in stat_list]
                     axes.plot(tputs, latencies, label=legend, color=colors[i], marker=markers[i], mew=6, ms=12, linewidth=6)
@@ -758,14 +816,17 @@ class Result:
                     #         axes.annotate(labels[i], (tputs[i], latencies[i]), textcoords="offset points", xytext=(0,10), ha='center', fontsize=50)
 
 
-                plt.xlabel("Throughput (k req/s)", fontsize=70)
-                plt.ylabel("Latency (ms)", fontsize=70)
+                plt.xlabel(xlabel, fontsize=70)
+                plt.ylabel(ylabel, fontsize=70)
 
                 y_range_total = max([v[3] for v in bounding_boxes.values()]) - min([v[2] for v in bounding_boxes.values()])
                 # if y_range_total > 200:
                 # plt.yscale("log")
                 # plt.ylim((0, 125))
                 # plt.xlim((50, 550))
+                if logscale:
+                    plt.yscale("log")
+
                 plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.4), ncol=legends_ncols, fontsize=70)
                 plt.xticks(fontsize=70)
                 plt.yticks(fontsize=70)
@@ -854,10 +915,6 @@ class Result:
         # Save plot dict
         with open(os.path.join(self.workdir, "plot_dict.pkl"), "wb") as f:
             pickle.dump(plot_dict, f)
-
-        output = self.kwargs.get('output', None)
-        self.tput_latency_sweep_plot(plot_dict, output)
-
         # Print a summary of the results
         with open(os.path.join(self.workdir, "summary.txt"), "w") as f:
             for legend, stats in plot_dict.items():
@@ -869,6 +926,10 @@ class Result:
                     f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
                     f.write(f"Stdev Tput: {stat.stdev_tput} ktx/s, Stdev Latency: {stat.stdev_latency} ms\n")
                     f.write("==================================\n")
+
+        output = self.kwargs.get('output', None)
+        self.tput_latency_sweep_plot(plot_dict, output)
+
 
 
     def stacked_bar_graph_parse(self, ramp_up, ramp_down, legends) -> OrderedDict[str, List[Stats]]:
@@ -1039,7 +1100,7 @@ class Result:
             patterns = [re.compile(pattern)]
 
         target_node = event["target"]
-        log_path = os.path.join(self.experiments[0].local_workdir, "logs", "0", f"{target_node}.log")
+        log_path = os.path.join(self.experiments[0].get_local_workdir(), "logs", "0", f"{target_node}.log")
 
         target_occurrence_num = event.get("occurrence_num", 1)
         occurrence_num = 0
@@ -1091,7 +1152,7 @@ class Result:
 
             tputs = []
             tputs_unbatched = []
-            log_dir = f"{expr[0].local_workdir}/logs/0"
+            log_dir = f"{expr[0].get_local_workdir()}/logs/0"
             points = self.parse_node_logs(
                 log_dir, [f"{target_node}.log"],
                 expr[0].duration,
@@ -1133,12 +1194,6 @@ class Result:
         print(events)
 
         self.crash_byz_tput_timeseries_plot(times, crash_commits, byz_commits, events)
-
-
-        
-
-
-
 
     def stacked_bar_graph(self):
         # Parse args
@@ -1190,3 +1245,359 @@ class Result:
 
     def output(self):
         self.plotter_func()
+
+    # RESOURCES
+
+    def resource_timeseries(self):
+        """Plot combined resource usage for leader, followers, and clients in single plots."""
+        ramp_up = self.kwargs.get('ramp_up', 25)
+        ramp_down = self.kwargs.get('ramp_down', 15)
+        output_dir = self.workdir
+
+        os.makedirs(output_dir, exist_ok=True)
+        
+        for group_name, experiment_list in self.experiment_groups.items():
+            for experiment in experiment_list:
+                variant_name = str(experiment.seq_num)
+                variant_label = f"{group_name}-{variant_name}"
+                
+                print(f"Processing combined resources for {variant_label}")
+                
+                log_dirs = []
+                for repeat_num in range(experiment.repeats):
+                    log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
+                    if os.path.exists(log_dir) and os.listdir(log_dir):
+                        log_dirs.append(log_dir)
+                
+                if not log_dirs:
+                    continue
+
+                leader_resources = {rt : [] for rt in RESOURCE_TYPES}
+                follower_resources = {rt : [] for rt in RESOURCE_TYPES}
+                client_resources = { rt : [] for rt in RESOURCE_TYPES}
+                
+                for log_dir in log_dirs:
+                    leader_res, follower_res, client_res = self.parse_resource_data(log_dir, experiment.duration, ramp_up, ramp_down)
+                    
+                    if not leader_res or not follower_res or not client_res:
+                        print(f"Missing resource data for {variant_label} in {log_dir}")
+                        continue
+                    for resource_type in RESOURCE_TYPES:
+                        for res in leader_res:
+                            if resource_type in res:
+                                leader_resources[resource_type].append(res[resource_type])
+                    
+                    for resource_type in RESOURCE_TYPES:
+                        run_follower_data = []
+                        for res in follower_res:
+                            if resource_type in res:
+                                run_follower_data.append(res[resource_type])
+                        
+                        if run_follower_data:
+                            # Average across all followers for this single run
+                            min_len = min(len(ts) for ts in run_follower_data)
+                            averaged_data = []
+                            for i in range(min_len):
+                                timestamp = run_follower_data[0][i][0]
+                                avg_val = np.mean([ts[i][1] for ts in run_follower_data])
+                                averaged_data.append((timestamp, avg_val))
+                            follower_resources[resource_type].append(averaged_data)
+                    
+                    for resource_type in RESOURCE_TYPES:
+                        run_client_data = []
+                        for res in client_res:
+                            if resource_type in res:
+                                run_client_data.append(res[resource_type])
+                        
+                        if run_client_data:
+                            # Average across all clients for this single run
+                            min_len = min(len(ts) for ts in run_client_data)
+                            averaged_data = []
+                            for i in range(min_len):
+                                timestamp = run_client_data[0][i][0]
+                                avg_val = np.mean([ts[i][1] for ts in run_client_data])
+                                averaged_data.append((timestamp, avg_val))
+                            client_resources[resource_type].append(averaged_data)
+                
+                self.plot_combined_resource_panel(leader_resources, follower_resources, client_resources, variant_label, output_dir)
+
+    def parse_resource_data(self, log_dir: str, duration: int, ramp_up: int, ramp_down: int):
+        leader_resources = []
+        node_resources = []
+        client_resources = []
+        
+        for f in os.listdir(log_dir):
+            if f == 'leader.stats.csv' or f == 'node1.stats.csv':
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    leader_resources.append(stats)
+            elif f.startswith('node') and f.endswith('.stats.csv'):
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    node_resources.append(stats)
+        
+        for f in os.listdir(log_dir):
+            if f.startswith('client') and f.endswith('.stats.csv'):
+                stats = parse_stats_file(os.path.join(log_dir, f), duration, ramp_up, ramp_down)
+                if stats:
+                    client_resources.append(stats)
+        
+        return leader_resources, node_resources, client_resources
+
+    def plot_combined_resource_panel(self, leader_resources, follower_resources, client_resources, 
+                                   variant_label, output_dir):
+        """Plot leader, followers, and clients resources in a single panel."""
+        plt.switch_backend('Agg')
+        plt.rcParams.update({'font.size': 12})
+
+        fig, axes = plt.subplots(3, 2, figsize=(20, 15))
+        axes = axes.flatten()
+
+        resource_info = [
+            ('cpu', 'CPU Usage (\%)', 'CPU Usage'),
+            ('memory', 'Memory (MB)', 'Memory Usage'),
+            ('net_recv', 'Network Recv (MB/s)', 'Network Receive'),
+            ('net_send', 'Network Send (MB/s)', 'Network Send'),
+            ('disk_read', 'Disk Read (MB/s)', 'Disk Read'),
+            ('disk_write', 'Disk Write (MB/s)', 'Disk Write')
+        ]
+
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
+        labels = ['Leader (node1)', 'Followers (avg)', 'Clients (avg)']
+        
+        for i, (resource_type, ylabel, title) in enumerate(resource_info):
+            ax = axes[i]
+            
+            resource_sets = [leader_resources, follower_resources, client_resources]
+            
+            for j, (resources, color, label) in enumerate(zip(resource_sets, colors, labels)):
+                if not resources[resource_type]:
+                    continue
+                    
+                if len(resources[resource_type]) > 1:
+                    # Average across multiple runs
+                    min_len = min(len(ts) for ts in resources[resource_type])
+                    times = list(range(min_len))
+                    means = []
+                    stds = []
+                    for i_time in range(min_len):
+                        values = [ts[i_time][1] for ts in resources[resource_type]]
+                        means.append(np.mean(values))
+                        stds.append(np.std(values))
+                    
+                    ax.plot(times, means, linewidth=2, color=color, label=label)
+                    ax.fill_between(times,
+                                  [max(0, m - s) for m, s in zip(means, stds)],
+                                  [m + s for m, s in zip(means, stds)],
+                                  alpha=0.2, color=color)
+                else:
+                    ts = resources[resource_type][0]
+                    times = list(range(len(ts)))
+                    values = [point[1] for point in ts]
+                    ax.plot(times, values, linewidth=2, color=color, label=label)
+                        
+            ax.set_xlabel('Time (seconds)')
+            ax.set_ylabel(ylabel)
+            ax.set_title(f'{title} - {variant_label}')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        output_file = os.path.join(output_dir, f'{variant_label}.pdf')
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"{variant_label} combined resources plot saved to {output_file}")
+
+    # SCITT
+
+    def tput_latency_sweep_locust(self):
+        '''
+        ***** Mimic tput_latency_sweep but using locust results *****
+
+        Considers each sub-experiment in a group as a separate data point on a line graph
+        and plots in the order of the experiment seq num.
+        Each group is a separate line on the graph and len(legends) == len(experiment_groups)
+        This expects Locust json output format.
+        '''
+
+        # Parse args
+        ramp_up = self.kwargs.get('ramp_up', 0)
+        ramp_down = self.kwargs.get('ramp_down', 0)
+        legends = self.kwargs.get('legends', {})
+        force_parse = self.kwargs.get('force_parse', False)
+
+        # Try retreive plot dict from cache
+        try:
+            if force_parse:
+                raise Exception("Force parse")
+
+            with open(os.path.join(self.workdir, "plot_dict.pkl"), "rb") as f:
+                plot_dict = pickle.load(f)
+        except:
+            plot_dict = self.tput_latency_sweep_parse_locust(ramp_up, ramp_down, legends)
+
+        # Save plot dict
+        with open(os.path.join(self.workdir, "plot_dict.pkl"), "wb") as f:
+            pickle.dump(plot_dict, f)
+        # Print a summary of the results
+        with open(os.path.join(self.workdir, "summary.txt"), "w") as f:
+            for legend, stats in plot_dict.items():
+                f.write(f"{legend}\n")
+                for stat in stats:
+                    f.write(f"=============Num Nodes: {stat.num_nodes}, Num Clients: {stat.num_clients}================\n")
+                    f.write(f"Mean Tput: {stat.mean_tput} claims/s, Mean Latency: {stat.mean_latency} ms\n")
+                    f.write(f"Median Latency: {stat.median_latency} ms, 99th Percentile Latency: {stat.p99_latency} ms\n")
+                    f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
+                    f.write(f"Stdev Tput: {stat.stdev_tput} claims/s, Stdev Latency: {stat.stdev_latency} ms\n")
+                    f.write("==================================\n")
+
+        output = self.kwargs.get('output', None)
+        self.tput_latency_sweep_plot(plot_dict, output, xlabel="Throughput (claims/s)", ylabel="Latency (ms)", logscale=False)
+
+    def tput_latency_sweep_parse_locust(self, ramp_up, ramp_down, legends) -> Dict[str, List[Stats]]:
+        plot_dict = {}
+
+        # Which indices do I skip?
+        skip_indices = self.kwargs.get('skip_indices', [])
+
+        # Find parsing log files for each group
+        for group_name, experiments in self.experiment_groups.items():
+            print("========", group_name, "========")
+            experiments.sort(key=lambda x: x.seq_num)
+            crash_legend = None
+            byz_legend = None
+            legend = legends.get(group_name, None)
+            if legend is None:
+                print("\x1b[31;1mNo legend found for", group_name, ". Skipping...\x1b[0m")
+                continue
+
+            final_stats = []
+
+            for idx, experiment in enumerate(experiments):
+                if idx in skip_indices:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "for crash commit\x1b[0m")
+                    continue
+                stats = self.process_locust_experiment(experiment, ramp_up, ramp_down)
+                if stats is not None:
+                    final_stats.append(stats)
+                else:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "for crash commit\x1b[0m")
+
+                plot_dict[legend] = final_stats
+
+        pprint(plot_dict)
+        return plot_dict
+
+
+    def parse_locust_client_logs(self, log_dir, logs, duration, ramp_up, ramp_down):
+        latencies = {}
+        tput = {}
+        for log_name in logs:
+            fname = os.path.join(log_dir, log_name)
+            try:
+                with open(fname, "r") as f:
+                    result = json.load(f)[0]
+                    num_reqs_per_sec = result.get("num_reqs_per_sec", {})
+                    if len(num_reqs_per_sec) == 0:
+                        print(f"\x1b[31;1mNo requests per second data found in {fname}. Skipping...\x1b[0m")
+                        continue
+                    for key, value in num_reqs_per_sec.items():
+                        key = int(key)
+                        if key not in tput:
+                            tput[key] = 0
+                        tput[key] += int(value)
+                    reponse_times = result.get("response_times", {})
+                    if len(reponse_times) == 0:
+                        print(f"\x1b[31;1mNo response times data found in {fname}. Skipping...\x1b[0m")
+                        continue
+                    for key, value in reponse_times.items():
+                        key = float(key)
+                        if key not in latencies:
+                            latencies[key] = 0
+                        latencies[key] += int(value)
+                    if (failures := result.get("num_fail_per_sec" ,{})) != {}:
+                        total = sum(failures.values())
+                        if total > 10:
+                            print(f"\x1b[31;1mFound failures in {fname}({total})\x1b[0m")
+                        # otherwise we just ignore for now
+                        
+            except Exception as e:
+                print(f"\x1b[31;1mError reading {fname}. Skipping...\x1b[0m")
+                print(f"\x1b[31;1mError details: {e}\x1b[0m")
+                pass
+        start = min(tput.keys())
+        end = max(tput.keys())
+        start_time = start + ramp_up
+        end_time = end + duration - ramp_down
+
+        for key in list(tput.keys()):
+            if key < start_time or key > end_time:
+                del tput[key]
+        tput = [tput[ts] for ts in sorted(tput.keys())]
+
+        latencies = [latency for latency in latencies for _ in range(latencies[latency])]
+
+        return tput, latencies
+
+    def process_locust_experiment(self, experiment, ramp_up, ramp_down, tput_scale=1000.0, latency_scale=1000.0) -> Stats | None:
+        tputs = []
+        latencies = []
+        duration = experiment.duration
+        for repeat_num in range(experiment.repeats):
+            log_dir = os.path.join(experiment.get_local_workdir(), "logs", str(repeat_num))
+            # Find the first node log file and all client log files in log_dir
+            # node_log_files = list(sorted([f for f in os.listdir(log_dir) if f.startswith("node") and f.endswith(".log")]))
+            client_log_files = [f for f in os.listdir(log_dir) if f.startswith("client") and f.endswith(".log")]
+
+            # self.parse_node_logs(log_dir, node_log_files, duration, ramp_up, ramp_down, tputs, tputs_unbatched, byz=byz)
+            t, l = self.parse_locust_client_logs(log_dir, client_log_files, duration, ramp_up, ramp_down)
+            tputs.extend(t)
+            latencies.extend(l)
+
+        print(len(tputs), len(latencies))
+        if len(latencies) == 0:
+            return None
+        latency_prob_dist = np.array(latencies)
+        latency_prob_dist.sort()
+        try:
+            stdev_tput = np.std(tputs)
+        except:
+            stdev_tput = 0
+        
+        try:
+            stdev_latency = np.std(latencies)
+        except:
+            stdev_latency = 0
+
+        mean_latency = np.mean(latencies)
+
+        try:
+            median_latency = np.median(latencies)
+            p25_latency=np.percentile(latencies, 25),
+            p75_latency=np.percentile(latencies, 75),
+            p99_latency=np.percentile(latencies, 99),
+        except:
+            median_latency = mean_latency
+            p25_latency = mean_latency
+            p75_latency = mean_latency
+            p99_latency = mean_latency
+
+        ret = Stats(
+            num_nodes=experiment.num_nodes,
+            num_clients=experiment.num_clients,
+            mean_tput=np.mean(tputs),
+            stdev_tput=stdev_tput,
+            mean_tput_unbatched=0,
+            stdev_tput_unbatched=0,
+            latency_prob_dist=latency_prob_dist,
+            mean_latency=mean_latency,
+            median_latency=median_latency,
+            p25_latency=p25_latency,
+            p75_latency=p75_latency,
+            p99_latency=p99_latency,
+            max_latency=np.max(latencies),
+            min_latency=np.min(latencies),
+            stdev_latency=stdev_latency
+        )
+
+        return ret

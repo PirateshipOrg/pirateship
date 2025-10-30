@@ -2,9 +2,9 @@ use std::{collections::{BTreeMap, HashMap, VecDeque}, sync::Arc};
 
 use log::{error, info, trace, warn};
 use prost::Message as _;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
-use crate::{config::AtomicConfig, crypto::CachedBlock, proto::{checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint}, consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange}, rpc::{proto_payload::Message, ProtoPayload}}, rpc::{client::PinnedClient, MessageRef, PinnedMessage}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser, StorageServiceConnector}};
+use crate::{config::AtomicConfig, crypto::CachedBlock, proto::{checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint}, consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange}, rpc::{proto_payload::Message, ProtoPayload}}, rpc::{client::PinnedClient, MessageRef}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
 
 
 /// Deletes older blocks in favor of newer ones.
@@ -70,6 +70,7 @@ impl ReadCache {
 pub enum LogServerQuery {
     CheckHash(u64 /* block.n */, Vec<u8> /* block_hash */, Sender<bool>),
     GetHints(u64 /* last needed block.n */, Sender<Vec<ProtoBlockHint>>),
+    GetChunk(u64 /* starting block.n */, u64 /* ending block.n */, Sender<Vec<CachedBlock>>),
 }
 
 pub enum LogServerCommand {
@@ -79,7 +80,7 @@ pub enum LogServerCommand {
 }
 
 pub struct LogServer {
-    config: AtomicConfig,
+    _config: AtomicConfig,
     client: PinnedClient,
     bci: u64,
 
@@ -106,7 +107,7 @@ impl LogServer {
         gc_rx: Receiver<u64>, query_rx: Receiver<LogServerQuery>,
         storage: StorageServiceConnector) -> Self {
         LogServer {
-            config,
+            _config: config,
             client,
             logserver_rx,
             backfill_request_rx,
@@ -420,6 +421,26 @@ impl LogServer {
 
                 let res = sender.send(hints).await;
                 info!("Sent hints size {}, result = {:?}", len, res);
+            },
+            LogServerQuery::GetChunk(start, end, sender) => {
+                let mut chunk = Vec::new();
+
+                for n in start..=end {
+                    let block = match self.get_block(n).await {
+                        Some(block) => block,
+                        None => {
+                            warn!("Block {} not found", n);
+                            chunk.clear();
+                            break;
+                        }
+                    };
+                    chunk.push(block);
+                }
+
+                let len = chunk.len();
+
+                let res = sender.send(chunk).await;
+                info!("Sent chunk size {}, result = {:?}", len, res);
             }
         }
     }
