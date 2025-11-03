@@ -1,16 +1,20 @@
-use std::{collections::HashMap, sync::Arc};
-
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+use prost::Message as _;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha20Rng;
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, task::JoinSet};
 
-use crate::{config::AtomicConfig, crypto::hash, proto::consensus::ProtoWitness, utils::channel::Receiver};
+use crate::{config::AtomicConfig, crypto::hash, proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
 
 pub struct WitnessReceiver {
     config: AtomicConfig,
+    client: PinnedClient,
     witness_set_map: HashMap<String, Vec<String>>, // sender -> list of witness sets.
-    my_audit_responsibility: Vec<String>, // list of nodes that I am responsible for auditing.
+    my_audit_responsibility: HashSet<String>, // list of nodes that I am responsible for auditing.
     witness_rx: Receiver<ProtoWitness>,
+    witness_audit_txs: HashMap<String, Sender<ProtoWitness>>,
+
+    handles: JoinSet<()>,
 }
 
 impl WitnessReceiver {
@@ -38,12 +42,12 @@ impl WitnessReceiver {
         res    
     }
 
-    fn find_my_audit_responsibility(name: &String, witness_set_map: &HashMap<String, Vec<String>>) -> Vec<String> {
-        let mut res = Vec::new();
+    fn find_my_audit_responsibility(name: &String, witness_set_map: &HashMap<String, Vec<String>>) -> HashSet<String> {
+        let mut res = HashSet::new();
 
         for (sender, witness_set) in witness_set_map.iter() {
             if witness_set.contains(name) {
-                res.push(sender.clone());
+                res.insert(sender.clone());
             }
         }
 
@@ -51,17 +55,101 @@ impl WitnessReceiver {
     }
 
     
-    pub fn new(config: AtomicConfig, witness_rx: Receiver<ProtoWitness>) -> Self {
+    pub fn new(config: AtomicConfig, client: PinnedClient, witness_rx: Receiver<ProtoWitness>) -> Self {
         let _config = config.get();
         let node_list = _config.consensus_config.node_list.clone();
         let r_plus_one = _config.consensus_config.node_list.len() - 2 * (_config.consensus_config.liveness_u as usize);
         let witness_set_map = Self::find_witness_set_map(&node_list, r_plus_one);
         let my_audit_responsibility = Self::find_my_audit_responsibility(&_config.net_config.name, &witness_set_map);
-        Self { config, witness_set_map, my_audit_responsibility, witness_rx }
+        let handles = JoinSet::new();
+        let witness_audit_txs = HashMap::new();
+        Self { config, client, witness_set_map, my_audit_responsibility, witness_rx, witness_audit_txs, handles }
     }
 
     pub async fn run(witness_receiver: Arc<Mutex<Self>>) {
         let mut witness_receiver = witness_receiver.lock().await;
-        
+        let _chan_depth = witness_receiver.config.get().rpc_config.channel_depth as usize;
+
+        let _audit_responsibility = witness_receiver.my_audit_responsibility.clone();
+
+        // Auditing threads.
+        for node in _audit_responsibility.iter() {
+            let (witness_audit_tx, witness_audit_rx) = make_channel(_chan_depth);
+            witness_receiver.witness_audit_txs.insert(node.clone(), witness_audit_tx);
+            witness_receiver.handles.spawn(async move {
+                while let Some(_witness) = witness_audit_rx.recv().await {
+                    // TODO: Audit this witness.
+                }
+            });
+        }
+
+
+        // Forward to other witness thread.
+        let (witness_forward_tx, witness_forward_rx) = make_channel::<ProtoWitness>(_chan_depth);
+        let _witness_set_map = witness_receiver.witness_set_map.clone();
+        let _client = witness_receiver.client.clone();
+        witness_receiver.handles.spawn(async move {
+            while let Some(witness) = witness_forward_rx.recv().await {
+                // Broadcast this witness to the witness set of the sender.
+                let witness_set = _witness_set_map.get(&witness.sender).unwrap();
+
+                let buf = witness.encode_to_vec();
+                let sz = buf.len();
+                let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
+
+                let mut profile = LatencyProfile::new();
+                let _res = PinnedClient::broadcast(&_client, witness_set, &msg, &mut profile, 0).await;
+            }
+        });
+
+        while let Some(witness) = witness_receiver.witness_rx.recv().await {
+            witness_receiver.maybe_forward_witness(&witness, &witness_forward_tx).await;
+            witness_receiver.maybe_audit_witness(witness).await;
+        }
     }
+
+    async fn maybe_forward_witness(&mut self, witness: &ProtoWitness, witness_forward_tx: &Sender<ProtoWitness>) {
+        let Some(body) = witness.body.as_ref() else {
+            return;
+        };
+
+        let Body::BlockWitness(block_witness) = body else {
+            return;
+        };
+
+        let n = block_witness.n;
+        let sender = witness.sender.clone();
+
+        let Some(qc) = block_witness.qc.as_ref() else {
+            return;
+        };
+
+        // Decompose the vote qc into a vector of votes and create a witness for each vote.
+        for sig in qc.sig.iter() {
+            let vote_witness = ProtoVoteWitness {
+                block_hash: qc.digest.clone(),
+                vote_sig: sig.sig.clone(),
+                n,
+            };
+
+            let witness = ProtoWitness {
+                sender: sig.name.clone(),
+                receiver: sender.clone(),
+                body: Some(Body::VoteWitness(vote_witness)),
+            };
+
+            witness_forward_tx.send(witness).await.unwrap();
+        }
+
+    }
+
+    async fn maybe_audit_witness(&mut self, witness: ProtoWitness) {
+        if !self.witness_audit_txs.contains_key(&witness.sender) {
+            return;
+        }
+
+        let witness_audit_tx = self.witness_audit_txs.get(&witness.sender).unwrap();
+        witness_audit_tx.send(witness).await.unwrap();
+    }
+
 }

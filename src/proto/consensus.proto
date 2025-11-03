@@ -116,6 +116,7 @@ message ProtoBlockWitness {
     bytes block_sig = 2;
     bytes parent_hash = 3;
     uint64 n = 4;
+    ProtoQuorumCertificate qc = 5;
 }
 
 message ProtoVoteWitness {
