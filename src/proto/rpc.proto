@@ -23,5 +23,7 @@ message ProtoPayload {
 
         proto.checkpoint.ProtoBackfillNack backfill_nack = 7;
 
+        proto.consensus.ProtoWitness witness = 8;
+
     }
 }
