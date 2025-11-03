@@ -776,8 +776,45 @@ impl Staging {
         self.process_vote(sender, vote).await
     }
 
+    #[cfg(feature = "witness_forwarding")]
+    async fn send_vote_to_witness_set(&mut self, sender: String, vote: ProtoVote) {
+
+        #[cfg(not(feature = "always_sign"))]
+        {
+            panic!("Misconfigured protocol!");
+        }
+
+        use crate::{proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
+
+        let witness_set = self.witness_set_map.get(&sender).unwrap();
+        let my_name = self.config.get().net_config.name.clone();
+        // This only works when "alway_sign" is set.
+        let n = vote.n;
+        // Find the signature with the matching sequence number.
+        let sig = vote.sig_array.iter().find(|e| e.n == n).unwrap();
+        let vote_sig = sig.sig.clone();
+        let witness = ProtoWitness {
+            sender,
+            receiver: my_name.clone(),
+            body: Some(Body::VoteWitness(ProtoVoteWitness {
+                block_hash: vote.fork_digest.clone(),
+                n,
+                vote_sig,
+            })),
+        };
+        let buf = witness.encode_to_vec();
+        let sz = buf.len();
+        let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
+        let mut profile = LatencyProfile::new();
+        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+    }
+
+
     /// Precondition: The vote has been cryptographically verified to be from sender.
     async fn process_vote(&mut self, sender: String, mut vote: ProtoVote) -> Result<(), ()> {
+        #[cfg(feature = "witness_forwarding")]
+        self.send_vote_to_witness_set(sender.clone(), vote.clone()).await;
+
         if !self.view_is_stable {
             info!("Processing vote on {} from {}", vote.n, sender);
         }
@@ -822,6 +859,8 @@ impl Staging {
         #[cfg(feature = "no_qc")]
         self.do_byzantine_commit(self.bci, self.ci).await;
         // This is needed to prevent a memory leak.
+
+
 
         Ok(())
     }

@@ -78,6 +78,9 @@ pub struct Staging {
 
     #[cfg(feature = "extra_2pc")]
     engraft_2pc_futures_rx: Receiver<EngraftActionAfterFutureDone>,
+
+    #[cfg(feature = "witness_forwarding")]
+    witness_set_map: HashMap<String, Vec<String>>,
 }
 
 impl Staging {
@@ -130,6 +133,16 @@ impl Staging {
             &leader_staging_event_order,
         ));
 
+        #[cfg(feature = "witness_forwarding")]
+        let witness_set_map = {
+            use crate::consensus::witness_receiver::WitnessReceiver;
+
+            let config = config.get();
+            let node_list = config.consensus_config.node_list.clone();
+            let r_plus_one = config.consensus_config.node_list.len() - 2 * (config.consensus_config.liveness_u as usize);
+            WitnessReceiver::find_witness_set_map(&node_list, r_plus_one)
+        };
+
         let mut ret = Self {
             config,
             client,
@@ -167,6 +180,10 @@ impl Staging {
 
             #[cfg(feature = "extra_2pc")]
             engraft_2pc_futures_rx,
+
+
+            #[cfg(feature = "witness_forwarding")]
+            witness_set_map,
 
         };
 

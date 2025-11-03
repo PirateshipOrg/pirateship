@@ -18,7 +18,7 @@ pub struct WitnessReceiver {
 }
 
 impl WitnessReceiver {
-    fn find_witness_set_map(node_list: &Vec<String>, r_plus_one: usize) -> HashMap<String, Vec<String>> {
+    pub fn find_witness_set_map(node_list: &Vec<String>, r_plus_one: usize) -> HashMap<String, Vec<String>> {
         let mut res = HashMap::new();
 
 
