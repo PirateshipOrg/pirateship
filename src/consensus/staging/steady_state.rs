@@ -557,6 +557,41 @@ impl Staging {
         Ok(())
     }
 
+    #[cfg(feature = "witness_forwarding")]
+    async fn send_block_to_witness_set(&mut self, block: CachedBlock) {
+        use crate::{proto::consensus::{ProtoBlockWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
+
+        #[cfg(not(feature = "always_sign"))]
+        {
+            panic!("Misconfigured protocol!");
+        }
+
+        let leader = self.config.get().consensus_config.get_leader_for_view(self.view);
+        let witness_set = self.witness_set_map.get(&leader).unwrap();
+        let my_name = self.config.get().net_config.name.clone();
+        let sig = match &block.block.sig {
+            Some(Sig::ProposerSig(sig)) => sig.clone(),
+            _ => panic!("Block is not signed!"),
+        };
+        
+        let witness = ProtoWitness {
+            sender: leader,
+            receiver: my_name,
+            body: Some(Body::BlockWitness(ProtoBlockWitness {
+                block_hash: block.block_hash.clone(),
+                block_sig: sig,
+                parent_hash: block.block.parent.clone(),
+                n: block.block.n,
+                qc: block.block.qc.clone(),
+            })),
+        };
+        let buf = witness.encode_to_vec();
+        let sz = buf.len();
+        let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
+        let mut profile = LatencyProfile::new();
+        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+    }
+
     /// This has a lot of similarities with process_block_as_leader.
     #[async_recursion]
     pub(super) async fn process_block_as_follower(
@@ -661,6 +696,10 @@ impl Staging {
                     .await;
             }
         }
+
+
+        #[cfg(feature = "witness_forwarding")]
+        self.send_block_to_witness_set(block.clone()).await;
 
         self.logserver_tx.send(LogServerCommand::NewBlock(block.clone())).await.unwrap();
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };

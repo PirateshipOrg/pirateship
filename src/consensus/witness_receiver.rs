@@ -120,25 +120,23 @@ impl WitnessReceiver {
         let n = block_witness.n;
         let sender = witness.sender.clone();
 
-        let Some(qc) = block_witness.qc.as_ref() else {
-            return;
-        };
-
         // Decompose the vote qc into a vector of votes and create a witness for each vote.
-        for sig in qc.sig.iter() {
-            let vote_witness = ProtoVoteWitness {
-                block_hash: qc.digest.clone(),
-                vote_sig: sig.sig.clone(),
-                n,
-            };
+        for qc in block_witness.qc.iter() {
+            for sig in qc.sig.iter() {
+                let vote_witness = ProtoVoteWitness {
+                    block_hash: qc.digest.clone(),
+                    vote_sig: sig.sig.clone(),
+                    n,
+                };
 
-            let witness = ProtoWitness {
-                sender: sig.name.clone(),
-                receiver: sender.clone(),
-                body: Some(Body::VoteWitness(vote_witness)),
-            };
+                let witness = ProtoWitness {
+                    sender: sig.name.clone(),
+                    receiver: sender.clone(),
+                    body: Some(Body::VoteWitness(vote_witness)),
+                };
 
-            witness_forward_tx.send(witness).await.unwrap();
+                witness_forward_tx.send(witness).await.unwrap();
+            }
         }
 
     }
