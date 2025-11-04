@@ -1,6 +1,7 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc};
+use log::trace;
 use prost::Message as _;
-use rand::{Rng as _, SeedableRng as _};
+use rand::{Rng as _, SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet};
 
@@ -32,12 +33,16 @@ impl WitnessReceiver {
                 .collect::<Vec<_>>();
 
             let seed: [u8; 32] = hash(node.as_bytes())[..32].try_into().unwrap();
-            let rng = ChaCha20Rng::from_seed(seed);
-            let witness_set_idxs = rng.sample_iter(&rand::distributions::Uniform::new(0, _node_list.len())).take(r_plus_one).collect::<Vec<usize>>();
-            let witness_set = witness_set_idxs.iter().map(|idx| _node_list[*idx].clone()).collect();
-
+            let mut rng = ChaCha20Rng::from_seed(seed);
+            let witness_set = _node_list.iter()
+                .choose_multiple(&mut rng, r_plus_one)
+                .into_iter()
+                .map(|n| n.clone())
+                .collect::<Vec<_>>();
             res.insert(node.clone(), witness_set);
         }
+
+        trace!("Witness set map: {:?}", res);
 
         res    
     }
