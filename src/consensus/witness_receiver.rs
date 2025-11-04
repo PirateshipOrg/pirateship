@@ -4,7 +4,7 @@ use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet};
 
-use crate::{config::AtomicConfig, crypto::hash, proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
+use crate::{config::AtomicConfig, crypto::hash, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
 
 pub struct WitnessReceiver {
     config: AtomicConfig,
@@ -93,7 +93,11 @@ impl WitnessReceiver {
                 // Broadcast this witness to the witness set of the sender.
                 let witness_set = _witness_set_map.get(&witness.sender).unwrap();
 
-                let buf = witness.encode_to_vec();
+                let payload = ProtoPayload {
+                    message: Some(crate::proto::rpc::proto_payload::Message::Witness(witness)),
+                };
+                let buf = payload.encode_to_vec();
+
                 let sz = buf.len();
                 let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
 

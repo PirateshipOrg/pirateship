@@ -585,7 +585,11 @@ impl Staging {
                 qc: block.block.qc.clone(),
             })),
         };
-        let buf = witness.encode_to_vec();
+
+        let payload = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::Witness(witness)),
+        };
+        let buf = payload.encode_to_vec();
         let sz = buf.len();
         let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
@@ -841,7 +845,10 @@ impl Staging {
                 vote_sig,
             })),
         };
-        let buf = witness.encode_to_vec();
+        let payload = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::Witness(witness)),
+        };
+        let buf = payload.encode_to_vec();
         let sz = buf.len();
         let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
