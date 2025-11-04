@@ -1,11 +1,11 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
-use log::trace;
+use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc};
+use log::{error, info, trace};
 use prost::Message as _;
 use rand::{Rng as _, SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet};
 
-use crate::{config::AtomicConfig, crypto::hash, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
+use crate::{config::AtomicConfig, crypto::{HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
 
 pub struct WitnessReceiver {
     config: AtomicConfig,
@@ -18,18 +18,83 @@ pub struct WitnessReceiver {
     handles: JoinSet<()>,
 }
 
+
+struct AuditorState {
+    sender: String,
+    block_hashes: BTreeMap<u64 /* block n */, HashType>,
+    votes: HashMap<String /* sender */, BTreeMap<u64, HashType>>,
+}
+
+impl AuditorState {
+    pub fn new(sender: String) -> Self {
+        Self { sender, block_hashes: BTreeMap::new(), votes: HashMap::new() }
+    }
+
+    fn display_hash(hash: &HashType) -> String {
+        hex::encode(hash.as_slice()).get(..5).unwrap().to_string()
+    }
+
+    pub fn log_stats(&mut self) {
+        let (last_block_n, last_block_hash) = match self.block_hashes.last_entry() {
+            Some(entry) => (*entry.key(), Self::display_hash(entry.get())),
+            None => (0, Self::display_hash(&default_hash())),
+        };
+
+        let mut vote_last = HashMap::new();
+        for (sender, votes) in self.votes.iter_mut() {
+            let last_vote = match votes.last_entry() {
+                Some(entry) => (*entry.key(), Self::display_hash(entry.get())),
+                None => (0, Self::display_hash(&default_hash())),
+            };
+            vote_last.insert(sender.clone(), last_vote);
+        }
+
+        let vote_stat_str = vote_last.iter().map(|(sender, (n, hash))| format!("{}: {} -> {}", sender, n, hash)).collect::<Vec<_>>().join(", ");
+
+        info!("Auditor stats for node: {}, last block: {} -> {}, last vote: {}", self.sender, last_block_n, last_block_hash, vote_stat_str);        
+    }
+
+    pub fn process_witness(&mut self, witness: ProtoWitness) {
+        match witness.body {
+            Some(Body::BlockWitness(block_witness)) => {
+                self.block_hashes.insert(block_witness.n, block_witness.block_hash.clone());
+            }
+            Some(Body::VoteWitness(vote_witness)) => {
+                self.votes.entry(witness.sender.clone()).or_insert_with(BTreeMap::new).insert(vote_witness.n, vote_witness.block_hash.clone());
+            }
+            None => {
+                error!("Witness has no body!");
+            }
+        }   
+    }
+}
+
+
 impl WitnessReceiver {
-    pub fn find_witness_set_map(node_list: &Vec<String>, r_plus_one: usize) -> HashMap<String, Vec<String>> {
+    pub fn find_witness_set_map(mut node_list: Vec<String>, r_plus_one: usize) -> HashMap<String, Vec<String>> {
         let mut res = HashMap::new();
 
+        let mut load_on_each_node: HashMap<String, usize> = HashMap::new();
+        let max_load = r_plus_one;
 
-        for node in node_list {
+        node_list.sort();
+
+
+        for node in &node_list {
             // Randomly select r_plus_one nodes from the list.
             // Exclude the current node from the list.
             // Seed the RNG with the node's name.
 
             let _node_list = node_list.iter()
-                .filter_map(|n| if n.eq(node) { None } else { Some(n.clone()) })
+                .filter_map(|n| {
+                    if n.eq(node) { 
+                        None 
+                    } else if *load_on_each_node.get(n).unwrap_or(&0) >= max_load {
+                        None
+                    } else { 
+                        Some(n.clone())
+                    }
+                })
                 .collect::<Vec<_>>();
 
             let seed: [u8; 32] = hash(node.as_bytes())[..32].try_into().unwrap();
@@ -39,6 +104,9 @@ impl WitnessReceiver {
                 .into_iter()
                 .map(|n| n.clone())
                 .collect::<Vec<_>>();
+            for n in witness_set.iter() {
+                *load_on_each_node.entry(n.clone()).or_insert(0) += 1;
+            }
             res.insert(node.clone(), witness_set);
         }
 
@@ -64,7 +132,7 @@ impl WitnessReceiver {
         let _config = config.get();
         let node_list = _config.consensus_config.node_list.clone();
         let r_plus_one = _config.consensus_config.node_list.len() - 2 * (_config.consensus_config.liveness_u as usize);
-        let witness_set_map = Self::find_witness_set_map(&node_list, r_plus_one);
+        let witness_set_map = Self::find_witness_set_map(node_list, r_plus_one);
         let my_audit_responsibility = Self::find_my_audit_responsibility(&_config.net_config.name, &witness_set_map);
         let handles = JoinSet::new();
         let witness_audit_txs = HashMap::new();
@@ -76,15 +144,21 @@ impl WitnessReceiver {
         let _chan_depth = witness_receiver.config.get().rpc_config.channel_depth as usize;
 
         let _audit_responsibility = witness_receiver.my_audit_responsibility.clone();
+        trace!("Audit responsibility: {:?} Witness set map: {:?}", _audit_responsibility, witness_receiver.witness_set_map);
 
         // Auditing threads.
         for node in _audit_responsibility.iter() {
             let (witness_audit_tx, witness_audit_rx) = make_channel(_chan_depth);
             witness_receiver.witness_audit_txs.insert(node.clone(), witness_audit_tx);
+            let _node = node.clone();
             witness_receiver.handles.spawn(async move {
-                while let Some(_witness) = witness_audit_rx.recv().await {
-                    // TODO: Audit this witness.
+                info!("Auditing task for node: {}", _node);
+                let mut state = AuditorState::new(_node);
+                while let Some(witness) = witness_audit_rx.recv().await {
+                    state.process_witness(witness);
+                    state.log_stats();
                 }
+                info!("Auditing task for node {} has finished", state.sender);
             });
         }
 

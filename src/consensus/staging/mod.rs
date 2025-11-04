@@ -140,7 +140,7 @@ impl Staging {
             let config = config.get();
             let node_list = config.consensus_config.node_list.clone();
             let r_plus_one = config.consensus_config.node_list.len() - 2 * (config.consensus_config.liveness_u as usize);
-            WitnessReceiver::find_witness_set_map(&node_list, r_plus_one)
+            WitnessReceiver::find_witness_set_map(node_list, r_plus_one)
         };
 
         let mut ret = Self {
