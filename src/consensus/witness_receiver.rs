@@ -1,11 +1,11 @@
-use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc};
+use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc, time::Duration};
 use log::{error, info, trace};
 use prost::Message as _;
 use rand::{Rng as _, SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet};
 
-use crate::{config::AtomicConfig, crypto::{HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::channel::{Receiver, Sender, make_channel}};
+use crate::{config::AtomicConfig, crypto::{HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::{channel::{Receiver, Sender, make_channel}, timer::ResettableTimer}};
 
 pub struct WitnessReceiver {
     config: AtomicConfig,
@@ -57,15 +57,28 @@ impl AuditorState {
     pub fn process_witness(&mut self, witness: ProtoWitness) {
         match witness.body {
             Some(Body::BlockWitness(block_witness)) => {
+                if self.block_hashes.contains_key(&block_witness.n) {
+                    let old_hash = self.block_hashes.get(&block_witness.n).unwrap();
+                    if old_hash != &block_witness.block_hash {
+                        error!("Block hash mismatch for block n: {}, old hash: {}, new hash: {}", block_witness.n, Self::display_hash(old_hash), Self::display_hash(&block_witness.block_hash));
+                    }
+                }
                 self.block_hashes.insert(block_witness.n, block_witness.block_hash.clone());
             }
             Some(Body::VoteWitness(vote_witness)) => {
-                self.votes.entry(witness.sender.clone()).or_insert_with(BTreeMap::new).insert(vote_witness.n, vote_witness.block_hash.clone());
+                let entry = self.votes.entry(witness.sender.clone()).or_insert_with(BTreeMap::new);
+                if entry.contains_key(&vote_witness.n) {
+                    let old_hash = entry.get(&vote_witness.n).unwrap();
+                    if old_hash != &vote_witness.block_hash {
+                        error!("Vote hash mismatch for vote n: {}, old hash: {}, new hash: {}", vote_witness.n, Self::display_hash(old_hash), Self::display_hash(&vote_witness.block_hash));
+                    }
+                }
+                entry.insert(vote_witness.n, vote_witness.block_hash.clone());
             }
             None => {
                 error!("Witness has no body!");
             }
-        }   
+        }
     }
 }
 
@@ -151,14 +164,24 @@ impl WitnessReceiver {
             let (witness_audit_tx, witness_audit_rx) = make_channel(_chan_depth);
             witness_receiver.witness_audit_txs.insert(node.clone(), witness_audit_tx);
             let _node = node.clone();
+            let log_timeout = witness_receiver.config.get().app_config.logger_stats_report_ms;
+            let log_timer = ResettableTimer::new(Duration::from_millis(log_timeout));
+            log_timer.run().await;
             witness_receiver.handles.spawn(async move {
                 info!("Auditing task for node: {}", _node);
                 let mut state = AuditorState::new(_node);
-                while let Some(witness) = witness_audit_rx.recv().await {
-                    state.process_witness(witness);
-                    state.log_stats();
+                loop {
+                    tokio::select! {
+                        _ = log_timer.wait() => {
+                            state.log_stats();
+                        }
+                        witness = witness_audit_rx.recv() => {
+                            if let Some(witness) = witness {
+                                state.process_witness(witness);
+                            }
+                        }
+                    }
                 }
-                info!("Auditing task for node {} has finished", state.sender);
             });
         }
 
