@@ -6,6 +6,8 @@ use log::{debug, error, info, trace, warn};
 use prost::Message;
 use tokio::{sync::oneshot, task::spawn_local};
 
+#[cfg(feature = "witness_forwarding")]
+use crate::crypto::HashType;
 use crate::{
     consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
         consensus::{
@@ -820,7 +822,7 @@ impl Staging {
     }
 
     #[cfg(feature = "witness_forwarding")]
-    async fn send_vote_to_witness_set(&mut self, sender: String, vote: ProtoVote) {
+    async fn send_vote_to_witness_set(&mut self, sender: String, vote: ProtoVote, block_hash: HashType) {
 
         #[cfg(not(feature = "always_sign"))]
         {
@@ -840,7 +842,7 @@ impl Staging {
             sender,
             receiver: my_name.clone(),
             body: Some(Body::VoteWitness(ProtoVoteWitness {
-                block_hash: vote.fork_digest.clone(),
+                block_hash,
                 n,
                 vote_sig,
             })),
@@ -859,7 +861,11 @@ impl Staging {
     /// Precondition: The vote has been cryptographically verified to be from sender.
     async fn process_vote(&mut self, sender: String, mut vote: ProtoVote) -> Result<(), ()> {
         #[cfg(feature = "witness_forwarding")]
-        self.send_vote_to_witness_set(sender.clone(), vote.clone()).await;
+        {
+            let block = self.pending_blocks.iter().find(|e| e.block.block.n == vote.n).unwrap();
+            let block_hash = block.block.block_hash.clone();
+            self.send_vote_to_witness_set(sender.clone(), vote.clone(), block_hash).await;
+        }
 
         if !self.view_is_stable {
             info!("Processing vote on {} from {}", vote.n, sender);

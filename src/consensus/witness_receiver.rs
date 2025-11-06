@@ -1,7 +1,7 @@
 use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc, time::Duration};
 use log::{error, info, trace};
 use prost::Message as _;
-use rand::{Rng as _, SeedableRng as _, seq::IteratorRandom};
+use rand::{SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet};
 
@@ -13,7 +13,7 @@ pub struct WitnessReceiver {
     witness_set_map: HashMap<String, Vec<String>>, // sender -> list of witness sets.
     my_audit_responsibility: HashSet<String>, // list of nodes that I am responsible for auditing.
     witness_rx: Receiver<ProtoWitness>,
-    witness_audit_txs: HashMap<String, Sender<ProtoWitness>>,
+    witness_audit_txs: HashMap<String, Sender<ProtoWitness>>, // If the load is too high, might split the responsibility into multiple tasks.
 
     handles: JoinSet<()>,
 }
@@ -63,6 +63,17 @@ impl AuditorState {
                         error!("Block hash mismatch for block n: {}, old hash: {}, new hash: {}", block_witness.n, Self::display_hash(old_hash), Self::display_hash(&block_witness.block_hash));
                     }
                 }
+
+                for (_, vote_buffer) in self.votes.iter() {
+                    if vote_buffer.contains_key(&block_witness.n) {
+                        let old_hash = vote_buffer.get(&block_witness.n).unwrap();
+                        if old_hash != &block_witness.block_hash {
+                            error!("Vote hash mismatch for block n: {}, old hash: {}, new hash: {}", block_witness.n, Self::display_hash(old_hash), Self::display_hash(&block_witness.block_hash));
+                        } else {
+                            trace!("Vote hash matches block hash for vote n: {} and sender: {}", block_witness.n, witness.sender);
+                        }
+                    }
+                }
                 self.block_hashes.insert(block_witness.n, block_witness.block_hash.clone());
             }
             Some(Body::VoteWitness(vote_witness)) => {
@@ -70,7 +81,15 @@ impl AuditorState {
                 if entry.contains_key(&vote_witness.n) {
                     let old_hash = entry.get(&vote_witness.n).unwrap();
                     if old_hash != &vote_witness.block_hash {
-                        error!("Vote hash mismatch for vote n: {}, old hash: {}, new hash: {}", vote_witness.n, Self::display_hash(old_hash), Self::display_hash(&vote_witness.block_hash));
+                        error!("Vote hash mismatch for vote n: {} and sender: {}, old hash: {}, new hash: {}", vote_witness.n, witness.sender, Self::display_hash(old_hash), Self::display_hash(&vote_witness.block_hash));
+                    }
+                }
+                if self.block_hashes.contains_key(&vote_witness.n) {
+                    let block_hash = self.block_hashes.get(&vote_witness.n).unwrap();
+                    if block_hash != &vote_witness.block_hash {
+                        error!("Block hash mismatch for vote n: {} and sender: {}, block hash: {}, vote hash: {}", vote_witness.n, witness.sender, Self::display_hash(block_hash), Self::display_hash(&vote_witness.block_hash));
+                    } else {
+                        trace!("Vote hash matches block hash for vote n: {} and sender: {}", vote_witness.n, witness.sender);
                     }
                 }
                 entry.insert(vote_witness.n, vote_witness.block_hash.clone());
@@ -120,6 +139,7 @@ impl WitnessReceiver {
             for n in witness_set.iter() {
                 *load_on_each_node.entry(n.clone()).or_insert(0) += 1;
             }
+
             res.insert(node.clone(), witness_set);
         }
 
@@ -160,16 +180,17 @@ impl WitnessReceiver {
         trace!("Audit responsibility: {:?} Witness set map: {:?}", _audit_responsibility, witness_receiver.witness_set_map);
 
         // Auditing threads.
-        for node in _audit_responsibility.iter() {
+        // for node in _audit_responsibility.iter() {
+        for _ in 0..1 { // TODO: Handle load-balancing logic.
             let (witness_audit_tx, witness_audit_rx) = make_channel(_chan_depth);
-            witness_receiver.witness_audit_txs.insert(node.clone(), witness_audit_tx);
-            let _node = node.clone();
+            witness_receiver.witness_audit_txs.insert("*".to_string(), witness_audit_tx);
+            // let _node = node.clone();
             let log_timeout = witness_receiver.config.get().app_config.logger_stats_report_ms;
             let log_timer = ResettableTimer::new(Duration::from_millis(log_timeout));
             log_timer.run().await;
             witness_receiver.handles.spawn(async move {
-                info!("Auditing task for node: {}", _node);
-                let mut state = AuditorState::new(_node);
+                info!("Auditing task for node");
+                let mut state = AuditorState::new("*".to_string());
                 loop {
                     tokio::select! {
                         _ = log_timer.wait() => {
@@ -223,7 +244,6 @@ impl WitnessReceiver {
             return;
         };
 
-        let n = block_witness.n;
         let sender = witness.sender.clone();
 
         // Decompose the vote qc into a vector of votes and create a witness for each vote.
@@ -232,7 +252,7 @@ impl WitnessReceiver {
                 let vote_witness = ProtoVoteWitness {
                     block_hash: qc.digest.clone(),
                     vote_sig: sig.sig.clone(),
-                    n,
+                    n: qc.n,
                 };
 
                 let witness = ProtoWitness {
@@ -248,12 +268,10 @@ impl WitnessReceiver {
     }
 
     async fn maybe_audit_witness(&mut self, witness: ProtoWitness) {
-        if !self.witness_audit_txs.contains_key(&witness.sender) {
-            return;
+        for (_, witness_audit_tx) in self.witness_audit_txs.iter() {
+            // TODO: Handle load-balancing logic.
+            witness_audit_tx.send(witness.clone()).await.unwrap();
         }
-
-        let witness_audit_tx = self.witness_audit_txs.get(&witness.sender).unwrap();
-        witness_audit_tx.send(witness).await.unwrap();
     }
 
 }
