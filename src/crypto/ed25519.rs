@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{BufRead, BufReader, Read},
-    path
+    path,
 };
 
 use ed25519_dalek::{

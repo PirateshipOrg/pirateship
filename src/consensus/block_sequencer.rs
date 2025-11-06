@@ -118,7 +118,6 @@ impl BlockSequencer {
         }
 
         ret
-
     }
 
     pub async fn run(block_maker: Arc<Mutex<Self>>) {
@@ -221,7 +220,6 @@ impl BlockSequencer {
                 self.qc_rx.recv_many(&mut qc_buf, self.qc_rx.len()).await;
                 self.add_qcs(qc_buf).await;
             }
-
 
             // let config = &self.config.get().consensus_config;
             // let hard_gap = config.commit_index_gap_hard;
@@ -386,7 +384,7 @@ impl BlockSequencer {
             if qc.view != self.view {
                 continue;
             }
-            
+
             if qc.n > self.__last_qc_n_seen {
                 self.__last_qc_n_seen = qc.n;
             }
@@ -426,7 +424,10 @@ impl BlockSequencer {
                 new_parent_hash,
                 new_seq_num,
             ) => {
-                warn!("Request for new view message: view: {} config: {} new_seq_num: {}", v, c, new_seq_num);
+                warn!(
+                    "Request for new view message: view: {} config: {} new_seq_num: {}",
+                    v, c, new_seq_num
+                );
                 self.view = v;
                 self.config_num = c;
                 self.view_is_stable = false;
@@ -434,7 +435,6 @@ impl BlockSequencer {
 
                 self.__last_qc_n_seen = new_seq_num;
                 self.__blocks_proposed_in_this_view = 0;
-
 
                 // Rest is only applicable if I am the leader.
                 if !self.i_am_leader() {

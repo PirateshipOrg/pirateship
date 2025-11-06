@@ -1,6 +1,6 @@
-use pft::crypto::KeyStore;
-use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH};
 use criterion::{criterion_group, criterion_main, Criterion};
+use ed25519_dalek::{SigningKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH};
+use pft::crypto::KeyStore;
 use rand::prelude::*;
 
 fn __bench_sign(data: &Vec<u8>, keys: &KeyStore) -> [u8; SIGNATURE_LENGTH] {
@@ -21,12 +21,13 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut key_buff = [0u8; SECRET_KEY_LENGTH];
     rng.fill_bytes(&mut key_buff);
     keys.priv_key = SigningKey::from_bytes(&key_buff);
-    
 
     let mut group = c.benchmark_group("sign");
 
     for i in 0..sizes.len() {
-        group.bench_function(format!("sign {}", sizes[i]), |b| b.iter(|| __bench_sign(&data[i], &keys)));
+        group.bench_function(format!("sign {}", sizes[i]), |b| {
+            b.iter(|| __bench_sign(&data[i], &keys))
+        });
     }
 }
 

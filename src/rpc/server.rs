@@ -1,11 +1,23 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-use std::{collections::HashMap, fs::File, future::Future, io::{self, Cursor, Error}, path, sync::{atomic::AtomicBool, Arc}, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    fs::File,
+    future::Future,
+    io::{self, Cursor, Error},
+    path,
+    sync::{atomic::AtomicBool, Arc},
+    time::{Duration, Instant},
+};
 
-use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, KeyStore}, rpc::auth, utils::AtomicStruct};
+use crate::{
+    config::{AtomicConfig, Config},
+    crypto::{AtomicKeyStore, KeyStore},
+    rpc::auth,
+    utils::AtomicStruct,
+};
 use indexmap::IndexMap;
-use tokio::{io::{BufWriter, ReadHalf}, sync::{mpsc, oneshot}};
 use log::{debug, info, trace, warn};
 use rustls::{
     crypto::aws_lc_rs,
@@ -13,7 +25,12 @@ use rustls::{
 };
 use rustls_pemfile::{certs, rsa_private_keys};
 use tokio::{
-    io::{split, AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}
+    io::{split, AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
+use tokio::{
+    io::{BufWriter, ReadHalf},
+    sync::{mpsc, oneshot},
 };
 use tokio_rustls::{rustls, server::TlsStream, TlsAcceptor};
 
@@ -24,7 +41,7 @@ pub struct LatencyProfile {
     pub start_time: Instant,
     pub should_print: bool,
     pub prefix: String,
-    pub durations: IndexMap<String, Duration>
+    pub durations: IndexMap<String, Duration>,
 }
 
 impl LatencyProfile {
@@ -33,7 +50,7 @@ impl LatencyProfile {
             start_time: Instant::now(),
             durations: IndexMap::new(),
             should_print: false,
-            prefix: String::from("")
+            prefix: String::from(""),
         }
     }
 
@@ -47,22 +64,25 @@ impl LatencyProfile {
             return;
         }
 
-        let str_list: Vec<String> = self.durations.iter().map(|(k, v)| {
-            format!("{}: {} us", k, v.as_micros())
-        }).collect();
+        let str_list: Vec<String> = self
+            .durations
+            .iter()
+            .map(|(k, v)| format!("{}: {} us", k, v.as_micros()))
+            .collect();
 
         trace!("{}, {}", self.prefix, str_list.join(", "));
     }
 
     pub fn force_print(&self) {
-        let str_list: Vec<String> = self.durations.iter().map(|(k, v)| {
-            format!("{}: {} us", k, v.as_micros())
-        }).collect();
+        let str_list: Vec<String> = self
+            .durations
+            .iter()
+            .map(|(k, v)| format!("{}: {} us", k, v.as_micros()))
+            .collect();
 
         info!("{}, {}", self.prefix, str_list.join(", "));
     }
 }
-
 
 pub type MsgAckChan = mpsc::Sender<(PinnedMessage, LatencyProfile)>;
 
@@ -71,19 +91,26 @@ pub enum RespType {
     NoResp = 2,
     NoRespAndReconf = 3,
     RespAndTrack = 4,
-    RespAndTrackAndReconf = 5
+    RespAndTrackAndReconf = 5,
 }
 
 pub type HandlerType<ServerContext> = fn(
-    &ServerContext,             // State kept by upper layers
-    MessageRef,                 // New message
-    MsgAckChan) -> Result<      // Channel to receive response to message
-        RespType,                   // Should the caller wait for a response from the channel?
-        Error>;                 // Should this connection be dropped?
+    &ServerContext, // State kept by upper layers
+    MessageRef,     // New message
+    MsgAckChan,
+) -> Result<
+    // Channel to receive response to message
+    RespType, // Should the caller wait for a response from the channel?
+    Error,
+>; // Should this connection be dropped?
 
 pub trait ServerContextType {
     fn get_server_keys(&self) -> Arc<Box<KeyStore>>;
-    fn handle_rpc(&self, msg: MessageRef, ack_chan: MsgAckChan) -> impl Future<Output = Result<RespType, Error>> + Send;
+    fn handle_rpc(
+        &self,
+        msg: MessageRef,
+        ack_chan: MsgAckChan,
+    ) -> impl Future<Output = Result<RespType, Error>> + Send;
 }
 
 pub struct Server<ServerContext>
@@ -103,7 +130,7 @@ pub struct FrameReader {
     pub buffer: Vec<u8>,
     pub stream: ReadHalf<TlsStream<TcpStream>>,
     pub offset: usize,
-    pub bound: usize
+    pub bound: usize,
 }
 
 impl FrameReader {
@@ -112,7 +139,7 @@ impl FrameReader {
             buffer: vec![0u8; 65536],
             stream,
             offset: 0,
-            bound: 0
+            bound: 0,
         }
     }
 
@@ -124,20 +151,24 @@ impl FrameReader {
             if self.bound == self.offset {
                 // Need to fetch more data.
                 let read_n = self.stream.read(self.buffer.as_mut()).await?;
-                debug!("Fetched {} bytes, Need to fetch {} bytes, pos {}, Currently at: {}", read_n, get_n, pos, n);
+                debug!(
+                    "Fetched {} bytes, Need to fetch {} bytes, pos {}, Currently at: {}",
+                    read_n, get_n, pos, n
+                );
                 self.bound = read_n;
                 self.offset = 0;
             }
 
             if self.bound - self.offset >= n {
                 // Copy in full
-                v[pos..][..n].copy_from_slice(&self.buffer[self.offset..self.offset+n]);
+                v[pos..][..n].copy_from_slice(&self.buffer[self.offset..self.offset + n]);
                 self.offset += n;
                 n = 0;
-            }else{
+            } else {
                 // Copy partial.
                 // We'll get the rest in the next iteration of the loop.
-                v[pos..][..self.bound - self.offset].copy_from_slice(&self.buffer[self.offset..self.bound]);
+                v[pos..][..self.bound - self.offset]
+                    .copy_from_slice(&self.buffer[self.offset..self.bound]);
                 n -= self.bound - self.offset;
                 pos += self.bound - self.offset;
                 self.offset = self.bound;
@@ -145,9 +176,6 @@ impl FrameReader {
         }
 
         Ok(())
-        
-
-
     }
 
     pub async fn get_next_frame(&mut self, buff: &mut Vec<u8>) -> io::Result<usize> {
@@ -165,15 +193,13 @@ impl FrameReader {
 
         Ok(sz)
     }
-
 }
-
 
 macro_rules! ok_or_exit {
     ($e: expr) => {
         match $e {
             Ok(r) => r,
-            Err(_) => return
+            Err(_) => return,
         }
     };
 }
@@ -182,7 +208,7 @@ macro_rules! some_or_exit {
     ($e: expr) => {
         match $e {
             Some(r) => r,
-            None => return
+            None => return,
         }
     };
 }
@@ -240,11 +266,7 @@ where
         }
     }
 
-    pub fn new(
-        cfg: &Config,
-        ctx: S,
-        key_store: &KeyStore,
-    ) -> Server<S> {
+    pub fn new(cfg: &Config, ctx: S, key_store: &KeyStore) -> Server<S> {
         Server {
             config: AtomicConfig::new(cfg.clone()),
             tls_certs: Server::<S>::load_certs(&cfg.net_config.tls_cert_path),
@@ -255,11 +277,7 @@ where
         }
     }
 
-    pub fn new_atomic(
-        config: AtomicConfig,
-        ctx: S,
-        key_store: AtomicKeyStore,
-    ) -> Server<S> {
+    pub fn new_atomic(config: AtomicConfig, ctx: S, key_store: AtomicKeyStore) -> Server<S> {
         Server {
             config: config.clone(),
             tls_certs: Server::<S>::load_certs(&config.get().net_config.tls_cert_path),
@@ -284,7 +302,7 @@ where
     pub async fn handle_auth(
         server: Arc<Self>,
         stream: &mut TlsStream<TcpStream>,
-        addr: core::net::SocketAddr
+        addr: core::net::SocketAddr,
     ) -> io::Result<(SenderType, bool, u64)> {
         let mut sender = SenderType::Anon;
         let mut reply_chan = false;
@@ -305,7 +323,6 @@ where
             };
             sender = SenderType::Auth(name, client_sub_id);
         };
-        
 
         Ok((sender, reply_chan, client_sub_id))
     }
@@ -315,7 +332,7 @@ where
         stream: TlsStream<TcpStream>,
         stream_out: Option<TlsStream<TcpStream>>,
         addr: core::net::SocketAddr,
-        sender: SenderType
+        sender: SenderType,
     ) -> io::Result<()> {
         let (rx, mut _tx) = split(stream);
         let mut read_buf = vec![0u8; server.config.get().rpc_config.recv_buffer_size as usize];
@@ -328,27 +345,28 @@ where
         let mut rx_buf = FrameReader::new(rx);
         let (ack_tx, mut ack_rx) = mpsc::channel(1000);
         let (resp_tx, mut resp_rx) = mpsc::channel(1000);
-        
+
         let server2 = server.clone();
         let hndl = tokio::spawn(async move {
             while let Some(resp) = resp_rx.recv().await {
-                if let Ok(RespType::Resp) = resp {            
+                if let Ok(RespType::Resp) = resp {
                     debug!("Waiting for response!");
                     let mref: (PinnedMessage, LatencyProfile) = some_or_exit!(ack_rx.recv().await);
                     let mref = mref.0.as_ref();
-                    if let Err(_) = tx_buf.write_u32(mref.1 as u32).await { break; }
-                    if let Err(_) = tx_buf.write_all(&mref.0[..mref.1]).await { break; };
+                    if let Err(_) = tx_buf.write_u32(mref.1 as u32).await {
+                        break;
+                    }
+                    if let Err(_) = tx_buf.write_all(&mref.0[..mref.1]).await {
+                        break;
+                    };
                     match tx_buf.flush().await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => {
                             warn!("Error sending response: {}", e);
                             break;
                         }
                     };
-
-                }
-
-                else if let Ok(RespType::RespAndTrack) = resp {            
+                } else if let Ok(RespType::RespAndTrack) = resp {
                     debug!("Waiting for response!");
                     let (mref, mut profile) = some_or_exit!(ack_rx.recv().await);
                     profile.register("Ack Received");
@@ -356,19 +374,16 @@ where
                     ok_or_exit!(tx_buf.write_u32(mref.1 as u32).await);
                     ok_or_exit!(tx_buf.write_all(&mref.0[..mref.1]).await);
                     match tx_buf.flush().await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => {
                             warn!("Error sending response: {}", e);
                             break;
                         }
                     };
-
 
                     profile.register("Ack sent");
                     profile.print();
-                }
-
-                else if let Ok(RespType::RespAndTrackAndReconf) = resp {            
+                } else if let Ok(RespType::RespAndTrackAndReconf) = resp {
                     debug!("Waiting for response!");
                     let (mref, mut profile) = some_or_exit!(ack_rx.recv().await);
                     profile.register("Ack Received");
@@ -376,13 +391,12 @@ where
                     ok_or_exit!(tx_buf.write_u32(mref.1 as u32).await);
                     ok_or_exit!(tx_buf.write_all(&mref.0[..mref.1]).await);
                     match tx_buf.flush().await {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(e) => {
                             warn!("Error sending response: {}", e);
                             break;
                         }
                     };
-
 
                     profile.register("Ack sent");
                     profile.print();
@@ -391,18 +405,14 @@ where
                     let new_keys = server2.ctx.get_server_keys();
                     info!("Resp to: {:?}, Resp: {:?}", mref.2, mref.0);
                     server2.key_store.set(new_keys.as_ref().clone());
-
-
-                }
-
-                else if let Ok(RespType::NoRespAndReconf) = resp {
+                } else if let Ok(RespType::NoRespAndReconf) = resp {
                     // Reconfigure the server to use the new public keys.
                     let new_keys = server2.ctx.get_server_keys();
                     server2.key_store.set(new_keys.as_ref().clone());
                 }
             }
         });
-        
+
         loop {
             // Message format: Size(u32) | Message
             // Message size capped at 4GiB.
@@ -414,18 +424,19 @@ where
                 Err(e) => {
                     debug!("Encountered error while reading frame: {}", e);
                     return Err(e);
-                },
+                }
             };
-            
-            let resp = server.ctx.handle_rpc(MessageRef::from(&read_buf, sz, &sender), ack_tx.clone()).await;
+
+            let resp = server
+                .ctx
+                .handle_rpc(MessageRef::from(&read_buf, sz, &sender), ack_tx.clone())
+                .await;
             if let Err(e) = resp {
                 warn!("Dropping connection: {}", e);
                 break;
             }
 
             let _ = resp_tx.send(resp).await;
-
-            
         }
 
         hndl.abort();
@@ -459,10 +470,11 @@ where
             let acceptor = tls_acceptor.clone();
             let server_ = server.clone();
             let mut stream = acceptor.accept(socket).await?;
-            let (sender, is_reply_chan, client_sub_id) = Self::handle_auth(server.clone(), &mut stream, addr).await?;
-            
+            let (sender, is_reply_chan, client_sub_id) =
+                Self::handle_auth(server.clone(), &mut stream, addr).await?;
+
             let map_name = sender.to_string() + "#" + &client_sub_id.to_string();
-            
+
             if is_reply_chan {
                 parked_streams.insert(map_name, stream);
                 continue;

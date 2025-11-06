@@ -21,12 +21,11 @@ pub use perf::*;
 
 pub mod timer;
 
-
 pub mod channel {
     mod channel_tokio {
         pub type Sender<T> = tokio::sync::mpsc::Sender<T>;
         pub type Receiver<T> = tokio::sync::mpsc::Receiver<T>;
-    
+
         pub fn make_channel<T>(buffer: usize) -> (Sender<T>, Receiver<T>) {
             tokio::sync::mpsc::channel(buffer)
         }
@@ -34,7 +33,10 @@ pub mod channel {
 
     mod channel_async {
         #[cfg(feature = "perf")]
-        use std::{sync::{atomic::AtomicUsize, Arc}, time::Instant};
+        use std::{
+            sync::{atomic::AtomicUsize, Arc},
+            time::Instant,
+        };
 
         #[cfg(not(feature = "perf"))]
         pub struct AsyncSenderWrapper<T>(async_channel::Sender<T>);
@@ -51,11 +53,10 @@ pub mod channel {
         #[derive(Clone)]
         pub struct AsyncReceiverWrapper<T>(async_channel::Receiver<T>);
 
-
         #[cfg(feature = "perf")]
         #[derive(Clone)]
         pub struct AsyncReceiverWrapper<T>(async_channel::Receiver<(Instant, T)>, Arc<AtomicUsize>);
-        
+
         impl<T> AsyncReceiverWrapper<T> {
             pub async fn recv(&self) -> Option<T> {
                 match self.0.recv().await {
@@ -78,37 +79,34 @@ pub mod channel {
             }
         }
 
-        impl <T> AsyncSenderWrapper<T> {
-
+        impl<T> AsyncSenderWrapper<T> {
             #[cfg(not(feature = "perf"))]
             pub async fn send(&self, e: T) -> Result<(), async_channel::SendError<T>> {
                 self.0.send(e).await
-
             }
 
             #[cfg(feature = "perf")]
             pub async fn send(&self, e: T) -> Result<(), async_channel::SendError<(Instant, T)>> {
                 self.0.send((Instant::now(), e)).await
             }
-
-
         }
-
 
         pub type Sender<T> = AsyncSenderWrapper<T>;
         pub type Receiver<T> = AsyncReceiverWrapper<T>;
-    
+
         pub fn make_channel<T>(buffer: usize) -> (Sender<T>, Receiver<T>) {
             let (tx, rx) = async_channel::bounded(buffer);
 
             #[cfg(feature = "perf")]
-            return (AsyncSenderWrapper(tx), AsyncReceiverWrapper(rx, Arc::new(AtomicUsize::new(0))));
+            return (
+                AsyncSenderWrapper(tx),
+                AsyncReceiverWrapper(rx, Arc::new(AtomicUsize::new(0))),
+            );
 
             #[cfg(not(feature = "perf"))]
             (AsyncSenderWrapper(tx), AsyncReceiverWrapper(rx))
         }
     }
-
 
     /// Kanal doesn't seem to have ordered delivery sometimes.
     mod channel_kanal {
@@ -123,7 +121,7 @@ pub mod channel {
         }
         pub type Sender<T> = kanal::AsyncSender<T>;
         pub type Receiver<T> = AsyncReceiverWrapper<T>;
-    
+
         pub fn make_channel<T>(buffer: usize) -> (Sender<T>, Receiver<T>) {
             let (tx, rx) = kanal::bounded_async(buffer);
             (tx, AsyncReceiverWrapper(rx))
@@ -131,5 +129,4 @@ pub mod channel {
     }
 
     pub use channel_async::*;
-
 }

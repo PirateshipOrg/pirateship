@@ -6,7 +6,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use tokio::{join, time::sleep};
 
-use crate::config::{AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, EvilConfig, KVReadWriteUniform, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig};
+use crate::config::{
+    AppConfig, ClientConfig, ClientNetConfig, ClientRpcConfig, Config, ConsensusConfig, EvilConfig,
+    KVReadWriteUniform, NetConfig, NodeNetInfo, RocksDBConfig, RpcConfig, WorkloadConfig,
+};
 
 use super::AtomicConfig;
 
@@ -64,7 +67,6 @@ fn test_nodeconfig_serialize() {
 
         #[cfg(feature = "platforms")]
         liveness_u: 1,
-
     };
 
     let app_config = AppConfig {
@@ -82,9 +84,9 @@ fn test_nodeconfig_serialize() {
         rpc_config,
         consensus_config,
         app_config,
-        
+
         #[cfg(feature = "evil")]
-        evil_config
+        evil_config,
     };
 
     let s = config.serialize();
@@ -143,7 +145,7 @@ fn test_clientconfig_serialize() {
                 write_byz_commit_ratio: 0.5,
             }),
         },
-        full_duplex: false
+        full_duplex: false,
     };
     let s = config.serialize();
     println!("{}", s);
@@ -249,7 +251,11 @@ async fn test_atomic_config_access() {
     unsafe {
         let ptr1 = atomic_config.0.as_ptr().as_ref().unwrap();
         let ptr2 = atomic_config2.0.as_ptr().as_ref().unwrap();
-        println!("{:?}\n{:?}", std::ptr::addr_of!(ptr1), std::ptr::addr_of!(ptr2));
+        println!(
+            "{:?}\n{:?}",
+            std::ptr::addr_of!(ptr1),
+            std::ptr::addr_of!(ptr2)
+        );
     }
 
     let handle1 = tokio::spawn(async move {
@@ -261,7 +267,6 @@ async fn test_atomic_config_access() {
                 got_different = true;
             }
             sleep(Duration::from_millis(1)).await;
-
         }
 
         assert!(got_different);

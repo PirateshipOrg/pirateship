@@ -1,11 +1,18 @@
 use std::time::{Duration, Instant};
 
+use pft::config::{
+    AppConfig, AtomicConfig, Config, ConsensusConfig, NetConfig, RocksDBConfig, RpcConfig,
+    StorageConfig,
+};
 use pft::crypto::{AtomicKeyStore, CryptoService, CryptoServiceConnector, KeyStore};
-use pft::config::{AtomicConfig, Config, NetConfig, RpcConfig, ConsensusConfig, AppConfig, StorageConfig, RocksDBConfig};
 use std::collections::HashMap;
 use tokio::task::JoinSet;
 
-async fn hash_worker(mut crypto: CryptoServiceConnector, payload_size: usize, iter_num: usize) -> Vec<Duration> {
+async fn hash_worker(
+    mut crypto: CryptoServiceConnector,
+    payload_size: usize,
+    iter_num: usize,
+) -> Vec<Duration> {
     let payload = vec![2u8; payload_size];
 
     let mut latencies = Vec::with_capacity(iter_num);
@@ -18,7 +25,11 @@ async fn hash_worker(mut crypto: CryptoServiceConnector, payload_size: usize, it
     latencies
 }
 
-async fn sign_worker(mut crypto: CryptoServiceConnector, payload_size: usize, iter_num: usize) -> Vec<Duration> {
+async fn sign_worker(
+    mut crypto: CryptoServiceConnector,
+    payload_size: usize,
+    iter_num: usize,
+) -> Vec<Duration> {
     let payload = vec![2u8; payload_size];
 
     let mut latencies = Vec::with_capacity(iter_num);
@@ -31,7 +42,11 @@ async fn sign_worker(mut crypto: CryptoServiceConnector, payload_size: usize, it
     latencies
 }
 
-async fn verify_worker(mut crypto: CryptoServiceConnector, payload_size: usize, iter_num: usize) -> Vec<Duration> {
+async fn verify_worker(
+    mut crypto: CryptoServiceConnector,
+    payload_size: usize,
+    iter_num: usize,
+) -> Vec<Duration> {
     let payload = vec![2u8; payload_size];
 
     let mut latencies = Vec::with_capacity(iter_num);
@@ -45,7 +60,11 @@ async fn verify_worker(mut crypto: CryptoServiceConnector, payload_size: usize, 
     latencies
 }
 
-async fn verify_fail_worker(mut crypto: CryptoServiceConnector, payload_size: usize, iter_num: usize) -> Vec<Duration> {
+async fn verify_fail_worker(
+    mut crypto: CryptoServiceConnector,
+    payload_size: usize,
+    iter_num: usize,
+) -> Vec<Duration> {
     let payload = vec![2u8; payload_size];
 
     let mut latencies = Vec::with_capacity(iter_num);
@@ -109,7 +128,11 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         },
     };
 
-    let mut crypto_service = CryptoService::new(num_tasks, AtomicKeyStore::new(key_store), AtomicConfig::new(config));
+    let mut crypto_service = CryptoService::new(
+        num_tasks,
+        AtomicKeyStore::new(key_store),
+        AtomicConfig::new(config),
+    );
     crypto_service.run();
 
     const ITER_NUM: usize = 1_000;
@@ -118,13 +141,11 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
 
     for payload_size in PAYLOAD_SIZES {
         let mut handles = JoinSet::new();
-    
+
         let start = Instant::now();
         for _ in 0..WORKER_NUM {
             let crypto = crypto_service.get_connector();
-            handles.spawn(async move {
-                hash_worker(crypto, payload_size, ITER_NUM).await
-            });
+            handles.spawn(async move { hash_worker(crypto, payload_size, ITER_NUM).await });
         }
 
         let results = handles.join_all().await;
@@ -140,21 +161,19 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         latencies.sort();
         let min_latency = latencies.first().unwrap().as_nanos();
         let max_latency = latencies.last().unwrap().as_nanos();
-        let avg_latency = (latencies.iter().fold(0u128, |acc, x| { acc + x.as_nanos() }) as f64) / (latencies.len() as f64); 
-
+        let avg_latency = (latencies.iter().fold(0u128, |acc, x| acc + x.as_nanos()) as f64)
+            / (latencies.len() as f64);
 
         println!("Workers: {} Payload size: {} Hash Throughput: {} req/s Latency min: {} max: {} mean: {} ns", num_tasks, payload_size, tput, min_latency, max_latency, avg_latency);
     }
 
     for payload_size in PAYLOAD_SIZES {
         let mut handles = JoinSet::new();
-    
+
         let start = Instant::now();
         for _ in 0..WORKER_NUM {
             let crypto = crypto_service.get_connector();
-            handles.spawn(async move {
-                sign_worker(crypto, payload_size, ITER_NUM).await
-            });
+            handles.spawn(async move { sign_worker(crypto, payload_size, ITER_NUM).await });
         }
 
         let results = handles.join_all().await;
@@ -170,21 +189,19 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         latencies.sort();
         let min_latency = latencies.first().unwrap().as_nanos();
         let max_latency = latencies.last().unwrap().as_nanos();
-        let avg_latency = (latencies.iter().fold(0u128, |acc, x| { acc + x.as_nanos() }) as f64) / (latencies.len() as f64); 
-
+        let avg_latency = (latencies.iter().fold(0u128, |acc, x| acc + x.as_nanos()) as f64)
+            / (latencies.len() as f64);
 
         println!("Workers: {} Payload size: {} Sign Throughput: {} req/s Latency min: {} max: {} mean: {} ns", num_tasks, payload_size, tput, min_latency, max_latency, avg_latency);
     }
 
     for payload_size in PAYLOAD_SIZES {
         let mut handles = JoinSet::new();
-    
+
         let start = Instant::now();
         for _ in 0..WORKER_NUM {
             let crypto = crypto_service.get_connector();
-            handles.spawn(async move {
-                verify_worker(crypto, payload_size, ITER_NUM).await
-            });
+            handles.spawn(async move { verify_worker(crypto, payload_size, ITER_NUM).await });
         }
 
         let results = handles.join_all().await;
@@ -200,21 +217,19 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         latencies.sort();
         let min_latency = latencies.first().unwrap().as_nanos();
         let max_latency = latencies.last().unwrap().as_nanos();
-        let avg_latency = (latencies.iter().fold(0u128, |acc, x| { acc + x.as_nanos() }) as f64) / (latencies.len() as f64); 
-
+        let avg_latency = (latencies.iter().fold(0u128, |acc, x| acc + x.as_nanos()) as f64)
+            / (latencies.len() as f64);
 
         println!("Workers: {} Payload size: {} Verify Throughput: {} req/s Latency min: {} max: {} mean: {} ns", num_tasks, payload_size, tput, min_latency, max_latency, avg_latency);
     }
 
     for payload_size in PAYLOAD_SIZES {
         let mut handles = JoinSet::new();
-    
+
         let start = Instant::now();
         for _ in 0..WORKER_NUM {
             let crypto = crypto_service.get_connector();
-            handles.spawn(async move {
-                verify_fail_worker(crypto, payload_size, ITER_NUM).await
-            });
+            handles.spawn(async move { verify_fail_worker(crypto, payload_size, ITER_NUM).await });
         }
 
         let results = handles.join_all().await;
@@ -230,15 +245,13 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         latencies.sort();
         let min_latency = latencies.first().unwrap().as_nanos();
         let max_latency = latencies.last().unwrap().as_nanos();
-        let avg_latency = (latencies.iter().fold(0u128, |acc, x| { acc + x.as_nanos() }) as f64) / (latencies.len() as f64); 
-
+        let avg_latency = (latencies.iter().fold(0u128, |acc, x| acc + x.as_nanos()) as f64)
+            / (latencies.len() as f64);
 
         println!("Workers: {} Payload size: {} Verify_Fail Throughput: {} req/s Latency min: {} max: {} mean: {} ns", num_tasks, payload_size, tput, min_latency, max_latency, avg_latency);
     }
 
     crypto_service.get_connector().kill().await;
-
-
 }
 
 #[tokio::main]

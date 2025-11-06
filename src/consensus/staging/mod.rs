@@ -1,20 +1,47 @@
-use std::{cell::RefCell, collections::{HashMap, HashSet, VecDeque}, io::Error, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet, VecDeque},
+    io::Error,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::{future::BoxFuture, stream::FuturesOrdered, StreamExt as _};
 use log::{debug, error, info, trace, warn};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote}, rpc::{client::PinnedClient, SenderType}, utils::{channel::{Receiver, Sender}, timer::ResettableTimer, PerfCounter, StorageAck}};
+use crate::{
+    config::AtomicConfig,
+    crypto::{CachedBlock, CryptoServiceConnector},
+    proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote},
+    rpc::{client::PinnedClient, SenderType},
+    utils::{
+        channel::{Receiver, Sender},
+        timer::ResettableTimer,
+        PerfCounter, StorageAck,
+    },
+};
 
-use super::{app::AppCommand, batch_proposal::BatchProposerCommand, block_broadcaster::BlockBroadcasterCommand, block_sequencer::BlockSequencerControlCommand, client_reply::ClientReplyCommand, extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, fork_receiver::{AppendEntriesStats, ForkReceiverCommand}, logserver::{self, LogServerCommand}, pacemaker::PacemakerCommand};
+use super::{
+    app::AppCommand,
+    batch_proposal::BatchProposerCommand,
+    block_broadcaster::BlockBroadcasterCommand,
+    block_sequencer::BlockSequencerControlCommand,
+    client_reply::ClientReplyCommand,
+    extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand},
+    fork_receiver::{AppendEntriesStats, ForkReceiverCommand},
+    logserver::{self, LogServerCommand},
+    pacemaker::PacemakerCommand,
+};
 
+pub(super) mod fork_choice;
 pub(super) mod steady_state;
 pub(super) mod view_change;
-pub(super) mod fork_choice;
 
 struct CachedBlockWithVotes {
     block: CachedBlock,
-    
+
     vote_sigs: HashMap<String, ProtoSignatureArrayEntry>,
     replication_set: HashSet<String>,
 
@@ -23,7 +50,10 @@ struct CachedBlockWithVotes {
 }
 
 pub type VoteWithSender = (SenderType /* Sender */, ProtoVote);
-pub type SignatureWithBlockN = (u64 /* Block the QC was attached to */, ProtoSignatureArrayEntry);
+pub type SignatureWithBlockN = (
+    u64, /* Block the QC was attached to */
+    ProtoSignatureArrayEntry,
+);
 
 /// This is where all the consensus decisions are made.
 /// Feeds in blocks from block_broadcaster
@@ -42,7 +72,6 @@ pub struct Staging {
     config_num: u64,
     last_qc: Option<ProtoQuorumCertificate>,
     curr_parent_for_pending: Option<CachedBlock>,
-    
 
     /// Invariant: pending_blocks.len() == 0 || bci == pending_blocks.front().n - 1
     pending_blocks: VecDeque<CachedBlockWithVotes>,
@@ -52,7 +81,12 @@ pub struct Staging {
 
     view_change_timer: Arc<Pin<Box<ResettableTimer>>>,
 
-    block_rx: Receiver<(CachedBlock, oneshot::Receiver<StorageAck>, AppendEntriesStats, bool /* this_is_final_block */)>,
+    block_rx: Receiver<(
+        CachedBlock,
+        oneshot::Receiver<StorageAck>,
+        AppendEntriesStats,
+        bool, /* this_is_final_block */
+    )>,
     vote_rx: Receiver<VoteWithSender>,
     pacemaker_rx: Receiver<PacemakerCommand>,
     pacemaker_tx: Sender<PacemakerCommand>,
@@ -89,7 +123,7 @@ impl Staging {
             CachedBlock,
             oneshot::Receiver<StorageAck>,
             AppendEntriesStats,
-            bool /* this_is_final_block */
+            bool, /* this_is_final_block */
         )>,
         vote_rx: Receiver<VoteWithSender>,
         pacemaker_rx: Receiver<PacemakerCommand>,
@@ -103,11 +137,11 @@ impl Staging {
         batch_proposer_command_tx: Sender<BatchProposerCommand>,
         logserver_tx: Sender<LogServerCommand>,
 
-        #[cfg(feature = "extra_2pc")]
-        two_pc_command_tx: Sender<TwoPCCommand>,
+        #[cfg(feature = "extra_2pc")] two_pc_command_tx: Sender<TwoPCCommand>,
 
-        #[cfg(feature = "extra_2pc")]
-        engraft_2pc_futures_rx: Receiver<EngraftActionAfterFutureDone>,
+        #[cfg(feature = "extra_2pc")] engraft_2pc_futures_rx: Receiver<
+            EngraftActionAfterFutureDone,
+        >,
     ) -> Self {
         let _config = config.get();
         let _chan_depth = _config.rpc_config.channel_depth as usize;
@@ -167,7 +201,6 @@ impl Staging {
 
             #[cfg(feature = "extra_2pc")]
             engraft_2pc_futures_rx,
-
         };
 
         #[cfg(not(feature = "view_change"))]

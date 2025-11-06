@@ -1,22 +1,39 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, KeyStore}, utils::{channel::make_channel, AtomicStruct}};
+use crate::{
+    config::{AtomicConfig, Config},
+    crypto::{AtomicKeyStore, KeyStore},
+    utils::{channel::make_channel, AtomicStruct},
+};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use log::{debug, info, trace, warn};
 use rustls::{crypto::aws_lc_rs, pki_types, RootCertStore};
 use serde_cbor::ser::SliceWrite;
+use std::time::Instant;
 use std::{
-    collections::{HashMap, HashSet}, fs::File, future::Future, io::{self, BufReader, Cursor, Error, ErrorKind}, ops::{Deref, DerefMut}, path, pin::Pin, sync::{atomic::{AtomicUsize, Ordering}, Arc}, time::Duration
+    collections::{HashMap, HashSet},
+    fs::File,
+    future::Future,
+    io::{self, BufReader, Cursor, Error, ErrorKind},
+    ops::{Deref, DerefMut},
+    path,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 use tokio::{
     io::{split, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf},
     net::TcpStream,
     sync::{
-        mpsc::{self, Sender, UnboundedSender}, oneshot, Mutex, RwLock
-    }, time::{sleep, timeout},
+        mpsc::{self, Sender, UnboundedSender},
+        oneshot, Mutex, RwLock,
+    },
+    time::{sleep, timeout},
 };
-use std::time::Instant;
 use tokio_rustls::{client::TlsStream, rustls, TlsConnector};
 
 use super::{auth, server::LatencyProfile, MessageRef, PinnedMessage};
@@ -44,7 +61,7 @@ struct BufferedTlsStream {
     write_buffer: Vec<u8>,
     write_offset: usize,
     offset: usize,
-    bound: usize
+    bound: usize,
 }
 
 impl BufferedTlsStream {
@@ -57,12 +74,14 @@ impl BufferedTlsStream {
             write_buffer: vec![0u8; 8192],
             bound: 0,
             offset: 0,
-            write_offset: 0
+            write_offset: 0,
         }
     }
 
     pub async fn flush_write_buffer(&mut self) -> Result<(), Error> {
-        self.stream_tx.write_all(&self.write_buffer[..self.write_offset]).await?;
+        self.stream_tx
+            .write_all(&self.write_buffer[..self.write_offset])
+            .await?;
         if self.write_offset > 0 && self.write_offset < self.write_buffer.len() {
             trace!("Flush underfull: {}", self.write_offset);
         } else if self.write_offset == self.write_buffer.len() {
@@ -82,14 +101,11 @@ impl BufferedTlsStream {
                 self.flush_write_buffer().await?;
                 continue;
             }
-            let to_write = if n < space_left {
-                n
-            } else {
-                space_left
-            };
-            
+            let to_write = if n < space_left { n } else { space_left };
+
             // info!("self.write_offset = {}, to_write = {}, len = {}", self.write_offset, to_write, len);
-            self.write_buffer[self.write_offset..][..to_write].copy_from_slice(&buff[(len - n)..(len - n + to_write)]);
+            self.write_buffer[self.write_offset..][..to_write]
+                .copy_from_slice(&buff[(len - n)..(len - n + to_write)]);
             n -= to_write;
             self.write_offset += to_write;
         }
@@ -111,20 +127,24 @@ impl BufferedTlsStream {
             if self.bound == self.offset {
                 // Need to fetch more data.
                 let read_n = self.stream_rx.read(self.buffer.as_mut()).await?;
-                debug!("Fetched {} bytes, Need to fetch {} bytes, pos {}, Currently at: {}", read_n, get_n, pos, n);
+                debug!(
+                    "Fetched {} bytes, Need to fetch {} bytes, pos {}, Currently at: {}",
+                    read_n, get_n, pos, n
+                );
                 self.bound = read_n;
                 self.offset = 0;
             }
 
             if self.bound - self.offset >= n {
                 // Copy in full
-                v[pos..][..n].copy_from_slice(&self.buffer[self.offset..self.offset+n]);
+                v[pos..][..n].copy_from_slice(&self.buffer[self.offset..self.offset + n]);
                 self.offset += n;
                 n = 0;
-            }else{
+            } else {
                 // Copy partial.
                 // We'll get the rest in the next iteration of the loop.
-                v[pos..][..self.bound - self.offset].copy_from_slice(&self.buffer[self.offset..self.bound]);
+                v[pos..][..self.bound - self.offset]
+                    .copy_from_slice(&self.buffer[self.offset..self.bound]);
                 n -= self.bound - self.offset;
                 pos += self.bound - self.offset;
                 self.offset = self.bound;
@@ -132,9 +152,6 @@ impl BufferedTlsStream {
         }
 
         Ok(())
-        
-
-
     }
 
     pub async fn get_next_frame(&mut self, buff: &mut Vec<u8>) -> io::Result<usize> {
@@ -152,7 +169,6 @@ impl BufferedTlsStream {
 
         Ok(sz)
     }
-
 }
 
 impl Deref for BufferedTlsStream {
@@ -187,7 +203,8 @@ pub struct Client {
     pub tls_ca_root_cert: RootCertStore,
     pub sock_map: PinnedHashMap<String, PinnedTlsStream>,
     pub chan_map: PinnedHashMap<String, Sender<(PinnedMessage, LatencyProfile)>>,
-    pub replying_chan_map: PinnedHashMap<String, Sender<(PinnedMessage, oneshot::Sender<PinnedMessage>)>>,
+    pub replying_chan_map:
+        PinnedHashMap<String, Sender<(PinnedMessage, oneshot::Sender<PinnedMessage>)>>,
     pub worker_ready: PinnedHashSet<String>,
     pub key_store: AtomicKeyStore,
     do_auth: bool,
@@ -230,7 +247,12 @@ impl Client {
         }
         root_cert_store
     }
-    pub fn new(cfg: &Config, key_store: &KeyStore, full_duplex: bool, client_sub_id: u64) -> Client {
+    pub fn new(
+        cfg: &Config,
+        key_store: &KeyStore,
+        full_duplex: bool,
+        client_sub_id: u64,
+    ) -> Client {
         Client {
             config: AtomicConfig::new(cfg.clone()),
             full_duplex,
@@ -247,12 +269,19 @@ impl Client {
         }
     }
 
-    pub fn new_atomic(config: AtomicConfig, key_store: AtomicKeyStore, full_duplex: bool, client_sub_id: u64) -> Client {
+    pub fn new_atomic(
+        config: AtomicConfig,
+        key_store: AtomicKeyStore,
+        full_duplex: bool,
+        client_sub_id: u64,
+    ) -> Client {
         Client {
             config: config.clone(),
             full_duplex,
             client_sub_id,
-            tls_ca_root_cert: Client::load_root_ca_cert(&config.get().net_config.tls_root_ca_cert_path),
+            tls_ca_root_cert: Client::load_root_ca_cert(
+                &config.get().net_config.tls_root_ca_cert_path,
+            ),
             sock_map: PinnedHashMap::new(),
             do_auth: true,
             chan_map: PinnedHashMap::new(),
@@ -286,7 +315,6 @@ impl Client {
     }
 }
 
-
 impl PinnedClient {
     fn get_reply_name(client: &PinnedClient, name: &String) -> String {
         if client.0.full_duplex {
@@ -296,7 +324,10 @@ impl PinnedClient {
         }
     }
 
-    async fn connect(client: &PinnedClient, name: &String) -> Result<(PinnedTlsStream, Option<PinnedTlsStream>), Error> {
+    async fn connect(
+        client: &PinnedClient,
+        name: &String,
+    ) -> Result<(PinnedTlsStream, Option<PinnedTlsStream>), Error> {
         let cfg = client.0.config.get();
         debug!("(Re)establishing connection to: {}", name);
         debug!("Node list: {:?}", cfg.net_config.nodes);
@@ -327,10 +358,14 @@ impl PinnedClient {
         let mut stream = connector.connect(domain, stream).await?;
 
         if client.0.do_auth {
-            auth::handshake_client(&client, &mut stream, client.0.full_duplex, client.0.client_sub_id).await?;
+            auth::handshake_client(
+                &client,
+                &mut stream,
+                client.0.full_duplex,
+                client.0.client_sub_id,
+            )
+            .await?;
         }
-
-
 
         let stream_safe = PinnedTlsStream::new(stream.into());
         let reply_name = Self::get_reply_name(client, name);
@@ -350,7 +385,7 @@ impl PinnedClient {
             auth::handshake_client(&client, &mut stream2, false, client.0.client_sub_id).await?;
             let _s = PinnedTlsStream::new(stream2.into());
             sock_map.insert(name.clone(), _s.clone());
-            Some(_s)            
+            Some(_s)
         } else {
             None
         };
@@ -360,11 +395,15 @@ impl PinnedClient {
         } else {
             Ok((stream_safe, None))
         }
-    
+
         // Ok((stream_safe, stream_reply))
     }
 
-    async fn get_sock(client: &PinnedClient, name: &String, is_reply_chan: bool) -> Result<PinnedTlsStream, Error> {
+    async fn get_sock(
+        client: &PinnedClient,
+        name: &String,
+        is_reply_chan: bool,
+    ) -> Result<PinnedTlsStream, Error> {
         // Is there an open connection?
         let mut sock: Option<PinnedTlsStream> = None;
         {
@@ -470,10 +509,7 @@ impl PinnedClient {
         Ok(())
     }
 
-    pub async fn force_flush<'b>(
-        client: &PinnedClient,
-        name: &String
-    ) -> Result<(), Error> {
+    pub async fn force_flush<'b>(client: &PinnedClient, name: &String) -> Result<(), Error> {
         let sock = Self::get_sock(client, name, false).await?;
         sock.0.lock().await.flush_write_buffer().await?;
         Ok(())
@@ -502,7 +538,7 @@ impl PinnedClient {
 
         {
             let mut lsock = sock.0.lock().await;
-            lsock.flush_write_buffer().await?;  // Need this flush; otherwise it is a deadlock.
+            lsock.flush_write_buffer().await?; // Need this flush; otherwise it is a deadlock.
         }
 
         {
@@ -518,7 +554,7 @@ impl PinnedClient {
                     "socket probably closed!",
                 ));
             }
-            
+
             Ok(PinnedMessage::from(
                 resp_buf,
                 sz as usize,
@@ -541,7 +577,7 @@ impl PinnedClient {
                 "socket probably closed!",
             ));
         }
-        
+
         Ok(PinnedMessage::from(
             resp_buf,
             sz as usize,
@@ -564,7 +600,6 @@ impl PinnedClient {
                 // TODO: Is the underlying Tcpstream readable?
                 false
             }
-        
         };
 
         if is_readable {
@@ -632,28 +667,33 @@ impl PinnedClient {
                         Err(e) => {
                             debug!("Broadcast worker dying for {}: {}", _name, e);
                             continue;
-                        },
+                        }
                     };
 
-                    break s
+                    break s;
                 };
 
                 let reply_sock = Self::get_sock(&_client, &_name, _client.0.full_duplex).await?;
                 let mut reply_sock = reply_sock.0.lock().await;
-                
-                
+
                 while rx.recv_many(&mut msgs, 10).await > 0 {
                     let mut should_die = false;
                     for (msg, reply_tx) in msgs.drain(..) {
                         let msg_ref = msg.as_ref();
 
                         let len = msg_ref.len() as u32;
-                        if let Err(e) = Self::send_raw(&_client, &_name, &sock, SendDataType::SizeType(len)).await {
+                        if let Err(e) =
+                            Self::send_raw(&_client, &_name, &sock, SendDataType::SizeType(len))
+                                .await
+                        {
                             warn!("Broadcast worker for {} dying: {}", _name, e);
                             should_die = true;
                             break;
                         }
-                        if let Err(e) = Self::send_raw(&_client, &_name, &sock, SendDataType::ByteType(msg_ref)).await {
+                        if let Err(e) =
+                            Self::send_raw(&_client, &_name, &sock, SendDataType::ByteType(msg_ref))
+                                .await
+                        {
                             warn!("Broadcast worker for {} dying: {}", _name, e);
                             should_die = true;
                             break;
@@ -669,14 +709,13 @@ impl PinnedClient {
                                 "socket probably closed!",
                             ));
                         }
-                        
+
                         let _ = reply_tx.send(PinnedMessage::from(
                             resp_buf,
                             sz as usize,
                             super::SenderType::Auth(_name.clone(), _client.0.client_sub_id),
                         ));
                     }
-                    
 
                     if should_die {
                         // info!("Broadcast worker for {} dying", _name);
@@ -708,15 +747,12 @@ impl PinnedClient {
                 receivers.push(rx);
             }
         }
-    
-        
+
         let mut result = Vec::new();
 
         let mut futures = FuturesUnordered::new();
         for rx in receivers.drain(..) {
-            futures.push(async move {
-                rx.await
-            }.boxed());
+            futures.push(async move { rx.await }.boxed());
         }
 
         let (tx, rx) = make_channel(quorum);
@@ -744,7 +780,6 @@ impl PinnedClient {
 
         Ok(result)
     }
-
 
     pub async fn reliable_send<'b>(
         client: &PinnedClient,
@@ -822,12 +857,12 @@ impl PinnedClient {
                         Err(e) => {
                             debug!("Broadcast worker dying for {}: {}", _name, e);
                             continue;
-                        },
+                        }
                     };
 
-                    break s
+                    break s;
                 };
-                
+
                 while rx.recv_many(&mut msgs, 10).await > 0 {
                     let mut should_print_flush_time = false;
                     let mut combined_prefix = String::from("");
@@ -839,19 +874,25 @@ impl PinnedClient {
 
                         let len = msg_ref.len() as u32;
                         // info!("Client for {} sending message of size: {}. Queue len: {}", _name, len, rx.len());
-                        if let Err(e) = Self::send_raw(&_client, &_name, &sock, SendDataType::SizeType(len)).await {
+                        if let Err(e) =
+                            Self::send_raw(&_client, &_name, &sock, SendDataType::SizeType(len))
+                                .await
+                        {
                             warn!("Broadcast worker for {} dying: {}", _name, e);
                             should_die = true;
                             break;
                         }
-                        if let Err(e) = Self::send_raw(&_client, &_name, &sock, SendDataType::ByteType(msg_ref)).await {
+                        if let Err(e) =
+                            Self::send_raw(&_client, &_name, &sock, SendDataType::ByteType(msg_ref))
+                                .await
+                        {
                             warn!("Broadcast worker for {} dying: {}", _name, e);
                             should_die = true;
                             break;
                         }
 
                         profile.register("Broadcast send raw");
-                
+
                         profile.prefix += &String::from(format!(" to {} ", _name));
                         if profile.should_print {
                             should_print_flush_time = true;
@@ -860,16 +901,15 @@ impl PinnedClient {
 
                         profile.print();
                         // info!("Client for {} sent message of size: {}", _name, len);
-
                     }
-                    
+
                     // let flush_time = Instant::now();
                     let _ = sock.0.lock().await.flush_write_buffer().await;
                     // info!("Client for {} flushed", _name);
-                    
+
                     // if should_print_flush_time {
-                        //     trace!("[{}] Flush time: {} us", combined_prefix, flush_time.elapsed().as_micros());
-                        // }
+                    //     trace!("[{}] Flush time: {} us", combined_prefix, flush_time.elapsed().as_micros());
+                    // }
                     msgs.clear();
 
                     if should_die {
@@ -877,8 +917,6 @@ impl PinnedClient {
                         rx.close();
                         break;
                     }
-                    
-                    
                 }
 
                 // Deregister as ready.
@@ -963,8 +1001,6 @@ impl PinnedClient {
                 client.0.slowest_peer.set(Box::new(Some(new_slowest_peer)));
             }
 
-
-
             // while let Some(res) = futs.next().await {
             //     if res.is_ok() {
             //         total_success += 1;
@@ -986,10 +1022,8 @@ impl PinnedClient {
             // if futs.len() > 0 {
             //     futs.clear();
             // }
-
-
         }
-        
+
         // let mut bcast_futs = FuturesUnordered::new();
         // {
         //     let lchans = client.0.chan_map.0.read().await;
@@ -1012,7 +1046,7 @@ impl PinnedClient {
         //                 }
         //             }
         //         }));
-                
+
         //         // let mut try_num = 0;
         //         // let max_try_num = client.0.config.get().net_config.client_max_retry;
         //         // while let Err(_) = chan.send((data.clone(), profile.clone())).await {
@@ -1054,14 +1088,11 @@ impl PinnedClient {
         // //     *lgraveyard = Some(tx);
         // // }
 
-
         // // let _ = lgraveyard.as_ref().unwrap().send(Box::pin(async move {
         // //     while bcast_futs.len() > 0 {
         // //         let _ = bcast_futs.next().await;
         // //     }
         // // }));
-
-
 
         // // let _bcast_res = chans.iter().map(|c| c.send((data.clone(), Some(Instant::now()))));
 
@@ -1069,7 +1100,6 @@ impl PinnedClient {
 
         Ok(())
     }
-
 
     pub async fn drop_connection(client: &PinnedClient, name: &String) {
         let _sock = {
@@ -1087,9 +1117,10 @@ impl PinnedClient {
 
     pub async fn drop_all_connections(client: &PinnedClient) {
         let lsock_map = client.0.sock_map.0.read().await;
-        let names = lsock_map.iter().map(|(k, _v)| {
-            k.clone()
-        }).collect::<Vec<_>>();
+        let names = lsock_map
+            .iter()
+            .map(|(k, _v)| k.clone())
+            .collect::<Vec<_>>();
         drop(lsock_map);
 
         for name in &names {

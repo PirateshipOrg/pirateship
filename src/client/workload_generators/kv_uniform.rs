@@ -1,8 +1,14 @@
 use rand::distributions::{Uniform, WeightedIndex};
-use rand_chacha::ChaCha20Rng;
 use rand::prelude::*;
+use rand_chacha::ChaCha20Rng;
 
-use crate::{config::KVReadWriteUniform, proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}};
+use crate::{
+    config::KVReadWriteUniform,
+    proto::execution::{
+        ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionPhase,
+        ProtoTransactionResult,
+    },
+};
 
 use super::{Executor, PerWorkerWorkloadGenerator, WorkloadUnit};
 
@@ -10,10 +16,10 @@ use super::{Executor, PerWorkerWorkloadGenerator, WorkloadUnit};
 enum TxOpType {
     Read,
     WriteCrash,
-    WriteByz
+    WriteByz,
 }
 
-pub struct KVReadWriteUniformGenerator { 
+pub struct KVReadWriteUniformGenerator {
     config: KVReadWriteUniform,
     rng: ChaCha20Rng,
     sample_item: [(TxOpType, i32); 3],
@@ -27,8 +33,14 @@ impl KVReadWriteUniformGenerator {
         let rng = ChaCha20Rng::seed_from_u64(210);
         let sample_item = [
             (TxOpType::Read, (config.read_ratio * 1000.0) as i32),
-            (TxOpType::WriteByz, (config.write_byz_commit_ratio * 1000.0) as i32),
-            (TxOpType::WriteCrash, ((1.0 - config.write_byz_commit_ratio - config.read_ratio) * 1000.0) as i32),
+            (
+                TxOpType::WriteByz,
+                (config.write_byz_commit_ratio * 1000.0) as i32,
+            ),
+            (
+                TxOpType::WriteCrash,
+                ((1.0 - config.write_byz_commit_ratio - config.read_ratio) * 1000.0) as i32,
+            ),
         ];
         for item in &sample_item {
             if item.1 < 0 || item.1 > 1000 {
@@ -45,9 +57,8 @@ impl KVReadWriteUniformGenerator {
             sample_item,
             weight_dist,
             uniform_dist,
-            last_request_type: TxOpType::Read
+            last_request_type: TxOpType::Read,
         }
-    
     }
 
     fn get_next_key(&mut self) -> Vec<u8> {
@@ -70,7 +81,7 @@ impl PerWorkerWorkloadGenerator for KVReadWriteUniformGenerator {
                 is_reconfiguration: false,
                 is_2pc: false,
             },
-            executor: Executor::Leader
+            executor: Executor::Leader,
         };
 
         match next_op {
@@ -79,47 +90,45 @@ impl PerWorkerWorkloadGenerator for KVReadWriteUniformGenerator {
                 ret.tx.on_receive = Some(ProtoTransactionPhase {
                     ops: vec![ProtoTransactionOp {
                         op_type: ProtoTransactionOpType::Read.into(),
-                        operands: vec![key] 
-                    }]
+                        operands: vec![key],
+                    }],
                 });
                 ret.executor = Executor::Any;
-            },
+            }
             TxOpType::WriteCrash => {
                 let key = self.get_next_key();
                 let val = vec![0u8; self.config.val_size];
                 ret.tx.on_crash_commit = Some(ProtoTransactionPhase {
                     ops: vec![ProtoTransactionOp {
                         op_type: ProtoTransactionOpType::Write.into(),
-                        operands: vec![key, val]
-                    }]
+                        operands: vec![key, val],
+                    }],
                 })
-            },
+            }
             TxOpType::WriteByz => {
                 let key = self.get_next_key();
                 let val = vec![0u8; self.config.val_size];
                 ret.tx.on_byzantine_commit = Some(ProtoTransactionPhase {
                     ops: vec![ProtoTransactionOp {
                         op_type: ProtoTransactionOpType::Write.into(),
-                        operands: vec![key, val]
-                    }]
+                        operands: vec![key, val],
+                    }],
                 })
-            },
+            }
         }
 
-
-        ret      
+        ret
     }
-    
+
     fn check_result(&mut self, result: &Option<ProtoTransactionResult>) -> bool {
         if let TxOpType::Read = self.last_request_type {
             if result.is_none() || result.as_ref().unwrap().result.len() == 0 {
                 return false;
             }
-            
+
             return true;
         }
 
         true
-
     }
 }

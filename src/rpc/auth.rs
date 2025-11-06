@@ -16,7 +16,11 @@ use tokio::{
 };
 use tokio_rustls::{client, server};
 
-use super::{client::PinnedClient, proto::auth::ProtoHandshakeResponse, server::{ServerContextType, Server}};
+use super::{
+    client::PinnedClient,
+    proto::auth::ProtoHandshakeResponse,
+    server::{Server, ServerContextType},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct HandshakeResponse {
@@ -30,7 +34,7 @@ impl HandshakeResponse {
             name: self.name.clone(),
             signature: self.signature.to_vec(),
             is_reply_channel,
-            client_sub_id
+            client_sub_id,
         };
         proto.encode_to_vec()
     }
@@ -38,10 +42,14 @@ impl HandshakeResponse {
     pub(crate) fn deserialize(arr: &Vec<u8>) -> Result<(HandshakeResponse, bool, u64), Error> {
         let proto = ProtoHandshakeResponse::decode(arr.as_slice());
         let deser = match proto {
-            Ok(d) => (HandshakeResponse {
-                name: d.name,
-                signature: Bytes::from(d.signature),
-            }, d.is_reply_channel, d.client_sub_id),
+            Ok(d) => (
+                HandshakeResponse {
+                    name: d.name,
+                    signature: Bytes::from(d.signature),
+                },
+                d.is_reply_channel,
+                d.client_sub_id,
+            ),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
@@ -72,7 +80,14 @@ fn construct_payload(nonce: u32, name: &String) -> Vec<u8> {
 pub async fn handshake_server<S>(
     server: &Arc<Server<S>>,
     stream: &mut server::TlsStream<TcpStream>,
-) -> Result<(String, bool /* is_reply_channel for full duplex */, u64 /* client sub id */), Error>
+) -> Result<
+    (
+        String,
+        bool, /* is_reply_channel for full duplex */
+        u64,  /* client sub id */
+    ),
+    Error,
+>
 where
     S: ServerContextType + Send + Sync + 'static,
 {
@@ -93,21 +108,28 @@ where
     let name = resp.0.name;
     // String::from(std::str::from_utf8(resp.name).unwrap_or(""));
     if server.key_store.get().get_pubkey(&name).is_none() {
-        return Err(Error::new(ErrorKind::InvalidData, format!("unknown peer: {}", name)));
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown peer: {}", name),
+        ));
     }
 
     let payload = construct_payload(nonce, &name);
-    let sig: &[u8; SIGNATURE_LENGTH] = resp.0
+    let sig: &[u8; SIGNATURE_LENGTH] = resp
+        .0
         .signature
         .as_ref()
         .try_into()
         .unwrap_or(&[0u8; SIGNATURE_LENGTH]);
     // Let's hope a blank signature is never a valid signature.
 
-    if !server.key_store.get().verify(&name, sig, payload.as_slice()) {
+    if !server
+        .key_store
+        .get()
+        .verify(&name, sig, payload.as_slice())
+    {
         return Err(Error::new(ErrorKind::InvalidData, "invalid signature"));
     }
-
 
     Ok((name, resp.1, resp.2))
 }
@@ -116,7 +138,7 @@ pub async fn handshake_client(
     client: &PinnedClient,
     stream: &mut client::TlsStream<TcpStream>,
     is_reply_chan: bool,
-    client_sub_id: u64
+    client_sub_id: u64,
 ) -> Result<(), Error> {
     let nonce = stream.read_u32().await?;
     debug!("Received nonce: {}", nonce);

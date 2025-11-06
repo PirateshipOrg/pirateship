@@ -1,11 +1,23 @@
 use std::{sync::Arc, time::Duration};
 
-use pft::{client::{logger::{ClientStatLogger, ClientWorkerStat}, worker::ClientWorker, workload_generators::{BlankWorkloadGenerator, KVReadWriteUniformGenerator, KVReadWriteYCSBGenerator, MockSQLGenerator, PerWorkerWorkloadGenerator}}, config::{default_log4rs_config, ClientConfig, RequestConfig}, crypto::KeyStore, rpc::client::{Client, PinnedClient}, utils::channel::make_channel};
+use pft::{
+    client::{
+        logger::{ClientStatLogger, ClientWorkerStat},
+        worker::ClientWorker,
+        workload_generators::{
+            BlankWorkloadGenerator, KVReadWriteUniformGenerator, KVReadWriteYCSBGenerator,
+            MockSQLGenerator, PerWorkerWorkloadGenerator,
+        },
+    },
+    config::{default_log4rs_config, ClientConfig, RequestConfig},
+    crypto::KeyStore,
+    rpc::client::{Client, PinnedClient},
+    utils::channel::make_channel,
+};
 use tokio::{sync::Mutex, task::JoinSet};
 
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
-
 
 fn process_args() -> ClientConfig {
     macro_rules! usage_str {
@@ -42,7 +54,12 @@ async fn main() -> std::io::Result<()> {
 
     let (stat_tx, stat_rx) = make_channel(1000);
 
-    let mut stat_worker = ClientStatLogger::new(stat_rx, Duration::from_millis(1000), Duration::from_secs(1), Duration::from_secs(config.workload_config.duration));
+    let mut stat_worker = ClientStatLogger::new(
+        stat_rx,
+        Duration::from_millis(1000),
+        Duration::from_secs(1),
+        Duration::from_secs(config.workload_config.duration),
+    );
     client_handles.spawn(async move {
         stat_worker.run().await;
     });
@@ -51,30 +68,34 @@ async fn main() -> std::io::Result<()> {
         let config = config.clone();
         let keys = keys.clone();
         let _stat_tx = stat_tx.clone();
-        let client = Client::new(&config.fill_missing(), &keys, config.full_duplex, id as u64).into();
+        let client =
+            Client::new(&config.fill_missing(), &keys, config.full_duplex, id as u64).into();
         match config.workload_config.request_config {
             RequestConfig::Blanks => {
-                let generator = BlankWorkloadGenerator{};
+                let generator = BlankWorkloadGenerator {};
                 let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
                 ClientWorker::launch(worker, &mut client_handles).await;
-            },
+            }
             RequestConfig::KVReadWriteUniform(kvread_write_uniform) => {
                 let generator = KVReadWriteUniformGenerator::new(&kvread_write_uniform.clone());
                 let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
                 ClientWorker::launch(worker, &mut client_handles).await;
-            },
+            }
             RequestConfig::KVReadWriteYCSB(kvread_write_ycsb) => {
-                let generator = KVReadWriteYCSBGenerator::new(&kvread_write_ycsb, id, config.workload_config.num_clients);
+                let generator = KVReadWriteYCSBGenerator::new(
+                    &kvread_write_ycsb,
+                    id,
+                    config.workload_config.num_clients,
+                );
                 let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
                 ClientWorker::launch(worker, &mut client_handles).await;
-            },
+            }
             RequestConfig::MockSQL() => {
                 let generator = MockSQLGenerator::new();
                 let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
                 ClientWorker::launch(worker, &mut client_handles).await;
-            },
+            }
         };
-        
     }
 
     client_handles.join_all().await;

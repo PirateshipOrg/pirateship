@@ -24,8 +24,8 @@ pub struct AuthToken {
     pub valid_until: String,
     pub username: String,
     pub signature: String,
-    pub leader_name: String, 
-    pub version: u32,           // Optional, new total ordered version that can be used to store secrets atomically.
+    pub leader_name: String,
+    pub version: u32, // Optional, new total ordered version that can be used to store secrets atomically.
 }
 
 #[derive(Deserialize)]

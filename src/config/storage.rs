@@ -9,8 +9,6 @@ pub struct RocksDBConfig {
     pub write_buffer_size: usize,
     pub max_write_buffer_number: i32,
     pub max_write_buffers_to_merge: i32,
-
-
 }
 
 impl Default for RocksDBConfig {
@@ -19,7 +17,7 @@ impl Default for RocksDBConfig {
             db_path: String::from("/tmp/testdb"),
             write_buffer_size: 512 * 1024 * 1024,
             max_write_buffer_number: 8,
-            max_write_buffers_to_merge: 4
+            max_write_buffers_to_merge: 4,
         }
     }
 }
@@ -27,7 +25,7 @@ impl Default for RocksDBConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileStorageConfig {
     pub db_path: String,
-    pub memtable_size: usize
+    pub memtable_size: usize,
 }
 
 impl Default for FileStorageConfig {
@@ -39,10 +37,8 @@ impl Default for FileStorageConfig {
     }
 }
 
-
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum StorageConfig {
     RocksDB(RocksDBConfig),
-    FileStorage(FileStorageConfig)
+    FileStorage(FileStorageConfig),
 }

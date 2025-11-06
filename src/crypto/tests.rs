@@ -50,20 +50,20 @@ fn test_lock_free() {
     }
 }
 
-
 #[tokio::test]
 async fn test_crypto_service() {
     let cfg_path = "configs/node1_config.json";
     let cfg_contents = std::fs::read_to_string(cfg_path).expect("Invalid file path");
 
     let config = Config::deserialize(&cfg_contents);
-    
+
     let key_store = KeyStore::new(
         &String::from("configs/signing_pub_keys.keylist"),
         &String::from("configs/node1_signing_privkey.pem"),
     );
 
-    let mut crypto_service = CryptoService::new(8, AtomicKeyStore::new(key_store), AtomicConfig::new(config));
+    let mut crypto_service =
+        CryptoService::new(8, AtomicKeyStore::new(key_store), AtomicConfig::new(config));
     crypto_service.run();
 
     let mut crypto = crypto_service.get_connector();

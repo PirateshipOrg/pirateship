@@ -1,6 +1,6 @@
-use pft::crypto::KeyStore;
-use ed25519_dalek::{Signature, SigningKey, SECRET_KEY_LENGTH};
 use criterion::{criterion_group, criterion_main, Criterion};
+use ed25519_dalek::{Signature, SigningKey, SECRET_KEY_LENGTH};
+use pft::crypto::KeyStore;
 use rand::prelude::*;
 
 fn __bench_verify(data: &Vec<u8>, sig: &Signature, keys: &KeyStore) -> bool {
@@ -27,7 +27,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         let sig: Signature = keys.sign(buff.as_slice()).into();
         sigs.push(sig);
     }
-    
+
     let mut bad_sigs = Vec::<Signature>::new();
     for sig in &sigs {
         let mut bad_sig = sig.clone().to_bytes();
@@ -40,8 +40,12 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify");
 
     for i in 0..sizes.len() {
-        group.bench_function(format!("verify {} good", sizes[i]), |b| b.iter(|| __bench_verify(&data[i], &sigs[i], &keys)));
-        group.bench_function(format!("verify {} bad", sizes[i]), |b| b.iter(|| __bench_verify(&data[i], &bad_sigs[i], &keys)));
+        group.bench_function(format!("verify {} good", sizes[i]), |b| {
+            b.iter(|| __bench_verify(&data[i], &sigs[i], &keys))
+        });
+        group.bench_function(format!("verify {} bad", sizes[i]), |b| {
+            b.iter(|| __bench_verify(&data[i], &bad_sigs[i], &keys))
+        });
     }
 }
 

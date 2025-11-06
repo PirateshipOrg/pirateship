@@ -1,10 +1,26 @@
-use std::{collections::{BTreeMap, HashMap}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use log::{info, trace};
 use prost::Message as _;
-use tokio::{sync::{oneshot, Mutex}, task::JoinSet};
+use tokio::{
+    sync::{oneshot, Mutex},
+    task::JoinSet,
+};
 
-use crate::{config::{AtomicConfig, NodeInfo}, crypto::HashType, proto::{client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTryAgain}, execution::ProtoTransactionResult, rpc::ProtoPayload}, rpc::{server::LatencyProfile, PinnedMessage, SenderType}, utils::channel::{Receiver, Sender}};
+use crate::{
+    config::{AtomicConfig, NodeInfo},
+    crypto::HashType,
+    proto::{
+        client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTryAgain},
+        execution::ProtoTransactionResult,
+        rpc::ProtoPayload,
+    },
+    rpc::{server::LatencyProfile, PinnedMessage, SenderType},
+    utils::channel::{Receiver, Sender},
+};
 
 use super::batch_proposal::MsgAckChanWithTag;
 
@@ -18,8 +34,20 @@ pub enum ClientReplyCommand {
 }
 
 enum ReplyProcessorCommand {
-    CrashCommit(u64 /* block_n */, u64 /* tx_n */, HashType, ProtoTransactionResult /* result */, MsgAckChanWithTag, Vec<ProtoByzResponse>),
-    ByzCommit(u64 /* block_n */, u64 /* tx_n */, ProtoTransactionResult /* result */, MsgAckChanWithTag),
+    CrashCommit(
+        u64, /* block_n */
+        u64, /* tx_n */
+        HashType,
+        ProtoTransactionResult, /* result */
+        MsgAckChanWithTag,
+        Vec<ProtoByzResponse>,
+    ),
+    ByzCommit(
+        u64,                    /* block_n */
+        u64,                    /* tx_n */
+        ProtoTransactionResult, /* result */
+        MsgAckChanWithTag,
+    ),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
     Probe(u64 /* block_n */, Vec<MsgAckChanWithTag>),
 }
@@ -38,7 +66,10 @@ pub struct ClientReplyHandler {
     byz_response_store: HashMap<SenderType /* Sender */, Vec<ProtoByzResponse>>,
 
     reply_processors: JoinSet<()>,
-    reply_processor_queue: (async_channel::Sender<ReplyProcessorCommand>, async_channel::Receiver<ReplyProcessorCommand>),
+    reply_processor_queue: (
+        async_channel::Sender<ReplyProcessorCommand>,
+        async_channel::Receiver<ReplyProcessorCommand>,
+    ),
 
     probe_buffer: BTreeMap<u64 /* block_n */, Vec<MsgAckChanWithTag>>,
     acked_bci: u64,
@@ -77,7 +108,14 @@ impl ClientReplyHandler {
             client_reply_handler.reply_processors.spawn(async move {
                 while let Ok(cmd) = rx.recv().await {
                     match cmd {
-                        ReplyProcessorCommand::CrashCommit(block_n, tx_n, hsh, reply, (reply_chan, client_tag, _), byz_responses) => {
+                        ReplyProcessorCommand::CrashCommit(
+                            block_n,
+                            tx_n,
+                            hsh,
+                            reply,
+                            (reply_chan, client_tag, _),
+                            byz_responses,
+                        ) => {
                             let reply = ProtoClientReply {
                                 reply: Some(
                                     crate::proto::client::proto_client_reply::Reply::Receipt(
@@ -89,20 +127,20 @@ impl ClientReplyHandler {
                                             await_byz_response: true,
                                             byz_responses,
                                         },
-                                )),
-                                client_tag
+                                    ),
+                                ),
+                                client_tag,
                             };
-                
+
                             let reply_ser = reply.encode_to_vec();
                             let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                            let reply_msg =
+                                PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
                             let latency_profile = LatencyProfile::new();
-                            
-                            let _ = reply_chan.send((reply_msg, latency_profile)).await;
-                        },
-                        ReplyProcessorCommand::ByzCommit(_, _, result, sender) => {
 
-                        },
+                            let _ = reply_chan.send((reply_msg, latency_profile)).await;
+                        }
+                        ReplyProcessorCommand::ByzCommit(_, _, result, sender) => {}
 
                         ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, sender)) => {
                             let reply = res_rx.await.unwrap();
@@ -122,14 +160,14 @@ impl ClientReplyHandler {
                                 client_tag: tag,
                             };
 
-
                             let reply_ser = reply.encode_to_vec();
                             let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                            let reply_msg =
+                                PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
                             let latency_profile = LatencyProfile::new();
-                            
+
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
-                        },
+                        }
 
                         ReplyProcessorCommand::Probe(block_n, reply_vec) => {
                             let reply = ProtoClientReply {
@@ -145,25 +183,25 @@ impl ClientReplyHandler {
                                         },
                                     ),
                                 ),
-                                client_tag: 0,  // TODO: this should be a real tag; but currently probe is not done over the network so we are ok.
+                                client_tag: 0, // TODO: this should be a real tag; but currently probe is not done over the network so we are ok.
                             };
 
                             let reply_ser = reply.encode_to_vec();
                             let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-                            
+                            let reply_msg =
+                                PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+
                             for (reply_chan, tag, sender) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
-                                
+
                                 let _ = reply_chan.send((reply_msg.clone(), latency_profile)).await;
                             }
-                            
                         }
                     }
                 }
             });
         }
-        
+
         loop {
             if let Err(_) = client_reply_handler.worker().await {
                 break;
@@ -218,23 +256,54 @@ impl ClientReplyHandler {
         Ok(())
     }
 
-    async fn do_crash_commit_reply(&mut self, reply_sender_vec: Vec<MsgAckChanWithTag>, hash: HashType, n: u64, reply_vec: Vec<ProtoTransactionResult>) {
+    async fn do_crash_commit_reply(
+        &mut self,
+        reply_sender_vec: Vec<MsgAckChanWithTag>,
+        hash: HashType,
+        n: u64,
+        reply_vec: Vec<ProtoTransactionResult>,
+    ) {
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        for (tx_n, ((reply_chan, client_tag, sender), reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
+        for (tx_n, ((reply_chan, client_tag, sender), reply)) in reply_sender_vec
+            .into_iter()
+            .zip(reply_vec.into_iter())
+            .enumerate()
+        {
             let byz_responses = self.byz_response_store.remove(&sender).unwrap_or_default();
-            
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::CrashCommit(n, tx_n as u64, hash.clone(), reply, (reply_chan, client_tag, sender), byz_responses)).await.unwrap();
+
+            self.reply_processor_queue
+                .0
+                .send(ReplyProcessorCommand::CrashCommit(
+                    n,
+                    tx_n as u64,
+                    hash.clone(),
+                    reply,
+                    (reply_chan, client_tag, sender),
+                    byz_responses,
+                ))
+                .await
+                .unwrap();
         }
     }
 
-    async fn do_byz_commit_reply(&mut self, reply_sender_vec: Vec<(u64, SenderType)>, hash: HashType, n: u64, reply_vec: Vec<ProtoByzResponse>) {
+    async fn do_byz_commit_reply(
+        &mut self,
+        reply_sender_vec: Vec<(u64, SenderType)>,
+        hash: HashType,
+        n: u64,
+        reply_vec: Vec<ProtoByzResponse>,
+    ) {
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        for (tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec.into_iter().zip(reply_vec.into_iter()).enumerate() {
+        for (tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec
+            .into_iter()
+            .zip(reply_vec.into_iter())
+            .enumerate()
+        {
             reply.client_tag = client_tag;
             match self.byz_response_store.get_mut(&sender) {
                 Some(byz_responses) => {
                     byz_responses.push(reply);
-                },
+                }
                 None => {
                     self.byz_response_store.insert(sender, vec![reply]);
                 }
@@ -252,49 +321,58 @@ impl ClientReplyHandler {
         match cmd {
             ClientReplyCommand::CancelAllRequests => {
                 let node_infos = NodeInfo {
-                    nodes: self.config.get().net_config.nodes.clone()
+                    nodes: self.config.get().net_config.nodes.clone(),
                 };
                 for (_, mut vec) in self.reply_map.drain() {
                     for (chan, tag, _) in vec.drain(..) {
                         let reply = Self::get_try_again_message(tag, &node_infos);
                         let reply_ser = reply.encode_to_vec();
                         let _sz = reply_ser.len();
-                        let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                        let reply_msg =
+                            PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
                         let _ = chan.send((reply_msg, LatencyProfile::new())).await;
                     }
                 }
 
                 self.must_cancel = true;
-                
-            },
+            }
             ClientReplyCommand::CrashCommitAck(crash_commit_ack) => {
                 for (hash, (n, reply_vec)) in crash_commit_ack {
                     if let Some(reply_sender_vec) = self.reply_map.remove(&hash) {
-                        self.do_crash_commit_reply(reply_sender_vec, hash, n, reply_vec).await;
+                        self.do_crash_commit_reply(reply_sender_vec, hash, n, reply_vec)
+                            .await;
                     } else {
                         // We received the reply before the request. Store it for later.
                         self.crash_commit_reply_buf.insert(hash, (n, reply_vec));
                     }
                 }
-            },
+            }
             ClientReplyCommand::ByzCommitAck(byz_commit_ack) => {
                 for (hash, (n, reply_vec)) in byz_commit_ack {
                     if let Some(reply_sender_vec) = self.byz_reply_map.remove(&hash) {
-                        self.do_byz_commit_reply(reply_sender_vec, hash, n, reply_vec).await;
+                        self.do_byz_commit_reply(reply_sender_vec, hash, n, reply_vec)
+                            .await;
                     } else {
                         self.byz_commit_reply_buf.insert(hash, (n, reply_vec));
                     }
                 }
-            },
+            }
             ClientReplyCommand::StopCancelling => {
                 self.must_cancel = false;
-            },
+            }
             ClientReplyCommand::UnloggedRequestAck(res_rx, sender) => {
                 let reply_chan = sender.0;
                 let client_tag = sender.1;
                 let sender = sender.2;
-                self.reply_processor_queue.0.send(ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, client_tag, sender))).await.unwrap();
-            },
+                self.reply_processor_queue
+                    .0
+                    .send(ReplyProcessorCommand::Unlogged(
+                        res_rx,
+                        (reply_chan, client_tag, sender),
+                    ))
+                    .await
+                    .unwrap();
+            }
             ClientReplyCommand::ProbeRequestAck(block_n, sender) => {
                 if let Some(vec) = self.probe_buffer.get_mut(&block_n) {
                     vec.push(sender);
@@ -303,16 +381,20 @@ impl ClientReplyHandler {
                 }
 
                 self.maybe_clear_probe_buf().await;
-            },
+            }
         }
     }
 
     async fn maybe_clear_probe_buf(&mut self) {
         let mut remove_vec = vec![];
-        
+
         self.probe_buffer.retain(|block_n, reply_vec| {
             if *block_n <= self.acked_bci {
-                trace!("Clearing probe tx buffer of size {} for block {}", reply_vec.len(), block_n);
+                trace!(
+                    "Clearing probe tx buffer of size {} for block {}",
+                    reply_vec.len(),
+                    block_n
+                );
 
                 remove_vec.push((*block_n, reply_vec.drain(..).collect::<Vec<_>>()));
                 false
@@ -322,36 +404,39 @@ impl ClientReplyHandler {
         });
 
         for (block_n, reply_vec) in remove_vec {
-            self.reply_processor_queue.0.send(ReplyProcessorCommand::Probe(block_n, reply_vec)).await.unwrap();
+            self.reply_processor_queue
+                .0
+                .send(ReplyProcessorCommand::Probe(block_n, reply_vec))
+                .await
+                .unwrap();
         }
     }
 
     fn get_try_again_message(client_tag: u64, node_infos: &NodeInfo) -> ProtoClientReply {
         ProtoClientReply {
-            reply: Some(
-                crate::proto::client::proto_client_reply::Reply::TryAgain(ProtoTryAgain {
+            reply: Some(crate::proto::client::proto_client_reply::Reply::TryAgain(
+                ProtoTryAgain {
                     serialized_node_infos: node_infos.serialize(),
-                }),
-            ),
+                },
+            )),
             client_tag,
         }
     }
 
     async fn maybe_clear_reply_buf(&mut self, batch_hash: HashType) {
-        
         // Byz register must happen first. Otherwise when crash commit piggybacks the byz commit reply, it will be too late.
         if let Some((n, reply_vec)) = self.byz_commit_reply_buf.remove(&batch_hash) {
             if let Some(reply_sender_vec) = self.byz_reply_map.remove(&batch_hash) {
-                self.do_byz_commit_reply(reply_sender_vec, batch_hash.clone(), n, reply_vec).await;
+                self.do_byz_commit_reply(reply_sender_vec, batch_hash.clone(), n, reply_vec)
+                    .await;
             }
         }
 
         if let Some((n, reply_vec)) = self.crash_commit_reply_buf.remove(&batch_hash) {
             if let Some(reply_sender_vec) = self.reply_map.remove(&batch_hash) {
-                self.do_crash_commit_reply(reply_sender_vec, batch_hash.clone(), n, reply_vec).await;
+                self.do_crash_commit_reply(reply_sender_vec, batch_hash.clone(), n, reply_vec)
+                    .await;
             }
         }
-
     }
 }
-

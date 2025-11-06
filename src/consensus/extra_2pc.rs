@@ -3,9 +3,25 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 use bytes::{BufMut as _, BytesMut};
 use log::{error, info, trace, warn};
 use prost::Message;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, proto::{client::{ProtoClientReply, ProtoClientRequest}, consensus::ProtoVote, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}, rpc::ProtoPayload}, rpc::{client::PinnedClient, PinnedMessage}, utils::{channel::{Receiver, Sender}, StorageServiceConnector}};
+use crate::{
+    config::AtomicConfig,
+    proto::{
+        client::{ProtoClientReply, ProtoClientRequest},
+        consensus::ProtoVote,
+        execution::{
+            ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType,
+            ProtoTransactionPhase, ProtoTransactionResult,
+        },
+        rpc::ProtoPayload,
+    },
+    rpc::{client::PinnedClient, PinnedMessage},
+    utils::{
+        channel::{Receiver, Sender},
+        StorageServiceConnector,
+    },
+};
 
 pub struct TwoPCCommand {
     key: String,
@@ -16,14 +32,9 @@ pub struct TwoPCCommand {
 
 impl TwoPCCommand {
     pub fn new(key: String, value: Vec<u8>, action: EngraftActionAfterFutureDone) -> Self {
-        Self {
-            key,
-            value,
-            action,
-        }
+        Self { key, value, action }
     }
 }
-
 
 pub struct TwoPCHandler {
     config: AtomicConfig,
@@ -33,7 +44,6 @@ pub struct TwoPCHandler {
 
     local_index_counter: HashMap<String, u64>,
     client_tag_counter: u64,
-
 
     command_rx: Receiver<TwoPCCommand>,
     staging_tx: Sender<EngraftActionAfterFutureDone>,
@@ -103,15 +113,16 @@ impl TwoPCHandler {
         val.put_slice(&cmd.value);
 
         // First: Store locally.
-        let ack = self.storage2.put_raw(final_key_name.clone(), val.to_vec()).await;
+        let ack = self
+            .storage2
+            .put_raw(final_key_name.clone(), val.to_vec())
+            .await;
         if let Err(e) = ack.await {
             error!("Failed to store value: {:?}", e);
             return;
         }
 
         // let _ = cmd.result_sender.send(_index);
-
-        
 
         // Second: Broadcast to all nodes and collect majority acks.
         while !self.phase1(&final_key_name, &val).await {
@@ -127,16 +138,18 @@ impl TwoPCHandler {
         let _ = self.staging_tx.send(cmd.action).await;
 
         trace!("2PC success for key {} index {}", cmd.key, _index);
-
-        
     }
 
-    async fn handle_phase_message(storage: &mut StorageServiceConnector, tx: ProtoTransaction, result_sender: oneshot::Sender<ProtoTransactionResult>) {
+    async fn handle_phase_message(
+        storage: &mut StorageServiceConnector,
+        tx: ProtoTransaction,
+        result_sender: oneshot::Sender<ProtoTransactionResult>,
+    ) {
         let mut res = ProtoTransactionResult {
             result: vec![ProtoTransactionOpResult {
                 success: false,
                 values: vec![],
-            }]
+            }],
         };
 
         trace!("Handling 2PC phase message: {:?}", tx);
@@ -190,7 +203,7 @@ impl TwoPCHandler {
                 }
 
                 res.result[0].success = true;
-            },
+            }
             Some(ProtoTransactionOpType::Custom) => {
                 let stored_val = storage.get_raw(key).await;
                 if let Err(e) = stored_val {
@@ -207,13 +220,12 @@ impl TwoPCHandler {
                 }
 
                 res.result[0].success = true;
-            },
+            }
             _ => {
                 warn!("Invalid op_type: {:?}", op_type);
                 let _ = result_sender.send(res);
                 return;
             }
-
         }
 
         trace!("2PC phase message success for {:?}", res);
@@ -221,14 +233,21 @@ impl TwoPCHandler {
     }
 
     async fn phase1(&mut self, key: &str, value: &BytesMut) -> bool {
-        self.generic_phase(key, value, ProtoTransactionOpType::Write).await
+        self.generic_phase(key, value, ProtoTransactionOpType::Write)
+            .await
     }
 
     async fn phase2(&mut self, key: &str, value: &BytesMut) -> bool {
-        self.generic_phase(key, value, ProtoTransactionOpType::Custom).await
+        self.generic_phase(key, value, ProtoTransactionOpType::Custom)
+            .await
     }
 
-    async fn generic_phase(&mut self, key: &str, value: &BytesMut, op_type: ProtoTransactionOpType) -> bool {
+    async fn generic_phase(
+        &mut self,
+        key: &str,
+        value: &BytesMut,
+        op_type: ProtoTransactionOpType,
+    ) -> bool {
         let tx = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
@@ -246,31 +265,44 @@ impl TwoPCHandler {
         self.client_tag_counter += 1;
 
         let payload = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::ClientRequest(ProtoClientRequest {
-                tx: Some(tx),
-                origin: my_name.clone(),
-                sig: vec![0u8; 1],
-                client_tag: self.client_tag_counter,
-            }))
+            message: Some(crate::proto::rpc::proto_payload::Message::ClientRequest(
+                ProtoClientRequest {
+                    tx: Some(tx),
+                    origin: my_name.clone(),
+                    sig: vec![0u8; 1],
+                    client_tag: self.client_tag_counter,
+                },
+            )),
         };
         let buf = payload.encode_to_vec();
         let sz = buf.len();
 
         let msg = PinnedMessage::from(buf, sz, crate::rpc::SenderType::Anon);
 
-        let send_list = self.config.get()
-            .consensus_config.node_list.iter()
+        let send_list = self
+            .config
+            .get()
+            .consensus_config
+            .node_list
+            .iter()
             .filter(|n| n != &&my_name)
-            .cloned().collect::<Vec<_>>();
-        
+            .cloned()
+            .collect::<Vec<_>>();
+
         // send_list.truncate(1);
-        
+
         // This blocks till responses from all nodes are received.
         // TODO: Change it so that it returns after majority quorum.
         let n = self.config.get().consensus_config.node_list.len();
         let majority = n / 2 + 1;
 
-        let res = PinnedClient::broadcast_and_await_quorum_reply(&self.client, &send_list, &msg, majority - 1).await;
+        let res = PinnedClient::broadcast_and_await_quorum_reply(
+            &self.client,
+            &send_list,
+            &msg,
+            majority - 1,
+        )
+        .await;
 
         if let Err(e) = res {
             error!("Failed to broadcast: {:?}", e);
@@ -329,7 +361,6 @@ impl TwoPCHandler {
     }
 }
 
-
 pub enum EngraftActionAfterFutureDone {
     None,
     AsLeader(String, ProtoVote),
@@ -345,7 +376,12 @@ pub struct EngraftTwoPCFuture {
 }
 
 impl EngraftTwoPCFuture {
-    pub fn new(block_n: u64, raft_meta_res_rx: oneshot::Receiver<u64>, log_meta_res_rx: oneshot::Receiver<u64>, action: EngraftActionAfterFutureDone) -> Self {
+    pub fn new(
+        block_n: u64,
+        raft_meta_res_rx: oneshot::Receiver<u64>,
+        log_meta_res_rx: oneshot::Receiver<u64>,
+        action: EngraftActionAfterFutureDone,
+    ) -> Self {
         Self {
             block_n,
             raft_meta_res_rx,
@@ -361,7 +397,7 @@ impl EngraftTwoPCFuture {
             match self.raft_meta_res_rx.try_recv() {
                 Ok(val) => {
                     self.raft_meta_received_val = Some(val);
-                },
+                }
                 _ => {}
             };
         }
@@ -370,7 +406,7 @@ impl EngraftTwoPCFuture {
             match self.log_meta_res_rx.try_recv() {
                 Ok(val) => {
                     self.log_meta_received_val = Some(val);
-                },
+                }
                 _ => {}
             };
         }
@@ -383,7 +419,7 @@ impl EngraftTwoPCFuture {
             match self.raft_meta_res_rx.await {
                 Ok(val) => {
                     self.raft_meta_received_val = Some(val);
-                },
+                }
                 _ => {}
             };
         }
@@ -392,7 +428,7 @@ impl EngraftTwoPCFuture {
             match self.log_meta_res_rx.await {
                 Ok(val) => {
                     self.log_meta_received_val = Some(val);
-                },
+                }
                 _ => {}
             };
         }
@@ -404,7 +440,10 @@ impl EngraftTwoPCFuture {
 impl Future for EngraftTwoPCFuture {
     type Output = EngraftActionAfterFutureDone;
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         if self.is_ready() {
             std::task::Poll::Ready(self.action.take().unwrap())
         } else {

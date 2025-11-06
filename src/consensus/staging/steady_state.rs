@@ -1,19 +1,27 @@
-use std::collections::{HashMap, HashSet};
 use async_recursion::async_recursion;
 use bytes::{BufMut as _, BytesMut};
 use futures::{future::try_join_all, FutureExt};
 use log::{debug, error, info, trace, warn};
 use prost::Message;
+use std::collections::{HashMap, HashSet};
 use tokio::{sync::oneshot, task::spawn_local};
 
 use crate::{
-    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
+    consensus::{
+        extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand},
+        logserver::LogServerCommand,
+        pacemaker::PacemakerCommand,
+    },
+    crypto::{CachedBlock, DIGEST_LENGTH},
+    proto::{
         consensus::{
             proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
             ProtoSignatureArrayEntry, ProtoVote,
         },
         rpc::ProtoPayload,
-    }, rpc::{client::PinnedClient, PinnedMessage, SenderType}, utils::StorageAck
+    },
+    rpc::{client::PinnedClient, PinnedMessage, SenderType},
+    utils::StorageAck,
 };
 
 use super::{
@@ -110,13 +118,13 @@ impl Staging {
     pub(super) fn byzantine_liveness_threshold(&self) -> usize {
         let config = self.config.get();
         let n = config.consensus_config.node_list.len();
-        
+
         #[cfg(feature = "platforms")]
         {
             let u = config.consensus_config.liveness_u as usize;
-    
+
             assert!(n >= u);
-    
+
             n - u
         }
 
@@ -142,13 +150,13 @@ impl Staging {
             } else {
                 let parent = &block.block.parent;
                 return parent.eq(&self.curr_parent_for_pending.as_ref().unwrap().block_hash)
-                && block.block.n == self.curr_parent_for_pending.as_ref().unwrap().block.n + 1;
+                    && block.block.n == self.curr_parent_for_pending.as_ref().unwrap().block.n + 1;
             }
         }
 
         let last_block = self.pending_blocks.back().unwrap();
         let first_block = self.pending_blocks.front().unwrap();
-        
+
         if block.block.n > last_block.block.block.n + 1 {
             return false;
         }
@@ -161,8 +169,9 @@ impl Staging {
             return block.block.parent.eq(&last_block.block.block_hash);
         }
 
-        self.pending_blocks.iter().any(|b| b.block.block.n == block.block.n && b.block.block_hash.eq(&block.block_hash))
-        
+        self.pending_blocks
+            .iter()
+            .any(|b| b.block.block.n == block.block.n && b.block.block_hash.eq(&block.block_hash))
     }
 
     pub(super) async fn handle_view_change_timer_tick(&mut self) -> Result<(), ()> {
@@ -185,7 +194,14 @@ impl Staging {
         // In that case, I should update my view.
 
         let (tx, rx) = oneshot::channel();
-        self.pacemaker_tx.send(PacemakerCommand::QueryEnoughVCMsg(self.view, self.config_num, tx)).await.unwrap();
+        self.pacemaker_tx
+            .send(PacemakerCommand::QueryEnoughVCMsg(
+                self.view,
+                self.config_num,
+                tx,
+            ))
+            .await
+            .unwrap();
         let enough = rx.await.unwrap();
 
         if enough {
@@ -242,8 +258,6 @@ impl Staging {
 
         self.perf_add_event(&last_block.block, "Vote to Self");
 
-
-
         #[cfg(feature = "extra_2pc")]
         {
             // This is for Engraft.
@@ -256,11 +270,21 @@ impl Staging {
             let mut log_meta_file = BytesMut::with_capacity(DIGEST_LENGTH);
             log_meta_file.put_slice(&_vote_digest);
 
-            let raft_meta_2pc_cmd = TwoPCCommand::new("raft_meta".to_string(), raft_meta_file.to_vec(), EngraftActionAfterFutureDone::None);
-            let log_meta_2pc_cmd = TwoPCCommand::new("log_meta".to_string(), log_meta_file.to_vec(), EngraftActionAfterFutureDone::AsLeader(name, vote));
+            let raft_meta_2pc_cmd = TwoPCCommand::new(
+                "raft_meta".to_string(),
+                raft_meta_file.to_vec(),
+                EngraftActionAfterFutureDone::None,
+            );
+            let log_meta_2pc_cmd = TwoPCCommand::new(
+                "log_meta".to_string(),
+                log_meta_file.to_vec(),
+                EngraftActionAfterFutureDone::AsLeader(name, vote),
+            );
 
-
-            self.two_pc_command_tx.send(raft_meta_2pc_cmd).await.unwrap();
+            self.two_pc_command_tx
+                .send(raft_meta_2pc_cmd)
+                .await
+                .unwrap();
             self.two_pc_command_tx.send(log_meta_2pc_cmd).await.unwrap();
 
             // self.engraft_2pc_futures.push_back(
@@ -273,7 +297,6 @@ impl Staging {
             // );
 
             Ok(())
-            
         }
 
         #[cfg(not(feature = "extra_2pc"))]
@@ -281,8 +304,6 @@ impl Staging {
             let res = self.process_vote(name, vote).await;
             res
         }
-
-
     }
 
     async fn send_vote_on_last_block_to_leader(
@@ -349,7 +370,6 @@ impl Staging {
         let sz = data.len();
         let data = PinnedMessage::from(data, sz, SenderType::Anon);
 
-
         #[cfg(feature = "extra_2pc")]
         {
             // This is for Engraft.
@@ -362,11 +382,21 @@ impl Staging {
             let mut log_meta_file = BytesMut::with_capacity(DIGEST_LENGTH);
             log_meta_file.put_slice(&_vote_digest);
 
-            let raft_meta_2pc_cmd = TwoPCCommand::new("raft_meta".to_string(), raft_meta_file.to_vec(), EngraftActionAfterFutureDone::None);
-            let log_meta_2pc_cmd = TwoPCCommand::new("log_meta".to_string(), log_meta_file.to_vec(), EngraftActionAfterFutureDone::AsFollower(leader, data));
+            let raft_meta_2pc_cmd = TwoPCCommand::new(
+                "raft_meta".to_string(),
+                raft_meta_file.to_vec(),
+                EngraftActionAfterFutureDone::None,
+            );
+            let log_meta_2pc_cmd = TwoPCCommand::new(
+                "log_meta".to_string(),
+                log_meta_file.to_vec(),
+                EngraftActionAfterFutureDone::AsFollower(leader, data),
+            );
 
-
-            self.two_pc_command_tx.send(raft_meta_2pc_cmd).await.unwrap();
+            self.two_pc_command_tx
+                .send(raft_meta_2pc_cmd)
+                .await
+                .unwrap();
             self.two_pc_command_tx.send(log_meta_2pc_cmd).await.unwrap();
 
             // self.engraft_2pc_futures.push_back(
@@ -377,22 +407,19 @@ impl Staging {
             //         ).await
             //     }.boxed()
             // );
-            
         }
 
         #[cfg(not(feature = "extra_2pc"))]
         {
-            let _ = PinnedClient::send(&self.client, &leader, data.as_ref())
-                .await;
-                // .unwrap();
-    
+            let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
+            // .unwrap();
+
             if last_block.block.block.view_is_stable {
                 trace!("Sent vote to {} for {}", leader, last_block.block.block.n);
             } else {
                 info!("Sent vote to {} for {}", leader, last_block.block.block.n);
             }
         }
-
 
         Ok(())
     }
@@ -443,16 +470,21 @@ impl Staging {
             // Invariant <ViewLock>: Within the same view, the log must be append-only.
             if !self.check_continuity(&block) {
                 warn!("Continuity broken");
-                if block.block.n == self.bci { // This is just a sanity check.
-                    if self.curr_parent_for_pending.is_some() 
-                    && !self.curr_parent_for_pending.as_ref().unwrap().block_hash.eq(&block.block_hash) {
+                if block.block.n == self.bci {
+                    // This is just a sanity check.
+                    if self.curr_parent_for_pending.is_some()
+                        && !self
+                            .curr_parent_for_pending
+                            .as_ref()
+                            .unwrap()
+                            .block_hash
+                            .eq(&block.block_hash)
+                    {
                         error!("Trying to override a byz-committed block!!");
                     }
                 }
                 return Ok(());
             }
-
-            
         } else {
             // If from a higher view, this must mean I am no longer the leader in the cluster.
             // Precondition: The blocks I am receiving have been verified earlier,
@@ -505,17 +537,17 @@ impl Staging {
                     .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
                     .await;
             } else {
-
                 return self
                     .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
                     .await;
             }
-
-
         }
 
         self.perf_register_block(&block);
-        self.logserver_tx.send(LogServerCommand::NewBlock(block.clone())).await.unwrap();
+        self.logserver_tx
+            .send(LogServerCommand::NewBlock(block.clone()))
+            .await
+            .unwrap();
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && i_am_leader
@@ -553,7 +585,6 @@ impl Staging {
             self.__storage_ack_buffer.push_back(storage_ack);
         }
 
-
         Ok(())
     }
 
@@ -564,14 +595,17 @@ impl Staging {
         block: CachedBlock,
         storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
-        this_is_final_block: bool
+        this_is_final_block: bool,
     ) -> Result<(), ()> {
         if !self.view_is_stable {
             trace!("Processing block {} as follower", block.block.n);
         }
         if ae_stats.view < self.view {
             // Do not accept anything from a lower view.
-            warn!("Received block from lower view {}. Already in {}", ae_stats.view, self.view);
+            warn!(
+                "Received block from lower view {}. Already in {}",
+                ae_stats.view, self.view
+            );
             return Ok(());
         } else if ae_stats.view == self.view {
             // if !self.view_is_stable && block.block.view_is_stable {
@@ -608,8 +642,6 @@ impl Staging {
                 warn!("Continuity broken");
                 return Ok(());
             }
-
-
         } else {
             // If from a higher view, this may mean I am now the leader in the cluster.
             // Precondition: The blocks I am receiving have been verified earlier,
@@ -636,7 +668,8 @@ impl Staging {
                 .unwrap();
 
             // Flush the pending queue and cancel client requests.
-            self.pending_blocks.retain(|e| e.block.block.n < block.block.n);
+            self.pending_blocks
+                .retain(|e| e.block.block.n < block.block.n);
             self.pending_signatures.retain(|(n, _)| *n < block.block.n);
             self.client_reply_tx
                 .send(ClientReplyCommand::CancelAllRequests)
@@ -648,7 +681,6 @@ impl Staging {
                 e.replication_set.clear();
                 e.vote_sigs.clear();
             });
-            
 
             // Ready to accept the block normally.
             if self.i_am_leader() {
@@ -662,7 +694,10 @@ impl Staging {
             }
         }
 
-        self.logserver_tx.send(LogServerCommand::NewBlock(block.clone())).await.unwrap();
+        self.logserver_tx
+            .send(LogServerCommand::NewBlock(block.clone()))
+            .await
+            .unwrap();
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && !i_am_leader
@@ -681,11 +716,16 @@ impl Staging {
         }
 
         let old_view_is_stable = self.view_is_stable;
-        
+
         let mut qc_list = self
             .pending_blocks
-            .iter().last().unwrap()
-            .block.block.qc.iter()
+            .iter()
+            .last()
+            .unwrap()
+            .block
+            .block
+            .qc
+            .iter()
             .map(|e| e.clone())
             .collect::<Vec<_>>();
 
@@ -695,7 +735,7 @@ impl Staging {
                 trace!("Trying to stabilize view {} with QC", self.view);
                 self.maybe_stabilize_view(&qc).await;
             }
-            
+
             self.maybe_byzantine_commit(qc).await?;
         }
 
@@ -703,7 +743,7 @@ impl Staging {
         {
             if this_is_final_block {
                 self.do_byzantine_commit(self.bci, self.ci).await;
-            }   
+            }
         }
 
         // Reply vote to the leader.
@@ -720,16 +760,24 @@ impl Staging {
 
         if old_view_is_stable && self.__ae_seen_in_this_view > soft_gap as usize
         /* don't trigger unnecessarily on new view messages */
-        && self.ci as i64 - self.bci as i64 > hard_gap as i64 {
+        && self.ci as i64 - self.bci as i64 > hard_gap as i64
+        {
             // Trigger a view change
-            warn!("Triggering view change due to too much gap between CI and BCI: {} {}", self.ci, self.bci);
+            warn!(
+                "Triggering view change due to too much gap between CI and BCI: {} {}",
+                self.ci, self.bci
+            );
             self.view_change_timer.fire_now().await;
         }
 
         Ok(())
     }
 
-    pub(super) async fn verify_and_process_vote(&mut self, sender: String, vote: ProtoVote) -> Result<(), ()> {
+    pub(super) async fn verify_and_process_vote(
+        &mut self,
+        sender: String,
+        vote: ProtoVote,
+    ) -> Result<(), ()> {
         let _n = vote.n;
         debug!("Got vote on {} from {}", _n, sender);
         let mut verify_futs = Vec::new();
@@ -761,7 +809,10 @@ impl Staging {
                     }
                 }
                 Err(_) => {
-                    trace!("This is a vote for a block I have byz committed. n = {}", _n);
+                    trace!(
+                        "This is a vote for a block I have byz committed. n = {}",
+                        _n
+                    );
                     continue;
                 }
             }
@@ -912,13 +963,12 @@ impl Staging {
             // Once when the fast path threshold is reached.
             // If we already have proposed a slow path QC,
             // there is no need to propose another until we can safely do the fast path.
-            
+
             let thresh = if block.qc_is_proposed {
                 fast_thresh
             } else {
                 thresh
             };
-
 
             if block.vote_sigs.len() >= thresh {
                 let qc = ProtoQuorumCertificate {
@@ -940,7 +990,6 @@ impl Staging {
                 if block.vote_sigs.len() >= fast_thresh {
                     block.fast_qc_is_proposed = true;
                 }
-
             }
         }
 
@@ -949,7 +998,7 @@ impl Staging {
                 // Try to see if this QC can stabilize the view.
                 self.maybe_stabilize_view(&qc).await;
             }
-            
+
             // This send needs to be non-blocking.
             // Hence can't avoid using an unbounded channel.
             // Otherwise: block_broadcaster_tx -> staging_tx -> qc_tx forms a cycle since BlockSequencer consumes from qc_rx.
@@ -978,7 +1027,8 @@ impl Staging {
     ) -> Result<(), ()> {
         // Reset view timer. Getting a QC signals that byzantine progress can still be made.
         if self.view <= incoming_qc.view /* no old */
-            && self.last_qc.as_ref().map(|e| e.n).unwrap_or(0) < incoming_qc.n /* dedup */
+            && self.last_qc.as_ref().map(|e| e.n).unwrap_or(0) < incoming_qc.n
+        /* dedup */
         {
             self.view_change_timer.reset();
             self.maybe_update_last_qc(&incoming_qc);
@@ -989,8 +1039,9 @@ impl Staging {
         let old_bci = self.bci;
 
         // Fast path: All votes rule; only applicable if view is stable already.
-        let new_bci_fast_path = if self.view_is_stable &&
-        incoming_qc.sig.len() >= self.byzantine_fast_path_threshold() {
+        let new_bci_fast_path = if self.view_is_stable
+            && incoming_qc.sig.len() >= self.byzantine_fast_path_threshold()
+        {
             #[cfg(feature = "fast_path")]
             {
                 incoming_qc.n
@@ -1022,7 +1073,10 @@ impl Staging {
             // This combined with no_pipeline will give maintain Hotstuff-safety.
 
             if new_bci_slow_path > old_bci {
-                new_bci_slow_path = self.pending_blocks.iter().rev()
+                new_bci_slow_path = self
+                    .pending_blocks
+                    .iter()
+                    .rev()
                     .filter(|b| b.block.block.n <= new_bci_slow_path)
                     .map(|b| b.block.block.qc.iter().map(|qc| qc.n))
                     .flatten()
@@ -1064,7 +1118,10 @@ impl Staging {
         }
 
         let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks)).await;
-        let _ = self.logserver_tx.send(LogServerCommand::UpdateBCI(self.bci)).await;
+        let _ = self
+            .logserver_tx
+            .send(LogServerCommand::UpdateBCI(self.bci))
+            .await;
     }
 
     fn maybe_update_last_qc(&mut self, qc: &ProtoQuorumCertificate) {
@@ -1077,23 +1134,28 @@ impl Staging {
         self.pending_blocks.retain(|e| e.block.block.n <= n);
         self.pending_signatures.retain(|(_n, _)| *_n <= n);
         self.app_tx.send(AppCommand::Rollback(n)).await.unwrap();
-        self.logserver_tx.send(LogServerCommand::Rollback(n)).await.unwrap();
+        self.logserver_tx
+            .send(LogServerCommand::Rollback(n))
+            .await
+            .unwrap();
     }
 
-    pub(crate) async fn process_2pc_result(&mut self, cmd: EngraftActionAfterFutureDone) -> Result<(), ()> {
+    pub(crate) async fn process_2pc_result(
+        &mut self,
+        cmd: EngraftActionAfterFutureDone,
+    ) -> Result<(), ()> {
         match cmd {
-            EngraftActionAfterFutureDone::None => {},
+            EngraftActionAfterFutureDone::None => {}
             EngraftActionAfterFutureDone::AsLeader(name, vote) => {
                 trace!("Processing continuation as leader");
                 let _ = self.process_vote(name, vote).await;
             }
             EngraftActionAfterFutureDone::AsFollower(leader, data) => {
                 trace!("Processing continuation as follower");
-                let _ = PinnedClient::send(&self.client, &leader, data.as_ref())
-                    .await;
+                let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
             }
         }
-        
+
         Ok(())
     }
 }

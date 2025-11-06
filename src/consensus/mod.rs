@@ -1,20 +1,36 @@
-pub mod batch_proposal;
-mod block_sequencer;
-mod block_broadcaster;
-mod staging;
-pub mod fork_receiver;
 pub mod app;
-pub mod engines;
+pub mod batch_proposal;
+mod block_broadcaster;
+mod block_sequencer;
 pub mod client_reply;
+pub mod engines;
+pub mod extra_2pc;
+pub mod fork_receiver;
 mod logserver;
 mod pacemaker;
-pub mod extra_2pc;
+mod staging;
 
 // #[cfg(test)]
 // mod tests;
 
-use std::{io::{Error, ErrorKind}, ops::Deref, pin::Pin, sync::Arc};
+use std::{
+    io::{Error, ErrorKind},
+    ops::Deref,
+    pin::Pin,
+    sync::Arc,
+};
 
+use crate::{
+    proto::{
+        checkpoint::ProtoBackfillNack,
+        consensus::{ProtoAppendEntries, ProtoViewChange},
+    },
+    rpc::{client::Client, SenderType},
+    utils::{
+        channel::{make_channel, Receiver, Sender},
+        RocksDBStorageEngine, StorageService,
+    },
+};
 use app::{AppEngine, Application};
 use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
@@ -27,10 +43,20 @@ use logserver::LogServer;
 use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
-use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
-use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
+use tokio::{
+    sync::{mpsc::unbounded_channel, Mutex},
+    task::JoinSet,
+};
 
-use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
+use crate::{
+    config::{AtomicConfig, Config},
+    crypto::{AtomicKeyStore, CryptoService, KeyStore},
+    proto::rpc::ProtoPayload,
+    rpc::{
+        server::{MsgAckChan, RespType, Server, ServerContextType},
+        MessageRef,
+    },
+};
 
 pub struct ConsensusServerContext {
     config: AtomicConfig,
@@ -43,13 +69,13 @@ pub struct ConsensusServerContext {
     backfill_request_tx: Sender<ProtoBackfillNack>,
 }
 
-
 #[derive(Clone)]
 pub struct PinnedConsensusServerContext(pub Arc<Pin<Box<ConsensusServerContext>>>);
 
 impl PinnedConsensusServerContext {
     pub fn new(
-        config: AtomicConfig, keystore: AtomicKeyStore,
+        config: AtomicConfig,
+        keystore: AtomicKeyStore,
         batch_proposal_tx: Sender<TxWithAckChanTag>,
         fork_receiver_tx: Sender<(ProtoAppendEntries, SenderType)>,
         fork_receiver_command_tx: Sender<ForkReceiverCommand>,
@@ -58,9 +84,13 @@ impl PinnedConsensusServerContext {
         backfill_request_tx: Sender<ProtoBackfillNack>,
     ) -> Self {
         Self(Arc::new(Box::pin(ConsensusServerContext {
-            config, keystore, batch_proposal_tx,
-            fork_receiver_tx, fork_receiver_command_tx,
-            vote_receiver_tx, view_change_receiver_tx,
+            config,
+            keystore,
+            batch_proposal_tx,
+            fork_receiver_tx,
+            fork_receiver_command_tx,
+            vote_receiver_tx,
+            view_change_receiver_tx,
             backfill_request_tx,
         })))
     }
@@ -73,7 +103,6 @@ impl Deref for PinnedConsensusServerContext {
         &self.0
     }
 }
-
 
 impl ServerContextType for PinnedConsensusServerContext {
     fn get_server_keys(&self) -> std::sync::Arc<Box<crate::crypto::KeyStore>> {
@@ -88,7 +117,7 @@ impl ServerContextType for PinnedConsensusServerContext {
                     "unauthenticated message",
                 )); // Anonymous replies shouldn't come here
             }
-            _sender @ crate::rpc::SenderType::Auth(_, _) => _sender.clone()
+            _sender @ crate::rpc::SenderType::Auth(_, _) => _sender.clone(),
         };
         let body = match ProtoPayload::decode(&m.0.as_slice()[0..m.1]) {
             Ok(b) => b,
@@ -98,7 +127,7 @@ impl ServerContextType for PinnedConsensusServerContext {
                 return Err(Error::new(ErrorKind::InvalidData, e));
             }
         };
-    
+
         let msg = match body.message {
             Some(m) => m,
             None => {
@@ -109,43 +138,59 @@ impl ServerContextType for PinnedConsensusServerContext {
 
         match msg {
             crate::proto::rpc::proto_payload::Message::ViewChange(proto_view_change) => {
-                        self.view_change_receiver_tx.send((proto_view_change, sender)).await
-                            .expect("Channel send error");
-                        return Ok(RespType::NoResp);
-                    },
+                self.view_change_receiver_tx
+                    .send((proto_view_change, sender))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
             crate::proto::rpc::proto_payload::Message::AppendEntries(proto_append_entries) => {
-                        // info!("Received append entries from {:?}. Size: {}", sender, proto_append_entries.encoded_len());
-                        if proto_append_entries.is_backfill_response {
-                            self.fork_receiver_command_tx.send(ForkReceiverCommand::UseBackfillResponse(proto_append_entries, sender)).await
-                                .expect("Channel send error");
-                        } else {
-                            self.fork_receiver_tx.send((proto_append_entries, sender)).await
-                                .expect("Channel send error");
-                        }
-                        return Ok(RespType::NoResp);
-                    },
+                // info!("Received append entries from {:?}. Size: {}", sender, proto_append_entries.encoded_len());
+                if proto_append_entries.is_backfill_response {
+                    self.fork_receiver_command_tx
+                        .send(ForkReceiverCommand::UseBackfillResponse(
+                            proto_append_entries,
+                            sender,
+                        ))
+                        .await
+                        .expect("Channel send error");
+                } else {
+                    self.fork_receiver_tx
+                        .send((proto_append_entries, sender))
+                        .await
+                        .expect("Channel send error");
+                }
+                return Ok(RespType::NoResp);
+            }
             crate::proto::rpc::proto_payload::Message::Vote(proto_vote) => {
-                        self.vote_receiver_tx.send((sender, proto_vote)).await
-                            .expect("Channel send error");
-                        return Ok(RespType::NoResp);
-                    },
+                self.vote_receiver_tx
+                    .send((sender, proto_vote))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
             crate::proto::rpc::proto_payload::Message::ClientRequest(proto_client_request) => {
-                        let client_tag = proto_client_request.client_tag;
-                        self.batch_proposal_tx.send((proto_client_request.tx, (ack_chan, client_tag, sender))).await
-                            .expect("Channel send error");
+                let client_tag = proto_client_request.client_tag;
+                self.batch_proposal_tx
+                    .send((proto_client_request.tx, (ack_chan, client_tag, sender)))
+                    .await
+                    .expect("Channel send error");
 
-                        return Ok(RespType::Resp);
-                    },
-            crate::proto::rpc::proto_payload::Message::BackfillRequest(proto_back_fill_request) => {},
-            crate::proto::rpc::proto_payload::Message::BackfillResponse(proto_back_fill_response) => {},
+                return Ok(RespType::Resp);
+            }
+            crate::proto::rpc::proto_payload::Message::BackfillRequest(proto_back_fill_request) => {
+            }
+            crate::proto::rpc::proto_payload::Message::BackfillResponse(
+                proto_back_fill_response,
+            ) => {}
             crate::proto::rpc::proto_payload::Message::BackfillNack(proto_backfill_nack) => {
-                        self.backfill_request_tx.send(proto_backfill_nack).await
-                            .expect("Channel send error");
-                        return Ok(RespType::NoResp);
-            },
+                self.backfill_request_tx
+                    .send(proto_backfill_nack)
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
         }
-
-
 
         Ok(RespType::NoResp)
     }
@@ -158,7 +203,6 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     server: Arc<Server<PinnedConsensusServerContext>>,
     storage: Arc<Mutex<StorageService<RocksDBStorageEngine>>>,
     crypto: CryptoService,
-
 
     /// This will be owned by the task that runs batch_proposer
     /// So the lock will be taken exactly ONCE and held forever.
@@ -175,11 +219,8 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     #[cfg(feature = "extra_2pc")]
     extra_2pc: Arc<Mutex<TwoPCHandler>>,
 
-
-
     /// TODO: When all wiring is done, this will be empty.
     __sink_handles: JoinSet<()>,
-
 
     /// Use this to feed transactions from within the same process.
     pub batch_proposer_tx: Sender<TxWithAckChanTag>,
@@ -187,17 +228,22 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
 
 impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     pub fn new(config: Config) -> Self {
-        let (batch_proposer_tx, batch_proposer_rx) = make_channel(config.rpc_config.channel_depth as usize);
+        let (batch_proposer_tx, batch_proposer_rx) =
+            make_channel(config.rpc_config.channel_depth as usize);
         Self::mew(config, batch_proposer_tx, batch_proposer_rx)
     }
-    
+
     /// mew() must be called from within a Tokio context with channel passed in.
     /// This is new()'s cat brother.
     ///
     ///  /\_/\
     /// ( o.o )
-    ///  > ^ < 
-    pub fn mew(config: Config, batch_proposer_tx: Sender<TxWithAckChanTag>, batch_proposer_rx: Receiver<TxWithAckChanTag>) -> Self {
+    ///  > ^ <
+    pub fn mew(
+        config: Config,
+        batch_proposer_tx: Sender<TxWithAckChanTag>,
+        batch_proposer_rx: Receiver<TxWithAckChanTag>,
+    ) -> Self {
         let _chan_depth = config.rpc_config.channel_depth as usize;
         let _num_crypto_tasks = config.consensus_config.num_crypto_workers;
 
@@ -214,10 +260,10 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             rocksdb_config @ crate::config::StorageConfig::RocksDB(_) => {
                 let _db = RocksDBStorageEngine::new(rocksdb_config.clone());
                 StorageService::new(_db, _chan_depth)
-            },
+            }
             crate::config::StorageConfig::FileStorage(_) => {
                 panic!("File storage not supported!");
-            },
+            }
         };
 
         let client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
@@ -239,7 +285,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (other_block_tx, other_block_rx) = make_channel(_chan_depth);
         let (client_reply_tx, client_reply_rx) = make_channel(_chan_depth);
         let (client_reply_command_tx, client_reply_command_rx) = make_channel(_chan_depth);
-        let (broadcaster_control_command_tx, broadcaster_control_command_rx) = make_channel(_chan_depth);
+        let (broadcaster_control_command_tx, broadcaster_control_command_rx) =
+            make_channel(_chan_depth);
         let (staging_tx, staging_rx) = make_channel(_chan_depth);
         let (logserver_tx, logserver_rx) = make_channel(_chan_depth);
         let (vote_tx, vote_rx) = make_channel(_chan_depth);
@@ -268,37 +315,122 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "extra_2pc")]
         let (extra_2pc_command_tx, extra_2pc_command_rx) = make_channel(10 * _chan_depth);
         #[cfg(feature = "extra_2pc")]
-        let (extra_2pc_phase_message_tx, extra_2pc_phase_message_rx) = make_channel(10 * _chan_depth);
+        let (extra_2pc_phase_message_tx, extra_2pc_phase_message_rx) =
+            make_channel(10 * _chan_depth);
         #[cfg(feature = "extra_2pc")]
         let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
 
-        let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx, fork_receiver_command_tx.clone(), vote_tx, view_change_tx, backfill_request_tx);
-        let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx, client_reply_command_tx.clone(), unlogged_tx, batch_proposer_command_rx);
-        let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx, client_reply_tx, block_maker_crypto);
-        let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, block_broadcaster_storage, staging_tx, fork_receiver_command_tx.clone(), app_tx.clone());
-        let staging = Staging::new(config.clone(), staging_client.into(), staging_crypto, staging_rx, vote_rx, pacemaker_cmd_rx, pacemaker_cmd_tx2, client_reply_command_tx.clone(), app_tx, broadcaster_control_command_tx, control_command_tx, fork_receiver_command_tx, qc_tx, batch_proposer_command_tx, logserver_tx,
-
+        let ctx = PinnedConsensusServerContext::new(
+            config.clone(),
+            keystore.clone(),
+            batch_proposer_tx.clone(),
+            fork_tx,
+            fork_receiver_command_tx.clone(),
+            vote_tx,
+            view_change_tx,
+            backfill_request_tx,
+        );
+        let batch_proposer = BatchProposer::new(
+            config.clone(),
+            batch_proposer_rx,
+            block_maker_tx,
+            client_reply_command_tx.clone(),
+            unlogged_tx,
+            batch_proposer_command_rx,
+        );
+        let block_sequencer = BlockSequencer::new(
+            config.clone(),
+            control_command_rx,
+            block_maker_rx,
+            qc_rx,
+            block_broadcaster_tx,
+            client_reply_tx,
+            block_maker_crypto,
+        );
+        let block_broadcaster = BlockBroadcaster::new(
+            config.clone(),
+            client.into(),
+            block_broadcaster_crypto2,
+            block_broadcaster_rx,
+            other_block_rx,
+            broadcaster_control_command_rx,
+            block_broadcaster_storage,
+            staging_tx,
+            fork_receiver_command_tx.clone(),
+            app_tx.clone(),
+        );
+        let staging = Staging::new(
+            config.clone(),
+            staging_client.into(),
+            staging_crypto,
+            staging_rx,
+            vote_rx,
+            pacemaker_cmd_rx,
+            pacemaker_cmd_tx2,
+            client_reply_command_tx.clone(),
+            app_tx,
+            broadcaster_control_command_tx,
+            control_command_tx,
+            fork_receiver_command_tx,
+            qc_tx,
+            batch_proposer_command_tx,
+            logserver_tx,
             #[cfg(feature = "extra_2pc")]
             extra_2pc_command_tx,
-
             #[cfg(feature = "extra_2pc")]
             extra_2pc_staging_rx,
         );
-        let fork_receiver = ForkReceiver::new(config.clone(), fork_receiver_crypto, fork_receiver_client.into(), fork_rx, fork_receiver_command_rx, other_block_tx, logserver_query_tx.clone());
-        let app = Application::new(config.clone(), app_rx, unlogged_rx, client_reply_command_tx, gc_tx,
-            
+        let fork_receiver = ForkReceiver::new(
+            config.clone(),
+            fork_receiver_crypto,
+            fork_receiver_client.into(),
+            fork_rx,
+            fork_receiver_command_rx,
+            other_block_tx,
+            logserver_query_tx.clone(),
+        );
+        let app = Application::new(
+            config.clone(),
+            app_rx,
+            unlogged_rx,
+            client_reply_command_tx,
+            gc_tx,
             #[cfg(feature = "extra_2pc")]
             extra_2pc_phase_message_tx,
         );
-        let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
-        let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
-        let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
+        let client_reply =
+            ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
+        let logserver = LogServer::new(
+            config.clone(),
+            logserver_client.into(),
+            logserver_rx,
+            backfill_request_rx,
+            gc_rx,
+            logserver_query_rx,
+            logserver_storage,
+        );
+        let pacemaker = Pacemaker::new(
+            config.clone(),
+            pacemaker_client.into(),
+            pacemaker_crypto,
+            view_change_rx,
+            pacemaker_cmd_tx,
+            pacemaker_cmd_rx2,
+            logserver_query_tx,
+        );
 
         #[cfg(feature = "extra_2pc")]
-        let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
-        
-        let mut handles = JoinSet::new();
+        let extra_2pc = extra_2pc::TwoPCHandler::new(
+            config.clone(),
+            extra_2pc_client.into(),
+            storage.get_connector(crypto.get_connector()),
+            storage.get_connector(crypto.get_connector()),
+            extra_2pc_command_rx,
+            extra_2pc_phase_message_rx,
+            extra_2pc_staging_tx,
+        );
 
+        let mut handles = JoinSet::new();
 
         Self {
             config: config.clone(),
@@ -361,7 +493,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         handles.spawn(async move {
             BlockBroadcaster::run(block_broadcaster).await;
         });
-    
+
         handles.spawn(async move {
             Staging::run(staging).await;
         });
@@ -394,7 +526,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
                 extra_2pc::TwoPCHandler::run(extra_2pc).await;
             });
         }
-    
+
         handles
     }
 }

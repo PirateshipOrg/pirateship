@@ -1,14 +1,12 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
 use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests;
-
 
 /// Default config for log4rs;
 mod log4rs;
@@ -55,7 +53,6 @@ impl NodeInfo {
         let res: Result<NodeInfo> = serde_json::from_str(s.as_str());
         res.expect("Invalid JSON config")
     }
-
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -84,7 +81,6 @@ pub struct ConsensusConfig {
 
 impl ConsensusConfig {
     pub fn get_leader_for_view(&self, view: u64) -> String {
-
         #[cfg(feature = "round_robin_leader")]
         {
             let n = self.node_list.len() as u64;
@@ -105,7 +101,10 @@ impl ConsensusConfig {
         let majority = n / 2 + 1;
 
         if self.liveness_u > n - majority {
-            panic!("self.liveness({}) must be <= n({}) - majority({})", self.liveness_u, n, majority);
+            panic!(
+                "self.liveness({}) must be <= n({}) - majority({})",
+                self.liveness_u, n, majority
+            );
         }
     }
 }
@@ -121,7 +120,6 @@ pub struct EvilConfig {
     pub simulate_byzantine_behavior: bool,
     pub byzantine_start_block: u64,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -145,7 +143,6 @@ pub struct ClientNetConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientRpcConfig {
     pub signing_priv_key_path: String,
-
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -153,16 +150,15 @@ pub struct WorkloadConfig {
     pub num_clients: usize,
     pub duration: u64,
     pub max_concurrent_requests: usize,
-    pub request_config: RequestConfig
+    pub request_config: RequestConfig,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ClientConfig {
     pub net_config: ClientNetConfig,
     pub rpc_config: ClientRpcConfig,
     pub workload_config: WorkloadConfig,
-    pub full_duplex: bool
+    pub full_duplex: bool,
 }
 
 impl Config {
@@ -223,12 +219,12 @@ impl ClientConfig {
                 logger_stats_report_ms: 100,
                 checkpoint_interval_ms: 60000,
             },
-            
+
             #[cfg(feature = "evil")]
             evil_config: EvilConfig {
                 simulate_byzantine_behavior: false,
-                byzantine_start_block: 0
-            }
+                byzantine_start_block: 0,
+            },
         }
     }
 }

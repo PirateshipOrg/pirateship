@@ -1,25 +1,35 @@
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
-use tokio::sync::mpsc;
+use async_recursion::async_recursion;
 use log::{debug, warn};
 use pft::consensus::batch_proposal::TxWithAckChanTag;
 use prost::Message;
 use serde::Deserialize;
 use sha2::digest::typenum::Integer;
-use tokio::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use async_recursion::async_recursion;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
+use crate::payloads::{PubKeyPayload, RegisterPayload};
 use pft::config::Config;
-use pft::crypto::{KeyStore, hash};
+use pft::crypto::{hash, KeyStore};
 use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
 use pft::rpc::client::Client;
 use pft::rpc::{MessageRef, PinnedMessage, SenderType};
-use pft::{config::ClientConfig, proto::{client::{self, ProtoClientReply, ProtoClientRequest}, rpc::ProtoPayload}, rpc::client::PinnedClient, utils::channel::{make_channel, Receiver, Sender}};
-use crate::payloads::{RegisterPayload, PubKeyPayload};
+use pft::{
+    config::ClientConfig,
+    proto::{
+        client::{self, ProtoClientReply, ProtoClientRequest},
+        rpc::ProtoPayload,
+    },
+    rpc::client::PinnedClient,
+    utils::channel::{make_channel, Receiver, Sender},
+};
 
-use ed25519_dalek::{ed25519, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH, SigningKey, SecretKey, VerifyingKey};
+use ed25519_dalek::{
+    ed25519, SecretKey, SigningKey, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
+};
 
 struct AppState {
     /// Global channel to feed into the consensusNode.
@@ -33,7 +43,10 @@ struct AppState {
 }
 
 #[post("/register")]
-async fn register(payload: web::Json<RegisterPayload>, data: web::Data<AppState>) -> impl Responder {
+async fn register(
+    payload: web::Json<RegisterPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
     let username = payload.username.clone();
     let password = payload.password.clone();
 
@@ -81,14 +94,12 @@ async fn register(payload: web::Json<RegisterPayload>, data: web::Data<AppState>
         users = serde_json::from_slice(&get_user_result).expect("Deserialization failed");
     }
     users.push(username.clone());
-    let serialized_users: Vec<u8> =
-        serde_json::to_vec(&users).expect("Serialization failed");
+    let serialized_users: Vec<u8> = serde_json::to_vec(&users).expect("Serialization failed");
 
     let update_users_op = ProtoTransactionOp {
         op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
         operands: vec!["user".as_bytes().to_vec(), serialized_users],
     };
-
 
     // Increment the counter for number of users.
     let user_count_op = ProtoTransactionOp {
@@ -193,8 +204,9 @@ async fn listpubkeys(data: web::Data<AppState>) -> impl Responder {
             Err(e) => return e,
         };
 
-        let pub_key_arr: [u8; PUBLIC_KEY_LENGTH] =
-            user_public_key_result.try_into().expect("Vec has incorrect length");
+        let pub_key_arr: [u8; PUBLIC_KEY_LENGTH] = user_public_key_result
+            .try_into()
+            .expect("Vec has incorrect length");
         public_keys.push(pub_key_arr);
     }
 
@@ -260,8 +272,9 @@ async fn pubkey(payload: web::Json<PubKeyPayload>, data: web::Data<AppState>) ->
         }));
     }
 
-    let pub_key_arr: [u8; PUBLIC_KEY_LENGTH] =
-        user_public_key_result.try_into().expect("Vec has incorrect length");
+    let pub_key_arr: [u8; PUBLIC_KEY_LENGTH] = user_public_key_result
+        .try_into()
+        .expect("Vec has incorrect length");
 
     // The client tag is not incremented here.
     let current_tag = data.curr_client_tag.load(Ordering::Relaxed);
@@ -275,7 +288,6 @@ async fn pubkey(payload: web::Json<PubKeyPayload>, data: web::Data<AppState>) ->
 
 #[get("/privkey")]
 async fn privkey(payload: web::Json<RegisterPayload>, data: web::Data<AppState>) -> impl Responder {
-
     match authenticate_user(payload.username.clone(), payload.password.clone(), &data).await {
         Ok(valid) => valid,
         Err(e) => return e,
@@ -301,8 +313,9 @@ async fn privkey(payload: web::Json<RegisterPayload>, data: web::Data<AppState>)
         }));
     }
 
-    let priv_key_arr: [u8; SECRET_KEY_LENGTH] =
-        user_priv_key_result.try_into().expect("Vec has incorrect length");
+    let priv_key_arr: [u8; SECRET_KEY_LENGTH] = user_priv_key_result
+        .try_into()
+        .expect("Vec has incorrect length");
 
     HttpResponse::Ok().json(serde_json::json!({
         "message": "private key of user",
@@ -318,7 +331,11 @@ async fn home(_data: web::Data<AppState>) -> impl Responder {
     }))
 }
 
-pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>, actix_threads: usize) -> std::io::Result<()> {
+pub async fn run_actix_server(
+    config: Config,
+    batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>,
+    actix_threads: usize,
+) -> std::io::Result<()> {
     let addr = config.net_config.addr.clone();
     // Add 1000 to the port.
     let (host, port) = addr.split_once(':').unwrap();
@@ -327,7 +344,6 @@ pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::cha
     let addr = format!("{}:{}", host, port);
 
     let batch_size = config.consensus_config.max_backlog_batch_size.max(256);
-
 
     let probe_for_byz_commit = Arc::new(AtomicBool::new(false)); // This is a global state!
 
@@ -348,17 +364,20 @@ pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::cha
             .service(home)
             .service(num_users)
             .service(toggle_byz_wait)
-
     })
     .workers(actix_threads)
-    .max_connection_rate(batch_size)            // Otherwise the server doesn't load consensus properly.
+    .max_connection_rate(batch_size) // Otherwise the server doesn't load consensus properly.
     .bind(addr)?
     .run()
     .await?;
     Ok(())
 }
 
-async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &AppState) -> Result<Vec<u8>, HttpResponse> {
+async fn send(
+    transaction_ops: Vec<ProtoTransactionOp>,
+    isRead: bool,
+    state: &AppState,
+) -> Result<Vec<u8>, HttpResponse> {
     let transaction_phase = ProtoTransactionPhase {
         ops: transaction_ops,
     };
@@ -380,13 +399,17 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
             is_2pc: false,
         }
     };
-    
 
     let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
 
     let (tx, mut rx) = mpsc::channel(1);
-    let tx_with_ack_chan_tag: TxWithAckChanTag = (Some(transaction), (tx, current_tag, SenderType::Anon));
-    state.batch_proposer_tx.send(tx_with_ack_chan_tag).await.unwrap();
+    let tx_with_ack_chan_tag: TxWithAckChanTag =
+        (Some(transaction), (tx, current_tag, SenderType::Anon));
+    state
+        .batch_proposer_tx
+        .send(tx_with_ack_chan_tag)
+        .await
+        .unwrap();
 
     let (resp, _) = match rx.recv().await {
         Some(resp) => resp,
@@ -420,24 +443,24 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
                 }
                 block_n = receipt.block_n;
             }
-        },
+        }
         _ => {
             return Err(HttpResponse::NotFound().json(serde_json::json!({
                 "message": "error, no Receipt found",
                 "result": result,
             })))
-        },
+        }
     };
 
     if !isRead && block_n != 0 && state.probe_for_byz_commit.load(Ordering::Relaxed) {
         let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
-    
+
         let probe_transaction = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
                     op_type: pft::proto::execution::ProtoTransactionOpType::Probe.into(),
                     operands: vec![block_n.to_be_bytes().to_vec()],
-                }]
+                }],
             }),
             on_crash_commit: None,
             on_byzantine_commit: None,
@@ -446,8 +469,13 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
         };
 
         let (tx, mut rx) = mpsc::channel(1);
-        let tx_with_ack_chan_tag: TxWithAckChanTag = (Some(probe_transaction), (tx, current_tag, SenderType::Anon));
-        state.batch_proposer_tx.send(tx_with_ack_chan_tag).await.unwrap();
+        let tx_with_ack_chan_tag: TxWithAckChanTag =
+            (Some(probe_transaction), (tx, current_tag, SenderType::Anon));
+        state
+            .batch_proposer_tx
+            .send(tx_with_ack_chan_tag)
+            .await
+            .unwrap();
 
         let _ = rx.recv().await;
 

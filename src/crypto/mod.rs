@@ -3,8 +3,8 @@
 
 mod ed25519;
 // mod sha256;
-mod sha512;
 mod service;
+mod sha512;
 
 #[cfg(test)]
 mod tests;

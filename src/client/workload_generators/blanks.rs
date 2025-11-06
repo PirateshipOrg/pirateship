@@ -1,10 +1,12 @@
 use rand::{thread_rng, Rng};
 
-use crate::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase, ProtoTransactionResult};
+use crate::proto::execution::{
+    ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase, ProtoTransactionResult,
+};
 
-use super::{PerWorkerWorkloadGenerator, WorkloadUnit, Executor};
+use super::{Executor, PerWorkerWorkloadGenerator, WorkloadUnit};
 
-pub struct BlankWorkloadGenerator { }
+pub struct BlankWorkloadGenerator {}
 
 impl PerWorkerWorkloadGenerator for BlankWorkloadGenerator {
     fn next(&mut self) -> WorkloadUnit {
@@ -16,23 +18,26 @@ impl PerWorkerWorkloadGenerator for BlankWorkloadGenerator {
         }
         // let payload = vec![2u8; 512];
         WorkloadUnit {
-            tx: ProtoTransaction{
+            tx: ProtoTransaction {
                 on_receive: None,
                 on_crash_commit: Some(ProtoTransactionPhase {
-                    ops: vec![ProtoTransactionOp {
-                        op_type: crate::proto::execution::ProtoTransactionOpType::Noop.into(),
-                        operands: vec![payload],
-                        // operands: vec![vec![2u8; 0]],
-                    }; 1],
+                    ops: vec![
+                        ProtoTransactionOp {
+                            op_type: crate::proto::execution::ProtoTransactionOpType::Noop.into(),
+                            operands: vec![payload],
+                            // operands: vec![vec![2u8; 0]],
+                        };
+                        1
+                    ],
                 }),
                 on_byzantine_commit: None,
                 is_reconfiguration: false,
                 is_2pc: false,
             },
-            executor: Executor::Leader
+            executor: Executor::Leader,
         }
     }
-    
+
     fn check_result(&mut self, _result: &Option<ProtoTransactionResult>) -> bool {
         true
     }

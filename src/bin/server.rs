@@ -4,11 +4,14 @@
 use log::{debug, error, info, warn};
 use pft::config::{self, Config};
 use pft::consensus;
-use tokio::{runtime, signal};
-use std::process::exit;
-use std::{env, fs, io, path, sync::{atomic::AtomicUsize, Arc, Mutex}};
-use pft::consensus::engines::{null_app::NullApp, kvs::KVSAppEngine};
+use pft::consensus::engines::{kvs::KVSAppEngine, null_app::NullApp};
 use std::io::Write;
+use std::process::exit;
+use std::{
+    env, fs, io, path,
+    sync::{atomic::AtomicUsize, Arc, Mutex},
+};
+use tokio::{runtime, signal};
 
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
@@ -43,15 +46,39 @@ fn get_feature_set() -> (&'static str, &'static str) {
     let mut app = "";
     let mut protocol = "";
 
-    #[cfg(feature = "app_logger")]{ app = "app_logger"; }
-    #[cfg(feature = "app_kvs")]{ app = "app_kvs"; }
-    #[cfg(feature = "app_sql")]{ app = "app_sql"; }
+    #[cfg(feature = "app_logger")]
+    {
+        app = "app_logger";
+    }
+    #[cfg(feature = "app_kvs")]
+    {
+        app = "app_kvs";
+    }
+    #[cfg(feature = "app_sql")]
+    {
+        app = "app_sql";
+    }
 
-    #[cfg(feature = "lucky_raft")]{ protocol = "lucky_raft"; }
-    #[cfg(feature = "signed_raft")]{ protocol = "signed_raft"; }
-    #[cfg(feature = "chained_pbft")]{ protocol = "chained_pbft"; }
-    #[cfg(feature = "pirateship")]{ protocol = "pirateship"; }
-    #[cfg(feature = "engraft")]{ protocol = "engraft"; }
+    #[cfg(feature = "lucky_raft")]
+    {
+        protocol = "lucky_raft";
+    }
+    #[cfg(feature = "signed_raft")]
+    {
+        protocol = "signed_raft";
+    }
+    #[cfg(feature = "chained_pbft")]
+    {
+        protocol = "chained_pbft";
+    }
+    #[cfg(feature = "pirateship")]
+    {
+        protocol = "pirateship";
+    }
+    #[cfg(feature = "engraft")]
+    {
+        protocol = "engraft";
+    }
 
     (protocol, app)
 }
@@ -61,13 +88,13 @@ async fn run_main(cfg: Config) -> io::Result<()> {
     let mut node = consensus::ConsensusNode::<NullApp>::new(cfg);
     // #[cfg(feature = "app_logger")]
     // let node = Arc::new(consensus::ConsensusNode::<PinnedLoggerEngine>::new(&cfg));
-    
+
     #[cfg(feature = "app_kvs")]
     let mut node = consensus::ConsensusNode::<KVSAppEngine>::new(cfg);
-    
+
     #[cfg(feature = "app_sql")]
     let node = Arc::new(consensus::ConsensusNode::<PinnedSQLEngine>::new(&cfg));
-    
+
     // let mut handles = consensus::ConsensusNode::run(node);
     let mut handles = node.run().await;
 
@@ -78,7 +105,7 @@ async fn run_main(cfg: Config) -> io::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             info!("Force shutdown.");
             exit(0);
-        },
+        }
         Err(e) => {
             error!("Signal: {:?}", e);
         }
@@ -105,10 +132,14 @@ fn main() {
         warn!("Will simulate Byzantine behavior!");
     }
 
-    let core_ids = 
-        Arc::new(Mutex::new(Box::pin(core_affinity::get_core_ids().unwrap())));
+    let core_ids = Arc::new(Mutex::new(Box::pin(core_affinity::get_core_ids().unwrap())));
 
-    let start_idx = cfg.consensus_config.node_list.iter().position(|r| r.eq(&cfg.net_config.name)).unwrap();
+    let start_idx = cfg
+        .consensus_config
+        .node_list
+        .iter()
+        .position(|r| r.eq(&cfg.net_config.name))
+        .unwrap();
     let mut num_threads = NUM_THREADS;
     {
         let _num_cores = core_ids.lock().unwrap().len();
@@ -119,7 +150,7 @@ fn main() {
     }
 
     let start_idx = start_idx * num_threads;
-    
+
     let i = Box::pin(AtomicUsize::new(0));
     let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
@@ -127,16 +158,16 @@ fn main() {
         .on_thread_start(move || {
             let _cids = core_ids.clone();
             let lcores = _cids.lock().unwrap();
-            let id = (start_idx + i.fetch_add(1, std::sync::atomic::Ordering::SeqCst)) % lcores.len();
+            let id =
+                (start_idx + i.fetch_add(1, std::sync::atomic::Ordering::SeqCst)) % lcores.len();
             let res = core_affinity::set_for_current(lcores[id]);
-    
+
             if res {
                 debug!("Thread pinned to core {:?}", id);
-            }else{
+            } else {
                 debug!("Thread pinning to core {:?} failed", id);
             }
-            std::io::stdout().flush()
-                .unwrap();
+            std::io::stdout().flush().unwrap();
         })
         .build()
         .unwrap();

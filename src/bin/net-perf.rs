@@ -2,10 +2,28 @@
 // Licensed under the MIT License.
 
 use log::{debug, error, info};
-use pft::{config::{self, Config}, crypto::{AtomicKeyStore, KeyStore}, rpc::{client::{Client, PinnedClient}, server::{LatencyProfile, MsgAckChan, RespType, Server, ServerContextType}, MessageRef, PinnedMessage}};
-use tokio::{runtime, signal, task::JoinSet, time::sleep};
-use std::{env, fs, io::{self, Error}, path, pin::Pin, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex}, time::Duration};
+use pft::{
+    config::{self, Config},
+    crypto::{AtomicKeyStore, KeyStore},
+    rpc::{
+        client::{Client, PinnedClient},
+        server::{LatencyProfile, MsgAckChan, RespType, Server, ServerContextType},
+        MessageRef, PinnedMessage,
+    },
+};
 use std::io::Write;
+use std::{
+    env, fs,
+    io::{self, Error},
+    path,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
+use tokio::{runtime, signal, task::JoinSet, time::sleep};
 
 // #[global_allocator]
 // static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
@@ -42,13 +60,12 @@ fn process_args() -> (Config, usize) {
             Ok(sz) => sz,
             Err(_) => {
                 panic!(usage_str!(), args[0]);
-            },
+            }
         }
     };
 
     (Config::deserialize(&cfg_contents), payload_size)
 }
-
 
 struct ProfilerContext {
     pub bytes_completed_bcasts: AtomicUsize,
@@ -57,7 +74,6 @@ struct ProfilerContext {
     pub config: Config,
 }
 
-
 #[derive(Clone)]
 pub struct PinnedProfilerContext(pub Arc<Pin<Box<ProfilerContext>>>);
 
@@ -65,8 +81,12 @@ impl ServerContextType for PinnedProfilerContext {
     fn get_server_keys(&self) -> Arc<Box<pft::crypto::KeyStore>> {
         self.0.key_store.get()
     }
-    
-    async fn handle_rpc(&self, msg: MessageRef<'_>, ack_chan: MsgAckChan) -> Result<RespType, Error> {
+
+    async fn handle_rpc(
+        &self,
+        msg: MessageRef<'_>,
+        ack_chan: MsgAckChan,
+    ) -> Result<RespType, Error> {
         profiler_rpc_handler(self, msg, ack_chan)
     }
 }
@@ -82,8 +102,7 @@ impl PinnedProfilerContext {
     }
 }
 
-pub struct ProfilerNode
-{
+pub struct ProfilerNode {
     pub server: Arc<Server<PinnedProfilerContext>>,
     pub client: PinnedClient,
     pub ctx: PinnedProfilerContext,
@@ -94,20 +113,17 @@ pub fn profiler_rpc_handler<'a>(
     m: MessageRef<'a>,
     _ack_tx: MsgAckChan,
 ) -> Result<RespType, Error> {
-
     ctx.0.bytes_received_msgs.fetch_add(m.1, Ordering::SeqCst);
     Ok(RespType::NoResp)
 }
 
-
-impl ProfilerNode
-{
+impl ProfilerNode {
     pub fn new(config: &Config) -> ProfilerNode {
         let key_store = KeyStore::new(
             &config.rpc_config.allowed_keylist_path,
             &config.rpc_config.signing_priv_key_path,
         );
-        
+
         let ctx = PinnedProfilerContext::new(config, &key_store);
         ProfilerNode {
             server: Arc::new(Server::new(config, ctx.clone(), &key_store)),
@@ -125,21 +141,27 @@ impl ProfilerNode
         let node3 = node.clone();
 
         js.spawn(async move {
-            let _ = Server::<PinnedProfilerContext>::run(node1.server.clone())
-                .await;
+            let _ = Server::<PinnedProfilerContext>::run(node1.server.clone()).await;
         });
 
         js.spawn(async move {
             let payload = vec![2u8; payload_sz];
             let msg = PinnedMessage::from(payload, payload_sz, pft::rpc::SenderType::Anon);
             // let send_list = get_everyone_except_me(
-                // &node2.ctx.0.config.net_config.name,
-                // &node2.ctx.0.config.consensus_config.node_list);
+            // &node2.ctx.0.config.net_config.name,
+            // &node2.ctx.0.config.consensus_config.node_list);
 
-            let send_list = node2.ctx.0.config.consensus_config.node_list.iter()
+            let send_list = node2
+                .ctx
+                .0
+                .config
+                .consensus_config
+                .node_list
+                .iter()
                 .filter(|e| *e != &node2.ctx.0.config.net_config.name)
-                .map(|e| e.clone()).collect::<Vec<String>>();
-            
+                .map(|e| e.clone())
+                .collect::<Vec<String>>();
+
             info!("{:?}", send_list);
             if node2.ctx.0.config.net_config.name == "node1" {
                 // I will broadcast
@@ -149,12 +171,19 @@ impl ProfilerNode
                     let _ = PinnedClient::broadcast(
                         &node2.client,
                         &send_list,
-                        &msg, &mut profile, min_success).await;
+                        &msg,
+                        &mut profile,
+                        min_success,
+                    )
+                    .await;
 
-                    node2.ctx.0.bytes_completed_bcasts.fetch_add(payload_sz * send_list.len(), Ordering::SeqCst);
+                    node2
+                        .ctx
+                        .0
+                        .bytes_completed_bcasts
+                        .fetch_add(payload_sz * send_list.len(), Ordering::SeqCst);
                 }
             }
-
         });
 
         js.spawn(async move {
@@ -168,7 +197,10 @@ impl ProfilerNode
                     now = node3.ctx.0.bytes_received_msgs.load(Ordering::SeqCst);
                 }
 
-                info!("Throughput estimate: {} Mbps", ((now - last) as f64) * 8.0 / (1024.0 * 1024.0));
+                info!(
+                    "Throughput estimate: {} Mbps",
+                    ((now - last) as f64) * 8.0 / (1024.0 * 1024.0)
+                );
                 last = now;
             }
         });
@@ -176,8 +208,6 @@ impl ProfilerNode
         js
     }
 }
-
-
 
 async fn run_main(cfg: Config, payload_sz: usize) -> io::Result<()> {
     let node = Arc::new(ProfilerNode::new(&cfg));
@@ -187,7 +217,7 @@ async fn run_main(cfg: Config, payload_sz: usize) -> io::Result<()> {
         Ok(_) => {
             info!("Received SIGINT. Shutting down.");
             handles.abort_all();
-        },
+        }
         Err(e) => {
             error!("Signal: {:?}", e);
         }
@@ -206,8 +236,7 @@ fn main() {
 
     let (cfg, payload_sz) = process_args();
 
-    let core_ids = 
-        Arc::new(Mutex::new(Box::pin(core_affinity::get_core_ids().unwrap())));
+    let core_ids = Arc::new(Mutex::new(Box::pin(core_affinity::get_core_ids().unwrap())));
 
     // let start_idx = cfg.consensus_config.node_list.iter().position(|r| r.eq(&cfg.net_config.name)).unwrap();
     let mut num_threads = NUM_THREADS;
@@ -219,7 +248,7 @@ fn main() {
     }
 
     let start_idx = 0; // start_idx * num_threads;
-    
+
     let i = Box::pin(AtomicUsize::new(0));
     let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
@@ -227,17 +256,17 @@ fn main() {
         .on_thread_start(move || {
             let _cids = core_ids.clone();
             let lcores = _cids.lock().unwrap();
-            let id = (start_idx + i.fetch_add(1, std::sync::atomic::Ordering::SeqCst)) % lcores.len();
+            let id =
+                (start_idx + i.fetch_add(1, std::sync::atomic::Ordering::SeqCst)) % lcores.len();
             let res = core_affinity::set_for_current(lcores[id]);
-            
+
             if res {
                 debug!("Thread pinned to core {:?}", id);
-            }else{
+            } else {
                 debug!("Thread pinning to core {:?} failed", id);
             }
 
-            std::io::stdout().flush()
-                .unwrap();
+            std::io::stdout().flush().unwrap();
         })
         .build()
         .unwrap();

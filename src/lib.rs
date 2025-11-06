@@ -1,8 +1,8 @@
 // Copyright (c) Shubham Mishra. All rights reserved.
 // Licensed under the MIT License.
 
-pub mod utils;
 pub mod config;
+pub mod utils;
 // pub mod consensus;
 pub mod consensus;
 pub mod crypto;
@@ -18,7 +18,7 @@ macro_rules! get_tx_list {
         &match &$block.tx.as_ref().unwrap() {
             crate::proto::consensus::proto_block::Tx::TxList(l) => l,
             crate::proto::consensus::proto_block::Tx::TxListHash(_) => panic!("Incomplete block"),
-        }.tx_list
+        }
+        .tx_list
     };
 }
-

@@ -1,11 +1,26 @@
-use std::{collections::{BTreeMap, HashMap, VecDeque}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::Arc,
+};
 
 use log::{error, info, trace, warn};
 use prost::Message as _;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::CachedBlock, proto::{checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint}, consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange}, rpc::{proto_payload::Message, ProtoPayload}}, rpc::{client::PinnedClient, MessageRef, PinnedMessage}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser, StorageServiceConnector}};
-
+use crate::{
+    config::AtomicConfig,
+    crypto::CachedBlock,
+    proto::{
+        checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint},
+        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange},
+        rpc::{proto_payload::Message, ProtoPayload},
+    },
+    rpc::{client::PinnedClient, MessageRef, PinnedMessage},
+    utils::{
+        channel::{Receiver, Sender},
+        get_parent_hash_in_proto_block_ser, StorageServiceConnector,
+    },
+};
 
 /// Deletes older blocks in favor of newer ones.
 /// If the cache is full, and the block being put() has a lower n than the oldest block in the cache,
@@ -24,10 +39,9 @@ impl ReadCache {
         }
         ReadCache {
             cache: BTreeMap::new(),
-            working_set_size
+            working_set_size,
         }
     }
-
 
     /// Return vals:
     /// - Ok(block) if the block is in the cache.
@@ -54,7 +68,8 @@ impl ReadCache {
 
     pub fn put(&mut self, block: CachedBlock) {
         if self.cache.len() >= self.working_set_size
-            && block.block.n < *self.cache.first_entry().unwrap().key() {
+            && block.block.n < *self.cache.first_entry().unwrap().key()
+        {
             // Don't put this in the cache.
             return;
         }
@@ -66,10 +81,16 @@ impl ReadCache {
     }
 }
 
-
 pub enum LogServerQuery {
-    CheckHash(u64 /* block.n */, Vec<u8> /* block_hash */, Sender<bool>),
-    GetHints(u64 /* last needed block.n */, Sender<Vec<ProtoBlockHint>>),
+    CheckHash(
+        u64,     /* block.n */
+        Vec<u8>, /* block_hash */
+        Sender<bool>,
+    ),
+    GetHints(
+        u64, /* last needed block.n */
+        Sender<Vec<ProtoBlockHint>>,
+    ),
 }
 
 pub enum LogServerCommand {
@@ -89,7 +110,6 @@ pub struct LogServer {
 
     query_rx: Receiver<LogServerQuery>,
 
-
     storage: StorageServiceConnector,
     log: VecDeque<CachedBlock>,
 
@@ -101,16 +121,21 @@ const LOGSERVER_READ_CACHE_WSS: usize = 100;
 
 impl LogServer {
     pub fn new(
-        config: AtomicConfig, client: PinnedClient,
-        logserver_rx: Receiver<LogServerCommand>, backfill_request_rx: Receiver<ProtoBackfillNack>,
-        gc_rx: Receiver<u64>, query_rx: Receiver<LogServerQuery>,
-        storage: StorageServiceConnector) -> Self {
+        config: AtomicConfig,
+        client: PinnedClient,
+        logserver_rx: Receiver<LogServerCommand>,
+        backfill_request_rx: Receiver<ProtoBackfillNack>,
+        gc_rx: Receiver<u64>,
+        query_rx: Receiver<LogServerQuery>,
+        storage: StorageServiceConnector,
+    ) -> Self {
         LogServer {
             config,
             client,
             logserver_rx,
             backfill_request_rx,
-            gc_rx, query_rx,
+            gc_rx,
+            query_rx,
             storage,
             log: VecDeque::new(),
             read_cache: ReadCache::new(LOGSERVER_READ_CACHE_WSS),
@@ -126,7 +151,6 @@ impl LogServer {
             }
         }
     }
-
 
     async fn worker(&mut self) -> Result<(), ()> {
         tokio::select! {
@@ -174,7 +198,6 @@ impl LogServer {
         Ok(())
     }
 
-
     async fn get_block(&mut self, n: u64) -> Option<CachedBlock> {
         let last_n = self.log.back()?.block.n;
         if n == 0 || n > last_n {
@@ -202,10 +225,8 @@ impl LogServer {
         let starting_point = match self.read_cache.get(n) {
             Ok(block) => {
                 return Some(block);
-            },
-            Err(Some(block)) => {
-                block
-            },
+            }
+            Err(Some(block)) => block,
             Err(None) => {
                 // Get the first block in the log.
                 self.log.front()?.clone()
@@ -216,7 +237,10 @@ impl LogServer {
         let mut ret = starting_point;
         while ret.block.n > n {
             let parent_hash = &ret.block.parent;
-            let block = self.storage.get_block(parent_hash).await
+            let block = self
+                .storage
+                .get_block(parent_hash)
+                .await
                 .expect("Failed to get block from storage");
             self.read_cache.put(block.clone());
             ret = block;
@@ -229,23 +253,19 @@ impl LogServer {
         let sender = backfill_req.reply_name;
         let hints = backfill_req.hints;
         let existing_fork = match &backfill_req.origin {
-            Some(Origin::Ae(ae)) => {
-                match ae.fork.as_ref() {
-                    Some(fork) => fork,
-                    None => {
-                        warn!("Malformed request");
-                        return Ok(());
-                    }
+            Some(Origin::Ae(ae)) => match ae.fork.as_ref() {
+                Some(fork) => fork,
+                None => {
+                    warn!("Malformed request");
+                    return Ok(());
                 }
             },
 
-            Some(Origin::Vc(vc)) => {
-                match vc.fork.as_ref() {
-                    Some(fork) => fork,
-                    None => {
-                        warn!("Malformed request");
-                        return Ok(());
-                    }
+            Some(Origin::Vc(vc)) => match vc.fork.as_ref() {
+                Some(fork) => fork,
+                None => {
+                    warn!("Malformed request");
+                    return Ok(());
                 }
             },
 
@@ -268,46 +288,52 @@ impl LogServer {
         let new_fork = self.fill_fork(first_n, last_n, hints).await;
 
         let payload = match backfill_req.origin.unwrap() {
-            Origin::Ae(ae) => {
-                ProtoPayload {
-                    message: Some(Message::AppendEntries(ProtoAppendEntries {
-                        fork: Some(new_fork),
-                        is_backfill_response: true,
-                        ..ae
-                    }))
-                }
+            Origin::Ae(ae) => ProtoPayload {
+                message: Some(Message::AppendEntries(ProtoAppendEntries {
+                    fork: Some(new_fork),
+                    is_backfill_response: true,
+                    ..ae
+                })),
             },
 
-            Origin::Vc(vc) => {
-                ProtoPayload {
-                    message: Some(Message::ViewChange(ProtoViewChange {
-                        fork: Some(new_fork),
-                        ..vc
-                    }))
-                }
-            }
+            Origin::Vc(vc) => ProtoPayload {
+                message: Some(Message::ViewChange(ProtoViewChange {
+                    fork: Some(new_fork),
+                    ..vc
+                })),
+            },
         };
 
         // Send the payload to the sender.
         let buf = payload.encode_to_vec();
 
-        let _ = PinnedClient::send(&self.client, &sender,
-            MessageRef(&buf, buf.len(), &crate::rpc::SenderType::Anon)
-        ).await;
-
+        let _ = PinnedClient::send(
+            &self.client,
+            &sender,
+            MessageRef(&buf, buf.len(), &crate::rpc::SenderType::Anon),
+        )
+        .await;
 
         Ok(())
     }
 
     /// Returns a fork that contains blocks from `first_n` to `last_n` (both inclusive).
     /// During the process, if one of my blocks matches in hints, we stop.
-    async fn fill_fork(&mut self, first_n: u64, last_n: u64, mut hints: Vec<ProtoBlockHint>) -> ProtoFork {
+    async fn fill_fork(
+        &mut self,
+        first_n: u64,
+        last_n: u64,
+        mut hints: Vec<ProtoBlockHint>,
+    ) -> ProtoFork {
         if last_n < first_n {
             panic!("Invalid range");
         }
-        
-        let hint_map = hints.drain(..).map(|hint| (hint.block_n, hint.digest)).collect::<HashMap<_, _>>();
-        
+
+        let hint_map = hints
+            .drain(..)
+            .map(|hint| (hint.block_n, hint.digest))
+            .collect::<HashMap<_, _>>();
+
         let mut fork_queue = VecDeque::with_capacity((last_n - first_n + 1) as usize);
 
         for i in (first_n..=last_n).rev() {
@@ -330,14 +356,16 @@ impl LogServer {
         }
 
         ProtoFork {
-            serialized_blocks: fork_queue.into_iter()
+            serialized_blocks: fork_queue
+                .into_iter()
                 .map(|block| HalfSerializedBlock {
                     n: block.block.n,
                     view: block.block.view,
                     view_is_stable: block.block.view_is_stable,
                     config_num: block.block.config_num,
                     serialized_body: block.block_ser.clone(),
-                }).collect(),
+                })
+                .collect(),
         }
     }
 
@@ -352,14 +380,18 @@ impl LogServer {
                 let block = match self.get_block(n).await {
                     Some(block) => block,
                     None => {
-                        error!("Block {} not found, last_n seen: {}", n, self.log.back().map_or(0, |block| block.block.n));
+                        error!(
+                            "Block {} not found, last_n seen: {}",
+                            n,
+                            self.log.back().map_or(0, |block| block.block.n)
+                        );
                         sender.send(false).await.unwrap();
                         return;
                     }
                 };
 
                 sender.send(block.block_hash.eq(&hsh)).await.unwrap();
-            },
+            }
             LogServerQuery::GetHints(last_needed_n, sender) => {
                 // Starting from last_needed_n,
                 // Include last_needed_n, last_needed_n + 1000, last_needed_n + 2000, ..., until last_needed_n + 10000,
@@ -392,7 +424,6 @@ impl LogServer {
                         digest: block.block_hash.clone(),
                     });
 
-
                     curr_n += curr_jump;
                     curr_jump_used_for += 1;
                     if curr_jump_used_for >= JUMP_MULTIPLIER {
@@ -424,12 +455,14 @@ impl LogServer {
         }
     }
 
-
     /// Invariant: Log is continuous, increasing seq num and maintains hash chain continuity
     async fn handle_new_block(&mut self, block: CachedBlock) {
         let last_n = self.log.back().map_or(0, |block| block.block.n);
         if block.block.n != last_n + 1 {
-            error!("Block {} is not the next block, last_n: {}", block.block.n, last_n);
+            error!(
+                "Block {} is not the next block, last_n: {}",
+                block.block.n, last_n
+            );
             return;
         }
 
@@ -440,7 +473,6 @@ impl LogServer {
 
         self.log.push_back(block);
     }
-
 
     async fn handle_rollback(&mut self, mut n: u64) {
         if n <= self.bci {

@@ -1,19 +1,50 @@
-use std::{cell::RefCell, collections::{BTreeMap, HashMap, VecDeque}, marker::PhantomData, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap, VecDeque},
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
 
 use hex::ToHex;
 use log::{error, info, trace, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH}, proto::{client::ProtoByzResponse, execution::{ProtoTransaction, ProtoTransactionOpResult, ProtoTransactionOpType, ProtoTransactionResult}}, utils::{channel::{Receiver, Sender}, PerfCounter}};
+use crate::{
+    config::AtomicConfig,
+    crypto::{default_hash, CachedBlock, HashType, DIGEST_LENGTH},
+    proto::{
+        client::ProtoByzResponse,
+        execution::{
+            ProtoTransaction, ProtoTransactionOpResult, ProtoTransactionOpType,
+            ProtoTransactionResult,
+        },
+    },
+    utils::{
+        channel::{Receiver, Sender},
+        PerfCounter,
+    },
+};
 
-use super::{client_reply::ClientReplyCommand, super::utils::timer::ResettableTimer};
-
+use super::{super::utils::timer::ResettableTimer, client_reply::ClientReplyCommand};
 
 pub enum AppCommand {
-    NewRequestBatch(u64 /* block.n */, u64 /* view */, bool /* view_is_stable */, bool /* i_am_leader */, usize /* length of new batch of request */, HashType /* hash of the last block */),
-    CrashCommit(Vec<CachedBlock> /* all blocks from old_ci + 1 to new_ci */),
-    ByzCommit(Vec<CachedBlock> /* all blocks from old_bci + 1 to new_bci */),
+    NewRequestBatch(
+        u64,      /* block.n */
+        u64,      /* view */
+        bool,     /* view_is_stable */
+        bool,     /* i_am_leader */
+        usize,    /* length of new batch of request */
+        HashType, /* hash of the last block */
+    ),
+    CrashCommit(
+        Vec<CachedBlock>, /* all blocks from old_ci + 1 to new_ci */
+    ),
+    ByzCommit(
+        Vec<CachedBlock>, /* all blocks from old_bci + 1 to new_bci */
+    ),
     Rollback(u64 /* new last block */),
 }
 
@@ -21,7 +52,8 @@ pub trait AppEngine {
     type State: std::fmt::Debug + std::fmt::Display + Clone + Serialize + DeserializeOwned + Send;
 
     fn new(config: AtomicConfig) -> Self;
-    fn handle_crash_commit(&mut self, blocks: Vec<CachedBlock>) -> Vec<Vec<ProtoTransactionResult>>;
+    fn handle_crash_commit(&mut self, blocks: Vec<CachedBlock>)
+        -> Vec<Vec<ProtoTransactionResult>>;
     fn handle_byz_commit(&mut self, blocks: Vec<CachedBlock>) -> Vec<Vec<ProtoByzResponse>>;
     fn handle_rollback(&mut self, new_last_block: u64);
     fn handle_unlogged_request(&mut self, request: ProtoTransaction) -> ProtoTransactionResult;
@@ -109,7 +141,7 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
 
     staging_rx: Receiver<AppCommand>,
     unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-    
+
     #[cfg(feature = "extra_2pc")]
     twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
@@ -125,24 +157,28 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     phantom: PhantomData<&'a E>,
 }
 
-
 impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
     pub fn new(
         config: AtomicConfig,
-        staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-        client_reply_tx: Sender<ClientReplyCommand>, gc_tx: Sender<u64>,
+        staging_rx: Receiver<AppCommand>,
+        unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
+        client_reply_tx: Sender<ClientReplyCommand>,
+        gc_tx: Sender<u64>,
 
-        #[cfg(feature = "extra_2pc")]
-        twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
+        #[cfg(feature = "extra_2pc")] twopc_tx: Sender<(
+            ProtoTransaction,
+            oneshot::Sender<ProtoTransactionResult>,
+        )>,
     ) -> Self {
-        let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
-        let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
+        let checkpoint_timer = ResettableTimer::new(Duration::from_millis(
+            config.get().app_config.checkpoint_interval_ms,
+        ));
+        let log_timer = ResettableTimer::new(Duration::from_millis(
+            config.get().app_config.logger_stats_report_ms,
+        ));
         let engine = E::new(config.clone());
 
-        let event_order = vec![
-            "Process Crash Committed Block",
-            "Send Reply",
-        ];
+        let event_order = vec!["Process Crash Committed Block", "Send Reply"];
         let perf_counter = RefCell::new(PerfCounter::new("Application", &event_order));
         Self {
             config,
@@ -159,7 +195,7 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             #[cfg(feature = "extra_2pc")]
             twopc_tx,
 
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 
@@ -230,11 +266,14 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
 
         if self.stats.bci > 1 {
             self.gc_tx.send(self.stats.bci - 1).await.unwrap();
-        } 
-
+        }
     }
 
-    async fn handle_unlogged_request(&mut self, request: ProtoTransaction, reply_tx: oneshot::Sender<ProtoTransactionResult>) {
+    async fn handle_unlogged_request(
+        &mut self,
+        request: ProtoTransaction,
+        reply_tx: oneshot::Sender<ProtoTransactionResult>,
+    ) {
         #[cfg(feature = "extra_2pc")]
         {
             if request.is_2pc {
@@ -244,7 +283,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             }
         }
 
-        
         let result = self.engine.handle_unlogged_request(request);
         self.stats.total_requests += 1;
         self.stats.total_unlogged_txs += 1;
@@ -264,12 +302,16 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         self.perf_counter.borrow_mut().new_event(event, &entry);
     }
 
-
-
-
     async fn handle_staging_command(&mut self, cmd: AppCommand) {
         match cmd {
-            AppCommand::NewRequestBatch(n, view, view_is_stable, i_am_leader, length, last_hash) => {
+            AppCommand::NewRequestBatch(
+                n,
+                view,
+                view_is_stable,
+                i_am_leader,
+                length,
+                last_hash,
+            ) => {
                 self.stats.last_n = n;
                 self.stats.view = view;
                 self.stats.view_is_stable = view_is_stable;
@@ -284,69 +326,90 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 }
 
                 self.perf_register(n);
-            },
+            }
             AppCommand::CrashCommit(blocks) => {
                 let mut new_ci = self.stats.ci;
                 let mut new_last_qc = self.stats.last_qc;
-                let (block_hashes, block_ns) = blocks.iter().map(|block| {
-                    if new_ci < block.block.n {
-                        new_ci = block.block.n;
-                    }
-
-                    for qc in &block.block.qc {
-                        if new_last_qc < qc.n {
-                            new_last_qc = qc.n;
+                let (block_hashes, block_ns) = blocks
+                    .iter()
+                    .map(|block| {
+                        if new_ci < block.block.n {
+                            new_ci = block.block.n;
                         }
-                    }
-                    (block.block_hash.clone(), block.block.n)
-                }).collect::<(Vec<_>, Vec<_>)>();
+
+                        for qc in &block.block.qc {
+                            if new_last_qc < qc.n {
+                                new_last_qc = qc.n;
+                            }
+                        }
+                        (block.block_hash.clone(), block.block.n)
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
                 let results = self.engine.handle_crash_commit(blocks);
-                
+
                 for n in &block_ns {
                     self.perf_add_event(*n, "Process Crash Committed Block");
                 }
 
-                self.stats.total_crash_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
+                self.stats.total_crash_committed_txs +=
+                    results.iter().map(|e| e.len() as u64).sum::<u64>();
                 self.stats.ci = new_ci;
                 self.stats.last_qc = new_last_qc;
 
                 assert_eq!(block_hashes.len(), results.len());
 
                 let block_ns_cp = block_ns.clone();
-                let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoTransactionResult>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
-                    block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoTransactionResult>)
-                ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::CrashCommitAck(result_map)).await.unwrap();
+                let result_map = block_hashes
+                    .into_iter()
+                    .zip(
+                        // (HashType, (u64, Vec<ProtoTransactionResult>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
+                        block_ns.into_iter().zip(results.into_iter()), // (u64, Vec<ProtoTransactionResult>)
+                    )
+                    .collect();
+                self.client_reply_tx
+                    .send(ClientReplyCommand::CrashCommitAck(result_map))
+                    .await
+                    .unwrap();
                 for n in block_ns_cp {
                     self.perf_add_event(n, "Send Reply");
                 }
-            },
+            }
             AppCommand::ByzCommit(blocks) => {
                 let mut new_bci = self.stats.bci;
-                let (block_hashes, block_ns) = blocks.iter().map(|block| {
-                    if new_bci < block.block.n {
-                        new_bci = block.block.n;
-                    }
-                    (block.block_hash.clone(), block.block.n)
-                }).collect::<(Vec<_>, Vec<_>)>();
+                let (block_hashes, block_ns) = blocks
+                    .iter()
+                    .map(|block| {
+                        if new_bci < block.block.n {
+                            new_bci = block.block.n;
+                        }
+                        (block.block_hash.clone(), block.block.n)
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
                 let results = self.engine.handle_byz_commit(blocks);
-                self.stats.total_byz_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
+                self.stats.total_byz_committed_txs +=
+                    results.iter().map(|e| e.len() as u64).sum::<u64>();
                 self.stats.bci = new_bci;
 
                 assert_eq!(block_hashes.len(), results.len());
 
                 let block_ns_cp = block_ns.clone();
-                let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoByzResponse>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
-                    block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoByzResponse>)
-                ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::ByzCommitAck(result_map)).await.unwrap();
-                
+                let result_map = block_hashes
+                    .into_iter()
+                    .zip(
+                        // (HashType, (u64, Vec<ProtoByzResponse>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
+                        block_ns.into_iter().zip(results.into_iter()), // (u64, Vec<ProtoByzResponse>)
+                    )
+                    .collect();
+                self.client_reply_tx
+                    .send(ClientReplyCommand::ByzCommitAck(result_map))
+                    .await
+                    .unwrap();
+
                 for n in block_ns_cp {
                     self.perf_deregister(n);
                 }
-
-            },
-            AppCommand::Rollback(mut new_last_block) => {               
+            }
+            AppCommand::Rollback(mut new_last_block) => {
                 if new_last_block <= self.stats.bci {
                     new_last_block = self.stats.bci + 1;
                 }

@@ -2,13 +2,19 @@ use std::{process::exit, time::Instant};
 
 use log::info;
 use rand::distributions::{Uniform, WeightedIndex};
-use rand_chacha::ChaCha20Rng;
 use rand::prelude::*;
+use rand_chacha::ChaCha20Rng;
 use zipf::ZipfDistribution;
 
-use crate::{config::KVReadWriteYCSB, proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionPhase, ProtoTransactionResult}};
+use crate::{
+    config::KVReadWriteYCSB,
+    proto::execution::{
+        ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionPhase,
+        ProtoTransactionResult,
+    },
+};
 
-use super::{PerWorkerWorkloadGenerator, WorkloadUnit, Executor};
+use super::{Executor, PerWorkerWorkloadGenerator, WorkloadUnit};
 
 /// This is enough for YCSB-A, B, C
 #[derive(Clone)]
@@ -20,7 +26,7 @@ enum TxOpType {
 #[derive(Clone)]
 enum TxPhaseType {
     Crash,
-    Byz
+    Byz,
 }
 
 /// This version of YCSB is directly adapted from the original paper: https://courses.cs.duke.edu/fall13/cps296.4/838-CloudPapers/ycsb.pdf
@@ -31,12 +37,12 @@ enum TxPhaseType {
 /// I add an offset of 1_000_000, so the keys have more or less same size in bytes.
 /// Finally for each field, we deal with kv pairs of the form `user<num>:field<fieldnum> --> random val`.
 /// All fields for a key are read or updated together.
-/// 
+///
 /// If the config.load_phase is set, the client will force exit after the load phase completes.
 /// For load phase, it is advised to run with num_clients = 1.
 /// Once the load phase finishes, the run phase (with config.load_phase = false) can be run with however many num_clients as needed.
 /// Load phase can be used for warmup, make sure to remove the load phase time from throughput calculations.
-pub struct KVReadWriteYCSBGenerator { 
+pub struct KVReadWriteYCSBGenerator {
     config: KVReadWriteYCSB,
     rng: ChaCha20Rng,
 
@@ -49,19 +55,26 @@ pub struct KVReadWriteYCSBGenerator {
     key_selection_dist: ZipfDistribution,
 
     val_gen_dist: Uniform<u8>,
-    
+
     last_request_type: TxOpType,
     load_phase_cnt: usize,
     total_clients: usize,
 }
 
 impl KVReadWriteYCSBGenerator {
-    pub fn new(config: &KVReadWriteYCSB, client_idx: usize, total_clients: usize) -> KVReadWriteYCSBGenerator {
+    pub fn new(
+        config: &KVReadWriteYCSB,
+        client_idx: usize,
+        total_clients: usize,
+    ) -> KVReadWriteYCSBGenerator {
         let rng = ChaCha20Rng::from_entropy();
 
         let read_write_weights = [
             (TxOpType::Read, (config.read_ratio * 1000.0) as i32),
-            (TxOpType::Update, ((1.0 - config.read_ratio) * 1000.0) as i32),
+            (
+                TxOpType::Update,
+                ((1.0 - config.read_ratio) * 1000.0) as i32,
+            ),
         ];
         for item in &read_write_weights {
             if item.1 < 0 || item.1 > 1000 {
@@ -71,7 +84,10 @@ impl KVReadWriteYCSBGenerator {
 
         let crash_byz_weights = [
             (TxPhaseType::Byz, (config.byz_commit_ratio * 1000.0) as i32),
-            (TxPhaseType::Crash, ((1.0 - config.byz_commit_ratio) * 1000.0) as i32),
+            (
+                TxPhaseType::Crash,
+                ((1.0 - config.byz_commit_ratio) * 1000.0) as i32,
+            ),
         ];
         for item in &crash_byz_weights {
             if item.1 < 0 || item.1 > 1000 {
@@ -79,11 +95,14 @@ impl KVReadWriteYCSBGenerator {
             }
         }
 
-        let read_write_dist = WeightedIndex::new(read_write_weights.iter().map(|(_, weight)| weight)).unwrap();
-        let crash_byz_dist = WeightedIndex::new(crash_byz_weights.iter().map(|(_, weight)| weight)).unwrap();
-        
-        let key_selection_dist = ZipfDistribution::new(config.num_keys, config.zipf_exponent).unwrap();
-        
+        let read_write_dist =
+            WeightedIndex::new(read_write_weights.iter().map(|(_, weight)| weight)).unwrap();
+        let crash_byz_dist =
+            WeightedIndex::new(crash_byz_weights.iter().map(|(_, weight)| weight)).unwrap();
+
+        let key_selection_dist =
+            ZipfDistribution::new(config.num_keys, config.zipf_exponent).unwrap();
+
         let val_gen_dist = Uniform::new('a' as u8, 'z' as u8);
         KVReadWriteYCSBGenerator {
             config: config.clone(),
@@ -96,9 +115,8 @@ impl KVReadWriteYCSBGenerator {
             val_gen_dist,
             last_request_type: TxOpType::Read,
             load_phase_cnt: client_idx,
-            total_clients
+            total_clients,
         }
-    
     }
 
     fn get_key_str_from_num(&self, num: usize) -> String {
@@ -147,9 +165,8 @@ impl KVReadWriteYCSBGenerator {
 
             ops.push(ProtoTransactionOp {
                 op_type: ProtoTransactionOpType::Write.into(),
-                operands: vec![key.into_bytes(), val]
+                operands: vec![key.into_bytes(), val],
             });
-            
         }
 
         self.last_request_type = TxOpType::Update;
@@ -157,14 +174,12 @@ impl KVReadWriteYCSBGenerator {
         WorkloadUnit {
             tx: ProtoTransaction {
                 on_receive: None,
-                on_crash_commit: Some(ProtoTransactionPhase {
-                    ops,
-                }),
+                on_crash_commit: Some(ProtoTransactionPhase { ops }),
                 on_byzantine_commit: None,
                 is_reconfiguration: false,
                 is_2pc: false,
             },
-            executor: Executor::Leader
+            executor: Executor::Leader,
         }
     }
 
@@ -175,11 +190,11 @@ impl KVReadWriteYCSBGenerator {
             let key = key.clone() + &self.get_field_str_from_num(i);
             ops.push(ProtoTransactionOp {
                 op_type: ProtoTransactionOpType::Read.into(),
-                operands: vec![key.into_bytes()]
+                operands: vec![key.into_bytes()],
             });
         }
 
-        ProtoTransactionPhase{ ops }
+        ProtoTransactionPhase { ops }
     }
 
     fn update_next(&mut self) -> ProtoTransactionPhase {
@@ -191,11 +206,10 @@ impl KVReadWriteYCSBGenerator {
 
             ops.push(ProtoTransactionOp {
                 op_type: ProtoTransactionOpType::Write.into(),
-                operands: vec![key.into_bytes(), val]
+                operands: vec![key.into_bytes(), val],
             });
-            
         }
-        ProtoTransactionPhase{ ops }
+        ProtoTransactionPhase { ops }
     }
 
     fn read_crash_next(&mut self) -> ProtoTransaction {
@@ -254,13 +268,16 @@ impl KVReadWriteYCSBGenerator {
     }
 
     fn run_phase_next(&mut self) -> WorkloadUnit {
-        let next_op = self.read_write_weights[self.read_write_dist.sample(&mut self.rng)].0.clone();
+        let next_op = self.read_write_weights[self.read_write_dist.sample(&mut self.rng)]
+            .0
+            .clone();
 
         let tx = match next_op {
             TxOpType::Read => {
                 self.last_request_type = TxOpType::Read;
                 if self.config.linearizable_reads {
-                    let crash_or_byz = &self.crash_byz_weights[self.crash_byz_dist.sample(&mut self.rng)].0;
+                    let crash_or_byz =
+                        &self.crash_byz_weights[self.crash_byz_dist.sample(&mut self.rng)].0;
                     match crash_or_byz {
                         TxPhaseType::Crash => self.read_crash_next(),
                         TxPhaseType::Byz => self.read_byz_next(),
@@ -268,16 +285,16 @@ impl KVReadWriteYCSBGenerator {
                 } else {
                     self.read_unlogged_next()
                 }
-
-            },
+            }
             TxOpType::Update => {
                 self.last_request_type = TxOpType::Update;
-                let crash_or_byz = &self.crash_byz_weights[self.crash_byz_dist.sample(&mut self.rng)].0;
-                    match crash_or_byz {
-                        TxPhaseType::Crash => self.update_crash_next(),
-                        TxPhaseType::Byz => self.update_byz_next(),
-                    }
-            },
+                let crash_or_byz =
+                    &self.crash_byz_weights[self.crash_byz_dist.sample(&mut self.rng)].0;
+                match crash_or_byz {
+                    TxPhaseType::Crash => self.update_crash_next(),
+                    TxPhaseType::Byz => self.update_byz_next(),
+                }
+            }
         };
 
         let executor = match next_op {
@@ -287,14 +304,11 @@ impl KVReadWriteYCSBGenerator {
                 } else {
                     Executor::Any
                 }
-            },
+            }
             TxOpType::Update => Executor::Leader,
         };
 
-        WorkloadUnit {
-            tx, executor
-        }
-
+        WorkloadUnit { tx, executor }
     }
 }
 
@@ -306,7 +320,7 @@ impl PerWorkerWorkloadGenerator for KVReadWriteYCSBGenerator {
             return self.run_phase_next();
         }
     }
-    
+
     fn check_result(&mut self, result: &Option<ProtoTransactionResult>) -> bool {
         if let TxOpType::Read = self.last_request_type {
             if result.is_none() || result.as_ref().unwrap().result.len() != self.config.num_fields {
@@ -318,7 +332,7 @@ impl PerWorkerWorkloadGenerator for KVReadWriteYCSBGenerator {
                     return false;
                 }
             }
-            
+
             return true;
         }
 
@@ -329,6 +343,5 @@ impl PerWorkerWorkloadGenerator for KVReadWriteYCSBGenerator {
         }
 
         true
-
     }
 }

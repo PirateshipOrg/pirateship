@@ -17,10 +17,19 @@ use tokio::time::sleep;
 use crate::{
     config::Config,
     crypto::KeyStore,
-    rpc::{client::Client, server::{LatencyProfile, Server}, PinnedMessage},
+    rpc::{
+        client::Client,
+        server::{LatencyProfile, Server},
+        PinnedMessage,
+    },
 };
 
-use super::{auth::HandshakeResponse, client::PinnedClient, server::{ServerContextType, MsgAckChan, RespType}, MessageRef};
+use super::{
+    auth::HandshakeResponse,
+    client::PinnedClient,
+    server::{MsgAckChan, RespType, ServerContextType},
+    MessageRef,
+};
 
 fn process_args(i: i32) -> Config {
     let _p = format!("configs/node{i}_config.json");
@@ -34,7 +43,11 @@ fn process_args(i: i32) -> Config {
     Config::deserialize(&cfg_contents)
 }
 
-fn mock_msg_handler(_ctx: &ServerEmptyCtx, buf: MessageRef, _tx: MsgAckChan) -> Result<RespType, Error> {
+fn mock_msg_handler(
+    _ctx: &ServerEmptyCtx,
+    buf: MessageRef,
+    _tx: MsgAckChan,
+) -> Result<RespType, Error> {
     info!(
         "Received message: {}",
         std::str::from_utf8(&buf).unwrap_or("Parsing error")
@@ -48,8 +61,12 @@ impl ServerContextType for ServerEmptyCtx {
     fn get_server_keys(&self) -> Arc<Box<KeyStore>> {
         Arc::new(Box::new(KeyStore::empty()))
     }
-    
-    async fn handle_rpc(&self, msg: MessageRef<'_>, ack_chan: MsgAckChan) -> Result<RespType, Error> {
+
+    async fn handle_rpc(
+        &self,
+        msg: MessageRef<'_>,
+        ack_chan: MsgAckChan,
+    ) -> Result<RespType, Error> {
         mock_msg_handler(self, msg, ack_chan)
     }
 }
@@ -114,14 +131,14 @@ async fn test_authenticated_client_server() {
         &config.rpc_config.allowed_keylist_path,
         &config.rpc_config.signing_priv_key_path,
     );
-    let server = Arc::new(Server::new(&config, ServerEmptyCtx{}, &keys));
+    let server = Arc::new(Server::new(&config, ServerEmptyCtx {}, &keys));
     let client = Client::new(&config, &keys, false, 0).into();
     run_body(&server, &client, &config).await.unwrap();
 
-    let server = Arc::new(Server::new(&config, ServerEmptyCtx{}, &keys));
+    let server = Arc::new(Server::new(&config, ServerEmptyCtx {}, &keys));
     run_body(&server, &client, &config).await.unwrap();
 
-    let server = Arc::new(Server::new(&config, ServerEmptyCtx{}, &keys));
+    let server = Arc::new(Server::new(&config, ServerEmptyCtx {}, &keys));
     run_body(&server, &client, &config).await.unwrap();
 }
 
@@ -130,14 +147,14 @@ async fn test_unauthenticated_client_server() {
     colog::init();
     let config = process_args(1);
     info!("Starting {}", config.net_config.name);
-    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx{}));
+    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx {}));
     let client = Client::new_unauthenticated(&config).into();
     run_body(&server, &client, &config).await.unwrap();
 
-    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx{}));
+    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx {}));
     run_body(&server, &client, &config).await.unwrap();
 
-    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx{}));
+    let server = Arc::new(Server::new_unauthenticated(&config, ServerEmptyCtx {}));
     run_body(&server, &client, &config).await.unwrap();
 }
 
@@ -148,8 +165,12 @@ impl ServerContextType for ServerCtx {
     fn get_server_keys(&self) -> Arc<Box<KeyStore>> {
         Arc::new(Box::new(KeyStore::empty()))
     }
-    
-    async fn handle_rpc(&self, msg: MessageRef<'_>, ack_chan: MsgAckChan) -> Result<RespType, Error> {
+
+    async fn handle_rpc(
+        &self,
+        msg: MessageRef<'_>,
+        ack_chan: MsgAckChan,
+    ) -> Result<RespType, Error> {
         drop_after_n(self, msg, ack_chan)
     }
 }
@@ -214,23 +235,41 @@ async fn test_3_node_bcast() {
     let data = data.into_bytes();
     let sz = data.len();
     let data = PinnedMessage::from(data, sz, super::SenderType::Anon);
-    PinnedClient::broadcast(&client, &names, &data, &mut LatencyProfile::new(), names.len())
-        .await
-        .expect("Broadcast should complete with 3 nodes!");
+    PinnedClient::broadcast(
+        &client,
+        &names,
+        &data,
+        &mut LatencyProfile::new(),
+        names.len(),
+    )
+    .await
+    .expect("Broadcast should complete with 3 nodes!");
     sleep(Duration::from_millis(100)).await;
     server_handle1.abort();
     let _ = tokio::join!(server_handle1);
     sleep(Duration::from_millis(1000)).await;
-    PinnedClient::broadcast(&client, &names, &data, &mut LatencyProfile::new(), names.len())
-        .await
-        .expect("Broadcast should complete with 2 nodes!");
+    PinnedClient::broadcast(
+        &client,
+        &names,
+        &data,
+        &mut LatencyProfile::new(),
+        names.len(),
+    )
+    .await
+    .expect("Broadcast should complete with 2 nodes!");
     sleep(Duration::from_millis(100)).await;
     server_handle2.abort();
     let _ = tokio::join!(server_handle2);
 
-    PinnedClient::broadcast(&client, &names, &data, &mut LatencyProfile::new(), names.len())
-        .await
-        .expect("There are not enough nodes!");
+    PinnedClient::broadcast(
+        &client,
+        &names,
+        &data,
+        &mut LatencyProfile::new(),
+        names.len(),
+    )
+    .await
+    .expect("There are not enough nodes!");
 
     sleep(Duration::from_millis(100)).await;
     server_handle3.abort();

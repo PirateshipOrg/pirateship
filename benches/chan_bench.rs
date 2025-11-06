@@ -21,7 +21,6 @@
 //     let mut key_buff = [0u8; SECRET_KEY_LENGTH];
 //     rng.fill_bytes(&mut key_buff);
 //     keys.priv_key = SigningKey::from_bytes(&key_buff);
-    
 
 //     let mut group = c.benchmark_group("sign");
 

@@ -4,20 +4,20 @@ use rustls::crypto::hash::Hash;
 use std::fmt::Display;
 
 use log::{error, info, trace, warn};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use crate::{config::AtomicConfig, consensus::app::AppEngine};
 
 use crate::proto::execution::{
-    ProtoTransaction, ProtoTransactionPhase, ProtoTransactionOp, ProtoTransactionOpType,
-    ProtoTransactionResult, ProtoTransactionOpResult,
+    ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpResult, ProtoTransactionOpType,
+    ProtoTransactionPhase, ProtoTransactionResult,
 };
 
-use crate::proto::client::{ProtoByzResponse,};
+use crate::proto::client::ProtoByzResponse;
 
 use crate::proto::consensus::{
-    ProtoBlock, ProtoQuorumCertificate, ProtoForkValidation, ProtoVote, ProtoSignatureArrayEntry,
-    ProtoNameWithSignature, proto_block::Sig, DefferedSignature,
+    proto_block::Sig, DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoNameWithSignature,
+    ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote,
 };
 
 #[derive(std::fmt:: Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +28,12 @@ pub struct KVSState {
 
 impl Display for KVSState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ci_state size: {}, bci_state size: {}", self.ci_state.len(), self.bci_state.len())
+        write!(
+            f,
+            "ci_state size: {}, bci_state size: {}",
+            self.ci_state.len(),
+            self.bci_state.len()
+        )
     }
 }
 
@@ -38,7 +43,6 @@ pub struct KVSAppEngine {
     pub last_bci: u64,
     quit_signal: bool,
     state: KVSState,
-    
 }
 
 impl AppEngine for KVSAppEngine {
@@ -57,13 +61,16 @@ impl AppEngine for KVSAppEngine {
         }
     }
 
-    fn handle_crash_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<crate::proto::execution::ProtoTransactionResult>> {
+    fn handle_crash_commit(
+        &mut self,
+        blocks: Vec<crate::crypto::CachedBlock>,
+    ) -> Vec<Vec<crate::proto::execution::ProtoTransactionResult>> {
         // iterate through eac txn in each block
         // see if that txn on_crash_commit is not none
         //     iterate through all ops in order, see ops in protobuf
         //     for every op you have a result
         //     each txn gives a txn result. Transaction has many ops, prototransaction has many op results
-            //if op type is write --> add to ci_state, if read dont add to ci_state
+        //if op type is write --> add to ci_state, if read dont add to ci_state
 
         //the return value is a list of lists containing transaction results for each block
         let mut block_count = 0;
@@ -76,19 +83,16 @@ impl AppEngine for KVSAppEngine {
             self.last_ci = proto_block.n;
             let mut block_result: Vec<ProtoTransactionResult> = Vec::new();
             for tx in proto_block.tx_list.iter() {
-                let mut txn_result = ProtoTransactionResult {
-                    result: Vec::new(),
-                };
+                let mut txn_result = ProtoTransactionResult { result: Vec::new() };
                 let ops = match &tx.on_crash_commit {
                     Some(ops) => &ops.ops,
                     None => {
                         block_result.push(txn_result);
                         continue;
-                    },
+                    }
                 };
 
                 for op in ops.iter() {
-                    
                     if let Some(op_type) = ProtoTransactionOpType::from_i32(op.op_type) {
                         if op_type == ProtoTransactionOpType::Write {
                             if op.operands.len() != 2 {
@@ -97,9 +101,15 @@ impl AppEngine for KVSAppEngine {
                             let key = &op.operands[0];
                             let val: &Vec<u8> = &op.operands[1];
                             if self.state.ci_state.contains_key(key) {
-                                self.state.ci_state.get_mut(key).unwrap().push((proto_block.n, val.clone()));
+                                self.state
+                                    .ci_state
+                                    .get_mut(key)
+                                    .unwrap()
+                                    .push((proto_block.n, val.clone()));
                             } else {
-                                self.state.ci_state.insert(key.clone(), vec![(proto_block.n, val.clone())]);
+                                self.state
+                                    .ci_state
+                                    .insert(key.clone(), vec![(proto_block.n, val.clone())]);
                             }
                             txn_result.result.push(ProtoTransactionOpResult {
                                 success: true,
@@ -118,8 +128,12 @@ impl AppEngine for KVSAppEngine {
                                     values: vec![value],
                                 });
                             }
-                        } else if op_type == ProtoTransactionOpType::Increment { // [key, incr_val, Optional check_val]
-                            if op.operands.len() != 1 && op.operands.len() != 2 && op.operands.len() != 3 {
+                        } else if op_type == ProtoTransactionOpType::Increment {
+                            // [key, incr_val, Optional check_val]
+                            if op.operands.len() != 1
+                                && op.operands.len() != 2
+                                && op.operands.len() != 3
+                            {
                                 continue;
                             }
 
@@ -167,9 +181,15 @@ impl AppEngine for KVSAppEngine {
                             let val = result.to_be_bytes().to_vec();
 
                             if self.state.ci_state.contains_key(key) {
-                                self.state.ci_state.get_mut(key).unwrap().push((proto_block.n, val.clone()));
+                                self.state
+                                    .ci_state
+                                    .get_mut(key)
+                                    .unwrap()
+                                    .push((proto_block.n, val.clone()));
                             } else {
-                                self.state.ci_state.insert(key.clone(), vec![(proto_block.n, val.clone())]);
+                                self.state
+                                    .ci_state
+                                    .insert(key.clone(), vec![(proto_block.n, val.clone())]);
                             }
 
                             // Return incremented value
@@ -177,8 +197,8 @@ impl AppEngine for KVSAppEngine {
                                 success: true,
                                 values: vec![val],
                             });
-
-                        } else if op_type == ProtoTransactionOpType::Cas { // [key1, swap_val1, compare_val1, key2, swap_val2, compare_val2, ...]                            
+                        } else if op_type == ProtoTransactionOpType::Cas {
+                            // [key1, swap_val1, compare_val1, key2, swap_val2, compare_val2, ...]
                             if op.operands.len() % 3 != 0 {
                                 continue;
                             }
@@ -218,16 +238,22 @@ impl AppEngine for KVSAppEngine {
                                 }
                             }
 
-
                             if must_operate {
                                 // Write back
                                 for op in cas_ops.iter() {
                                     let key = &op.key;
                                     let val = &op.swap_val;
                                     if self.state.ci_state.contains_key(key) {
-                                        self.state.ci_state.get_mut(key).unwrap().push((proto_block.n, val.clone()));
+                                        self.state
+                                            .ci_state
+                                            .get_mut(key)
+                                            .unwrap()
+                                            .push((proto_block.n, val.clone()));
                                     } else {
-                                        self.state.ci_state.insert(key.clone(), vec![(proto_block.n, val.clone())]);
+                                        self.state.ci_state.insert(
+                                            key.clone(),
+                                            vec![(proto_block.n, val.clone())],
+                                        );
                                     }
                                 }
                             }
@@ -235,14 +261,11 @@ impl AppEngine for KVSAppEngine {
                                 success: must_operate,
                                 values: read_vals,
                             });
-
                         }
                     } else {
                         warn!("Invalid operation type: {}", op.op_type);
                         continue;
                     }
-
-                    
                 }
                 block_result.push(txn_result);
                 //test
@@ -258,10 +281,10 @@ impl AppEngine for KVSAppEngine {
         return final_result;
     }
 
-
-                
-
-    fn handle_byz_commit(&mut self, blocks: Vec<crate::crypto::CachedBlock>) -> Vec<Vec<ProtoByzResponse>> {
+    fn handle_byz_commit(
+        &mut self,
+        blocks: Vec<crate::crypto::CachedBlock>,
+    ) -> Vec<Vec<ProtoByzResponse>> {
         let mut block_count = 0;
         let mut txn_count: i32 = 0;
 
@@ -270,7 +293,7 @@ impl AppEngine for KVSAppEngine {
         for block in blocks.iter() {
             let proto_block: &ProtoBlock = &block.block;
             self.last_bci = proto_block.n;
-            let mut block_result: Vec<ProtoByzResponse> = Vec::new(); 
+            let mut block_result: Vec<ProtoByzResponse> = Vec::new();
 
             for (tx_n, tx) in proto_block.tx_list.iter().enumerate() {
                 let mut byz_result = ProtoByzResponse {
@@ -278,12 +301,12 @@ impl AppEngine for KVSAppEngine {
                     tx_n: tx_n as u64,
                     client_tag: 0,
                 };
-                let ops: &_ = match &tx.on_byzantine_commit{
+                let ops: &_ = match &tx.on_byzantine_commit {
                     Some(ops) => &ops.ops,
                     None => {
                         block_result.push(byz_result);
                         continue;
-                    },
+                    }
                 };
 
                 for op in ops.iter() {
@@ -335,10 +358,11 @@ impl AppEngine for KVSAppEngine {
         self.state.ci_state.retain(|_, v| v.len() > 0);
     }
 
-    fn handle_unlogged_request(&mut self, request: crate::proto::execution::ProtoTransaction) -> crate::proto::execution::ProtoTransactionResult {
-        let mut txn_result = ProtoTransactionResult {
-            result: Vec::new(),
-        };
+    fn handle_unlogged_request(
+        &mut self,
+        request: crate::proto::execution::ProtoTransaction,
+    ) -> crate::proto::execution::ProtoTransactionResult {
+        let mut txn_result = ProtoTransactionResult { result: Vec::new() };
 
         let ops: &_ = match &request.on_receive {
             Some(ops) => &ops.ops,
@@ -350,7 +374,7 @@ impl AppEngine for KVSAppEngine {
                 continue;
             }
             let mut op_result = ProtoTransactionOpResult {
-                success: false, 
+                success: false,
                 values: vec![],
             };
             let key = &op.operands[0];
@@ -367,8 +391,6 @@ impl AppEngine for KVSAppEngine {
     fn get_current_state(&self) -> Self::State {
         return self.state.clone();
     }
-
-    
 }
 
 impl KVSAppEngine {
@@ -383,7 +405,7 @@ impl KVSAppEngine {
         } else {
             //check bci_state
         }
-        
+
         let bci_res = self.state.bci_state.get(key);
         if let Some(v) = bci_res {
             return Some(v.clone());
@@ -435,7 +457,7 @@ mod tests {
 
     // fn test_rollback() {
     //     let mut engine: KVSAppEngine = setup_engine();
-    //     
+    //
     //     todo!()
     // }
     // #[test]
@@ -457,9 +479,6 @@ mod tests {
     //     dbg!(&result);
     // }
 
-
-
-
     // fn setup_engine() -> KVSAppEngine {
     //     let mut net_config = NetConfig {
     //         name: "node1".to_string(),
@@ -477,7 +496,7 @@ mod tests {
     //         recv_buffer_size: (1 << 15),
     //         channel_depth: 32,
     //     };
-    
+
     //     let consensus_config = ConsensusConfig {
     //         node_list: vec![
     //             String::from("node1"),
@@ -492,137 +511,133 @@ mod tests {
     //         vote_processing_workers: 128,
     //         view_timeout_ms: 150,
     //         batch_max_delay_ms: 10,
-    
+
     //         #[cfg(feature = "storage")]
     //         log_storage_config: crate::config::StorageConfig::RocksDB(RocksDBConfig::default()),
-    
+
     //         #[cfg(feature = "platforms")]
     //         liveness_u: 1,
     //     };
-    
+
     //     let app_config = AppConfig {
     //         logger_stats_report_ms: 100,
     //         checkpoint_interval_ms: 60000,
     //     };
-    
+
     //     let evil_config = EvilConfig {
     //         simulate_byzantine_behavior: true,
     //         byzantine_start_block: 20000,
     //     };
-    
+
     //     let config = Config {
     //         net_config,
     //         rpc_config,
     //         consensus_config,
     //         app_config,
     //     };
-    
+
     //     let atomic_config = AtomicConfig::new(config);
 
     //     KVSAppEngine::new(atomic_config)
     // }
 
-// fn create_dummy_tx(on_receieve: bool, on_crash_commit: bool, on_byzantine_commit: bool, op_type: ProtoTransactionOpType) -> ProtoTransaction {
-//     let dummy_op = ProtoTransactionOp {
-//         op_type: op_type as i32, 
-//         operands: vec![vec![1], vec![4]]
-//     };
+    // fn create_dummy_tx(on_receieve: bool, on_crash_commit: bool, on_byzantine_commit: bool, op_type: ProtoTransactionOpType) -> ProtoTransaction {
+    //     let dummy_op = ProtoTransactionOp {
+    //         op_type: op_type as i32,
+    //         operands: vec![vec![1], vec![4]]
+    //     };
 
-//     let dummy_phase = ProtoTransactionPhase {
-//         ops: vec![dummy_op.clone()],
-//     };
+    //     let dummy_phase = ProtoTransactionPhase {
+    //         ops: vec![dummy_op.clone()],
+    //     };
 
-//     let mut dummy_transaction = ProtoTransaction {
-//         on_receive:None,
-//         on_crash_commit: None,
-//         on_byzantine_commit: None,
-//         is_reconfiguration: false,
-//     };
+    //     let mut dummy_transaction = ProtoTransaction {
+    //         on_receive:None,
+    //         on_crash_commit: None,
+    //         on_byzantine_commit: None,
+    //         is_reconfiguration: false,
+    //     };
 
-//     if on_receieve == true {
-//         dummy_transaction.on_receive = Some(dummy_phase.clone());
-//     }
-    
-//     if on_crash_commit == true {
+    //     if on_receieve == true {
+    //         dummy_transaction.on_receive = Some(dummy_phase.clone());
+    //     }
 
-//         dummy_transaction.on_crash_commit = Some(dummy_phase.clone());
-//     }
-//     if on_byzantine_commit == true {
+    //     if on_crash_commit == true {
 
-//         dummy_transaction.on_byzantine_commit = Some(dummy_phase.clone());
-//     }
-//     return dummy_transaction;
-// }
+    //         dummy_transaction.on_crash_commit = Some(dummy_phase.clone());
+    //     }
+    //     if on_byzantine_commit == true {
 
-// fn create_dummy_cached_block(on_receieve: bool, on_crash_commit: bool, on_byzantine_commit: bool) -> CachedBlock {
-    
+    //         dummy_transaction.on_byzantine_commit = Some(dummy_phase.clone());
+    //     }
+    //     return dummy_transaction;
+    // }
 
-//     // let dummy_op = ProtoTransactionOp {
-//     //     op_type: ProtoTransactionOpType::Write as i32, 
-//     //     operands: vec![vec![1], vec![4]]
-//     // };
+    // fn create_dummy_cached_block(on_receieve: bool, on_crash_commit: bool, on_byzantine_commit: bool) -> CachedBlock {
 
-//     // let dummy_phase = ProtoTransactionPhase {
-//     //     ops: vec![dummy_op.clone()],
-//     // };
-    
-//     // let dummy_txn = ProtoTransaction {
-//     //     on_receive:None,
-//     //     on_crash_commit: None,
-//     //     on_byzantine_commit:  Some(dummy_phase.clone()),
-//     //     is_reconfiguration: false,
-//     // };
+    //     // let dummy_op = ProtoTransactionOp {
+    //     //     op_type: ProtoTransactionOpType::Write as i32,
+    //     //     operands: vec![vec![1], vec![4]]
+    //     // };
 
-//     let dummy_txn = create_dummy_tx(on_receieve, on_crash_commit, on_byzantine_commit, ProtoTransactionOpType::Write);
+    //     // let dummy_phase = ProtoTransactionPhase {
+    //     //     ops: vec![dummy_op.clone()],
+    //     // };
 
+    //     // let dummy_txn = ProtoTransaction {
+    //     //     on_receive:None,
+    //     //     on_crash_commit: None,
+    //     //     on_byzantine_commit:  Some(dummy_phase.clone()),
+    //     //     is_reconfiguration: false,
+    //     // };
 
-//     let dummy_qc = ProtoQuorumCertificate {
-//         digest: vec![0xaa, 0xbb, 0xcc],
-//         n: 1,
-//         sig: vec![ProtoNameWithSignature {
-//             name: "Validator1".to_string(),
-//             sig: vec![0xde, 0xad, 0xbe, 0xef],
-//         }],
-//         view: 1,
-//     };
+    //     let dummy_txn = create_dummy_tx(on_receieve, on_crash_commit, on_byzantine_commit, ProtoTransactionOpType::Write);
 
-//     let dummy_fork_validation = ProtoForkValidation {
-//         view: 3,
-//         fork_hash: vec![0xba, 0xad, 0xf0, 0x0d], 
-//         fork_sig: vec![0xca, 0xfe, 0xba, 0xbe],
-//         fork_len: 2,
-//         fork_last_qc: Some(dummy_qc.clone()),
-//         name: "ForkValidator".to_string(),
-//     };
+    //     let dummy_qc = ProtoQuorumCertificate {
+    //         digest: vec![0xaa, 0xbb, 0xcc],
+    //         n: 1,
+    //         sig: vec![ProtoNameWithSignature {
+    //             name: "Validator1".to_string(),
+    //             sig: vec![0xde, 0xad, 0xbe, 0xef],
+    //         }],
+    //         view: 1,
+    //     };
 
-//     // let dummy_vote = ProtoVote {
-//     //     sig_array: vec![ProtoSignatureArrayEntry {
-//     //         n: 10,
-//     //         sig: vec![0xbe, 0xef, 0xfa, 0xce], 
-//     //     }],
-//     //     fork_digest: vec![0x12, 0x34, 0x56, 0x78], 
-//     //     n: 10,
-//     //     view: 4,
-//     //     config_num: 1,
-//     // };
+    //     let dummy_fork_validation = ProtoForkValidation {
+    //         view: 3,
+    //         fork_hash: vec![0xba, 0xad, 0xf0, 0x0d],
+    //         fork_sig: vec![0xca, 0xfe, 0xba, 0xbe],
+    //         fork_len: 2,
+    //         fork_last_qc: Some(dummy_qc.clone()),
+    //         name: "ForkValidator".to_string(),
+    //     };
 
-//     let dummy_proto_block = ProtoBlock {
-//         tx_list: vec![dummy_txn.clone(), dummy_txn.clone()], 
-//         n: 42, 
-//         parent: vec![0xde, 0xad, 0xbe, 0xef],
-//         view: 2,
-//         qc: vec![dummy_qc],
-//         fork_validation: vec![dummy_fork_validation],
-//         view_is_stable: true,
-//         config_num: 1,
-//         sig: Some(Sig::NoSig(DefferedSignature {})),
-//     };
+    //     // let dummy_vote = ProtoVote {
+    //     //     sig_array: vec![ProtoSignatureArrayEntry {
+    //     //         n: 10,
+    //     //         sig: vec![0xbe, 0xef, 0xfa, 0xce],
+    //     //     }],
+    //     //     fork_digest: vec![0x12, 0x34, 0x56, 0x78],
+    //     //     n: 10,
+    //     //     view: 4,
+    //     //     config_num: 1,
+    //     // };
 
-//     let block_ser = vec![0; 100]; 
-//     let block_hash = vec![0xaa; 32];
+    //     let dummy_proto_block = ProtoBlock {
+    //         tx_list: vec![dummy_txn.clone(), dummy_txn.clone()],
+    //         n: 42,
+    //         parent: vec![0xde, 0xad, 0xbe, 0xef],
+    //         view: 2,
+    //         qc: vec![dummy_qc],
+    //         fork_validation: vec![dummy_fork_validation],
+    //         view_is_stable: true,
+    //         config_num: 1,
+    //         sig: Some(Sig::NoSig(DefferedSignature {})),
+    //     };
 
-//     return CachedBlock::new(dummy_proto_block, block_ser, block_hash);
-//     }
+    //     let block_ser = vec![0; 100];
+    //     let block_hash = vec![0xaa; 32];
+
+    //     return CachedBlock::new(dummy_proto_block, block_ser, block_hash);
+    //     }
 }
-
-    

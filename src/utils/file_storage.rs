@@ -1,4 +1,9 @@
-use std::{fmt::Debug, fs::{create_dir, exists}, io::Error, sync::Mutex};
+use std::{
+    fmt::Debug,
+    fs::{create_dir, exists},
+    io::Error,
+    sync::Mutex,
+};
 
 use indexmap::IndexMap;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
@@ -20,11 +25,10 @@ impl FileStorageEngine {
                 return Self {
                     config: file_storage_config,
                     // memtable: Mutex::new(IndexMap::new()),
-                }
-            },
+                };
+            }
 
-            _ => panic!("Invalid config")
-            
+            _ => panic!("Invalid config"),
         }
     }
 
@@ -53,7 +57,7 @@ impl FileStorageEngine {
     fn hash_to_fname(&self, block_hash: &Vec<u8>) -> String {
         let path = block_hash.encode_hex::<String>();
         let short_path = path[..2].to_string();
-        let sep = "/";      // Very UNIXy
+        let sep = "/"; // Very UNIXy
 
         let dir_path = self.config.db_path.clone() + sep + &short_path;
         self.create_dir_if_not_exists(&dir_path);
@@ -66,7 +70,6 @@ impl FileStorageEngine {
         let compressed = compress_prepend_size(&contents);
         std::fs::write(path, compressed)?;
         Ok(())
-
     }
 
     fn read_file(&self, path: &String) -> Result<Vec<u8>, Error> {
@@ -89,12 +92,13 @@ impl FileStorageEngine {
             }
         }
     }
-
 }
 
 impl Debug for FileStorageEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FileStorageEngine").field("config", &self.config).finish()
+        f.debug_struct("FileStorageEngine")
+            .field("config", &self.config)
+            .finish()
     }
 }
 
@@ -128,7 +132,6 @@ impl StorageEngine for FileStorageEngine {
         // }
 
         self.persist(block_hash, block_ser)
-
     }
 
     fn get_block(&self, block_hash: &Vec<u8>) -> Result<Vec<u8>, std::io::Error> {
@@ -142,8 +145,11 @@ impl StorageEngine for FileStorageEngine {
         let path = self.hash_to_fname(block_hash);
         self.read_file(&path)
     }
-    
-    fn put_multiple_blocks(&self, blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>) -> Result<(), Error> {
+
+    fn put_multiple_blocks(
+        &self,
+        blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>,
+    ) -> Result<(), Error> {
         for (val, key) in blocks {
             self.put_block(val, key)?
         }

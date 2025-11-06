@@ -1,6 +1,9 @@
-use std::{collections::HashMap, time::{Duration, Instant}};
 use std::cmp::Eq;
 use std::hash::Hash;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use indexmap::IndexMap;
 use log::info;
@@ -37,7 +40,7 @@ impl PerfEntry {
 pub struct PerfCounter<K> {
     name: String,
     entry_starts: HashMap<K, Instant>,
-    event_stats: IndexMap<String, PerfEntry>
+    event_stats: IndexMap<String, PerfEntry>,
 }
 
 impl<K: Eq + Hash> PerfCounter<K> {
@@ -45,8 +48,10 @@ impl<K: Eq + Hash> PerfCounter<K> {
         Self {
             name: name.to_string(),
             entry_starts: HashMap::new(),
-            event_stats: event_order.into_iter()
-                .map(|name| (name.to_string(), PerfEntry::new())).collect()
+            event_stats: event_order
+                .into_iter()
+                .map(|name| (name.to_string(), PerfEntry::new()))
+                .collect(),
         }
     }
 
@@ -64,7 +69,6 @@ impl<K: Eq + Hash> PerfCounter<K> {
         #[cfg(feature = "perf")]
         self.entry_starts.clear();
     }
-
 
     pub fn new_event(&mut self, event: &str, entry: &K) {
         #[cfg(feature = "perf")]
@@ -94,8 +98,9 @@ impl<K: Eq + Hash> PerfCounter<K> {
             let mut last_event_time = Duration::new(0, 0);
             for (event, stats) in self.event_stats.iter() {
                 let avg_time = stats.avg_time();
-                
-                info!("[Perf:{}] Event: {}, Avg time: {} us, Avg cumulative time: {} us",
+
+                info!(
+                    "[Perf:{}] Event: {}, Avg time: {} us, Avg cumulative time: {} us",
                     self.name,
                     event,
                     avg_time.as_micros() - last_event_time.as_micros(),

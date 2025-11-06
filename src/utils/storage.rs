@@ -1,7 +1,13 @@
-use rocksdb::{DBCompactionStyle, FifoCompactOptions, Options, UniversalCompactOptions, WriteBatchWithTransaction, WriteOptions, DB};
+use rocksdb::{
+    DBCompactionStyle, FifoCompactOptions, Options, UniversalCompactOptions,
+    WriteBatchWithTransaction, WriteOptions, DB,
+};
 
 use crate::config::{RocksDBConfig, StorageConfig};
-use std::{fmt::Debug, io::{Error, ErrorKind}};
+use std::{
+    fmt::Debug,
+    io::{Error, ErrorKind},
+};
 
 pub trait StorageEngine: Debug + Sync + Send {
     fn init(&mut self);
@@ -9,14 +15,17 @@ pub trait StorageEngine: Debug + Sync + Send {
 
     /// Can't trust the storage to handle anything more than block hashes
     fn put_block(&self, block_ser: &Vec<u8>, block_hash: &Vec<u8>) -> Result<(), Error>;
-    fn put_multiple_blocks(&self, blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>) -> Result<(), Error>;
+    fn put_multiple_blocks(
+        &self,
+        blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>,
+    ) -> Result<(), Error>;
     fn get_block(&self, block_hash: &Vec<u8>) -> Result<Vec<u8>, Error>;
 }
 
 #[derive(Debug)]
 pub struct RocksDBStorageEngine {
     pub config: RocksDBConfig,
-    pub db: DB
+    pub db: DB,
 }
 
 impl RocksDBStorageEngine {
@@ -62,7 +71,6 @@ impl StorageEngine for RocksDBStorageEngine {
         #[cfg(not(feature = "disk_wal"))]
         opts.set_manual_wal_flush(true);
 
-
         opts.set_compaction_style(DBCompactionStyle::Universal);
 
         let _ = DB::destroy(&opts, &self.config.db_path);
@@ -71,58 +79,43 @@ impl StorageEngine for RocksDBStorageEngine {
     fn put_block(&self, block_ser: &Vec<u8>, block_hash: &Vec<u8>) -> Result<(), Error> {
         let mut wopts = WriteOptions::default();
 
-
         // #[cfg(feature = "disk_wal")]
         // wopts.set_sync(true);
 
         #[cfg(not(feature = "disk_wal"))]
         wopts.disable_wal(true);
-        
+
         let res = // self.db.put(block_hash, block_ser);
             self.db.put_opt(block_hash, block_ser, &wopts);
         match res {
-            Ok(_) => {
-                return Ok(())
-            },
-            Err(e) => {
-                return Err(Error::new(ErrorKind::BrokenPipe, e))
-            },
+            Ok(_) => return Ok(()),
+            Err(e) => return Err(Error::new(ErrorKind::BrokenPipe, e)),
         }
     }
 
     fn get_block(&self, block_hash: &Vec<u8>) -> Result<Vec<u8>, Error> {
         let res = self.db.get(block_hash);
         match res {
-            Ok(val) => {
-                match val {
-                    Some(val) => {
-                        return Ok(val)
-                    },
-                    None => {
-                        Err(Error::new(ErrorKind::InvalidInput, "Key not found"))
-                    },
-                }
+            Ok(val) => match val {
+                Some(val) => return Ok(val),
+                None => Err(Error::new(ErrorKind::InvalidInput, "Key not found")),
             },
-            Err(e) => {
-                return Err(Error::new(ErrorKind::InvalidInput, e))
-            },
+            Err(e) => return Err(Error::new(ErrorKind::InvalidInput, e)),
         }
     }
-    
-    fn put_multiple_blocks(&self, blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>) -> Result<(), Error> {
+
+    fn put_multiple_blocks(
+        &self,
+        blocks: &Vec<(Vec<u8> /* block_ser */, Vec<u8> /* block_hash */)>,
+    ) -> Result<(), Error> {
         let mut write_batch = WriteBatchWithTransaction::<false>::default();
         for (val, key) in blocks {
             write_batch.put(key, val);
         }
         let res = self.db.write_without_wal(write_batch);
         match res {
-            Ok(_) => {
-                return Ok(())
-            },
-            Err(e) => {
-                return Err(Error::new(ErrorKind::BrokenPipe, e))
-            },
+            Ok(_) => return Ok(()),
+            Err(e) => return Err(Error::new(ErrorKind::BrokenPipe, e)),
         }
     }
 }
-

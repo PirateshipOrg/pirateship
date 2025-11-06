@@ -9,21 +9,26 @@ use pft::consensus::batch_proposal::TxWithAckChanTag;
 use prost::Message;
 use serde::ser::Error;
 use serde_json::value;
-use tokio::sync::{mpsc, Mutex};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, Mutex};
 
+use crate::payloads::{RegisterPayload, SendPayload};
 use pft::config::Config;
-use pft::crypto::{KeyStore, hash};
+use pft::crypto::{hash, KeyStore};
 use pft::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase};
 use pft::rpc::client::Client;
 use pft::rpc::{PinnedMessage, SenderType};
-use pft::{proto::{client::{self, ProtoClientReply, ProtoClientRequest}, rpc::ProtoPayload}, rpc::client::PinnedClient, utils::channel::{make_channel, Receiver, Sender}};
-use crate::payloads::{RegisterPayload, SendPayload};
-
-
+use pft::{
+    proto::{
+        client::{self, ProtoClientReply, ProtoClientRequest},
+        rpc::ProtoPayload,
+    },
+    rpc::client::PinnedClient,
+    utils::channel::{make_channel, Receiver, Sender},
+};
 
 struct AppState {
     /// Global channel to feed into the consensusNode.
@@ -65,32 +70,27 @@ async fn balance(payload: web::Json<RegisterPayload>, data: web::Data<AppState>)
         Err(_) => return HttpResponse::BadRequest().body("Expected 8 bytes for an i64"),
     };
 
-
     let checking_account_balance: [u8; 8] = match result[1].as_slice().try_into() {
         Ok(arr) => arr,
         Err(_) => return HttpResponse::BadRequest().body("Expected8 bytes for an i64"),
     };
 
-    let savings_balance_message = format!(
-        "${}",
-        i64::from_be_bytes(savings_account_balance)
-    );
+    let savings_balance_message = format!("${}", i64::from_be_bytes(savings_account_balance));
 
-    let checking_balance_message = format!(
-        "${}",
-        i64::from_be_bytes(checking_account_balance)
-    );
-    
+    let checking_balance_message = format!("${}", i64::from_be_bytes(checking_account_balance));
+
     HttpResponse::Ok().json(serde_json::json!({
         "account name": username,
         "savings balance": savings_balance_message,
         "checking balance": checking_balance_message,
     }))
-    
-}   
+}
 
 #[post("/register")]
-async fn register(payload: web::Json<RegisterPayload>, data: web::Data<AppState>) -> impl Responder {
+async fn register(
+    payload: web::Json<RegisterPayload>,
+    data: web::Data<AppState>,
+) -> impl Responder {
     let username = payload.username.clone();
 
     // Query KMS for username.
@@ -115,15 +115,28 @@ async fn register(payload: web::Json<RegisterPayload>, data: web::Data<AppState>
 
     let create_savings_op = ProtoTransactionOp {
         op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
-        operands: vec![savings_account_name.clone().into_bytes(), (1000000 as i64).to_be_bytes().to_vec()],
+        operands: vec![
+            savings_account_name.clone().into_bytes(),
+            (1000000 as i64).to_be_bytes().to_vec(),
+        ],
     };
 
     let create_checking_op = ProtoTransactionOp {
         op_type: pft::proto::execution::ProtoTransactionOpType::Write.into(),
-        operands: vec![checking_account_name.clone().into_bytes(), (1000000 as i64).to_be_bytes().to_vec()],
+        operands: vec![
+            checking_account_name.clone().into_bytes(),
+            (1000000 as i64).to_be_bytes().to_vec(),
+        ],
     };
 
-    let _ = match send(vec![create_savings_op, create_checking_op], false, &data, false).await {
+    let _ = match send(
+        vec![create_savings_op, create_checking_op],
+        false,
+        &data,
+        false,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(e) => return e,
     };
@@ -132,7 +145,6 @@ async fn register(payload: web::Json<RegisterPayload>, data: web::Data<AppState>
         "message": "created user with 1 million dollars in both accounts",
     }))
 }
-
 
 #[post("/sendpayment")]
 async fn sendpayment(payload: web::Json<SendPayload>, data: web::Data<AppState>) -> impl Responder {
@@ -163,22 +175,30 @@ async fn sendpayment(payload: web::Json<SendPayload>, data: web::Data<AppState>)
             op_type: pft::proto::execution::ProtoTransactionOpType::Read.into(),
             operands: vec![receiver_checking_account.clone().into_bytes()],
         };
-        
-        let result = match send(vec![get_sender_balance_op, get_receiver_balance_op], true, &data, false).await {
+
+        let result = match send(
+            vec![get_sender_balance_op, get_receiver_balance_op],
+            true,
+            &data,
+            false,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(e) => return e,
         };
 
         //check if both accounts exists (?)
         if result.len() != 2 {
-            return HttpResponse::InternalServerError().body("Sender/Reciever Account does not exist");
+            return HttpResponse::InternalServerError()
+                .body("Sender/Reciever Account does not exist");
         }
-        
-         // Get the sender's account balance, check if it is > amount send
+
+        // Get the sender's account balance, check if it is > amount send
         let sender_balance = match result[0].as_slice().try_into() {
             Ok(arr) => i64::from_be_bytes(arr),
             Err(_) => return HttpResponse::BadRequest().body("Expected 8 bytes for an i64"),
-        };    
+        };
 
         let receiver_balance = match result[1].as_slice().try_into() {
             Ok(arr) => i64::from_be_bytes(arr),
@@ -188,11 +208,18 @@ async fn sendpayment(payload: web::Json<SendPayload>, data: web::Data<AppState>)
         if sender_balance < send_amount {
             return HttpResponse::BadRequest().body("Sender's Account does not have enough money");
         };
-    
-         //increment value with cas
+
+        //increment value with cas
         let credit_op = ProtoTransactionOp {
             op_type: pft::proto::execution::ProtoTransactionOpType::Cas.into(),
-            operands: vec![receiver_checking_account.clone().into_bytes(), (receiver_balance + send_amount).to_be_bytes().to_vec(), receiver_balance.to_be_bytes().to_vec(), sender_checking_account.clone().into_bytes(), (sender_balance - send_amount).to_be_bytes().to_vec(), sender_balance.to_be_bytes().to_vec()],
+            operands: vec![
+                receiver_checking_account.clone().into_bytes(),
+                (receiver_balance + send_amount).to_be_bytes().to_vec(),
+                receiver_balance.to_be_bytes().to_vec(),
+                sender_checking_account.clone().into_bytes(),
+                (sender_balance - send_amount).to_be_bytes().to_vec(),
+                sender_balance.to_be_bytes().to_vec(),
+            ],
         };
 
         // let debt_op = ProtoTransactionOp {
@@ -200,7 +227,14 @@ async fn sendpayment(payload: web::Json<SendPayload>, data: web::Data<AppState>)
         //     operands: vec![],
         // };
 
-        let result = match send(vec![credit_op], false, &data, send_amount >= data.send_threshold).await {
+        let result = match send(
+            vec![credit_op],
+            false,
+            &data,
+            send_amount >= data.send_threshold,
+        )
+        .await
+        {
             Ok(response) => response,
             Err(e) => return e,
         };
@@ -211,7 +245,8 @@ async fn sendpayment(payload: web::Json<SendPayload>, data: web::Data<AppState>)
         resclone = result;
 
         if send_attempts == 20 {
-            return HttpResponse::RequestTimeout().body(format!("retried CAS too many times: {:?}", resclone));
+            return HttpResponse::RequestTimeout()
+                .body(format!("retried CAS too many times: {:?}", resclone));
         }
     }
 
@@ -235,11 +270,16 @@ async fn home(_data: web::Data<AppState>) -> impl Responder {
     }))
 }
 
-pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>, actix_threads: usize, send_threshold: i64) -> std::io::Result<()> {
+pub async fn run_actix_server(
+    config: Config,
+    batch_proposer_tx: pft::utils::channel::AsyncSenderWrapper<TxWithAckChanTag>,
+    actix_threads: usize,
+    send_threshold: i64,
+) -> std::io::Result<()> {
     let mut keys = KeyStore::empty();
     keys.priv_key = KeyStore::get_privkeys(&config.rpc_config.signing_priv_key_path);
     let keys = keys.clone();
-    let name =  config.net_config.name.clone();
+    let name = config.net_config.name.clone();
 
     let addr = config.net_config.addr.clone();
     // Add 1000 to the port.
@@ -247,7 +287,6 @@ pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::cha
     let port: u16 = port.parse().unwrap();
     let port = port + 1000;
     let addr = format!("{}:{}", host, port);
-
 
     HttpServer::new(move || {
         // Each worker thread creates its own client instance.
@@ -272,7 +311,12 @@ pub async fn run_actix_server(config: Config, batch_proposer_tx: pft::utils::cha
     Ok(())
 }
 
-async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &AppState, byz_commit: bool) -> Result<Vec<Vec<u8>>, HttpResponse> {
+async fn send(
+    transaction_ops: Vec<ProtoTransactionOp>,
+    isRead: bool,
+    state: &AppState,
+    byz_commit: bool,
+) -> Result<Vec<Vec<u8>>, HttpResponse> {
     let transaction_phase = ProtoTransactionPhase {
         ops: transaction_ops,
     };
@@ -294,12 +338,17 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
             is_2pc: false,
         }
     };
-    
+
     let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
 
     let (tx, mut rx) = mpsc::channel(1);
-    let tx_with_ack_chan_tag: TxWithAckChanTag = (Some(transaction), (tx, current_tag, SenderType::Anon));
-    state.batch_proposer_tx.send(tx_with_ack_chan_tag).await.unwrap();
+    let tx_with_ack_chan_tag: TxWithAckChanTag =
+        (Some(transaction), (tx, current_tag, SenderType::Anon));
+    state
+        .batch_proposer_tx
+        .send(tx_with_ack_chan_tag)
+        .await
+        .unwrap();
 
     let (resp, _) = match rx.recv().await {
         Some(resp) => resp,
@@ -318,8 +367,7 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
     };
 
     let mut result: Vec<Vec<u8>> = Vec::new();
-    let block_n =
-    match decoded_payload.reply.unwrap() {
+    let block_n = match decoded_payload.reply.unwrap() {
         pft::proto::client::proto_client_reply::Reply::Receipt(receipt) => {
             if let Some(tx_result) = receipt.results {
                 if tx_result.result.is_empty() {
@@ -335,24 +383,24 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
                 }
             }
             receipt.block_n
-        },
+        }
         _ => {
             return Err(HttpResponse::NotFound().json(serde_json::json!({
                 "message": "error, no Receipt found",
                 "result": result,
             })))
-        },
+        }
     };
 
     if !isRead && block_n != 0 && byz_commit {
         let current_tag = state.curr_client_tag.fetch_add(1, Ordering::AcqRel);
-    
+
         let probe_transaction = ProtoTransaction {
             on_receive: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
                     op_type: pft::proto::execution::ProtoTransactionOpType::Probe.into(),
                     operands: vec![block_n.to_be_bytes().to_vec()],
-                }]
+                }],
             }),
             on_crash_commit: None,
             on_byzantine_commit: None,
@@ -361,8 +409,13 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
         };
 
         let (tx, mut rx) = mpsc::channel(1);
-        let tx_with_ack_chan_tag: TxWithAckChanTag = (Some(probe_transaction), (tx, current_tag, SenderType::Anon));
-        state.batch_proposer_tx.send(tx_with_ack_chan_tag).await.unwrap();
+        let tx_with_ack_chan_tag: TxWithAckChanTag =
+            (Some(probe_transaction), (tx, current_tag, SenderType::Anon));
+        state
+            .batch_proposer_tx
+            .send(tx_with_ack_chan_tag)
+            .await
+            .unwrap();
 
         let _ = rx.recv().await;
 
@@ -370,7 +423,6 @@ async fn send(transaction_ops: Vec<ProtoTransactionOp>, isRead: bool, state: &Ap
     }
     Ok(result)
 }
-
 
 /*
 Example usage:

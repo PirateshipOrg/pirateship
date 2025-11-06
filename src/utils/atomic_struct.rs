@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crossbeam::atomic::AtomicCell;
 
-
 /// AtomicStruct is the atomically settable version of any struct T.
 /// Useful for reconfiguration, where the struct is updated very less.
 /// So the overhead of locking will be unnecessarily high.
@@ -19,7 +18,7 @@ impl<T> AtomicStruct<T> {
 
     pub fn get(&self) -> Arc<Box<T>> {
         let ptr = self.0.as_ptr();
-        unsafe{ ptr.as_ref().unwrap() }.clone()
+        unsafe { ptr.as_ref().unwrap() }.clone()
     }
 
     pub fn set(&self, val: Box<T>) {

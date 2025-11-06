@@ -1,19 +1,33 @@
-use std::{collections::VecDeque, io::Error, sync::Arc};
 use crate::{crypto::FutureHash, utils::channel::make_channel};
+use std::{collections::VecDeque, io::Error, sync::Arc};
 
 use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::{config::AtomicConfig, crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType}, proto::{checkpoint::ProtoBackfillNack, consensus::{HalfSerializedBlock, ProtoAppendEntries}, rpc::ProtoPayload}, rpc::{client::PinnedClient, MessageRef, SenderType}, utils::{channel::{Receiver, Sender}, get_parent_hash_in_proto_block_ser}};
+use crate::{
+    config::AtomicConfig,
+    crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType},
+    proto::{
+        checkpoint::ProtoBackfillNack,
+        consensus::{HalfSerializedBlock, ProtoAppendEntries},
+        rpc::ProtoPayload,
+    },
+    rpc::{client::PinnedClient, MessageRef, SenderType},
+    utils::{
+        channel::{Receiver, Sender},
+        get_parent_hash_in_proto_block_ser,
+    },
+};
 
 use super::logserver::LogServerQuery;
 use futures::FutureExt;
 
-
 pub enum ForkReceiverCommand {
     UpdateView(u64 /* view num */, u64 /* config num */), // Also acts as a Ack for MultiPartFork
-    MultipartNack(usize /* delete these many parts from the multipart buffer */),
+    MultipartNack(
+        usize, /* delete these many parts from the multipart buffer */
+    ),
     UseBackfillResponse(ProtoAppendEntries, SenderType),
 }
 
@@ -28,24 +42,24 @@ pub struct AppendEntriesStats {
 }
 
 pub struct MultipartFork {
-    pub fork_future: Vec<   // vector of ...
-        Option <
-            oneshot::Receiver<  // futures that will return ...
-                Result<CachedBlock, Error> // a block or an error
-            >
-        > // The option is just to make it easier to remove the future from the vector
+    pub fork_future: Vec<
+        // vector of ...
+        Option<
+            oneshot::Receiver<
+                // futures that will return ...
+                Result<CachedBlock, Error>, // a block or an error
+            >,
+        >, // The option is just to make it easier to remove the future from the vector
     >,
     pub remaining_parts: usize, // How many other such MultipartForks are there?
     pub ae_stats: AppendEntriesStats,
-    
 }
 
 impl MultipartFork {
     pub async fn await_all(&mut self) -> Vec<Result<CachedBlock, Error>> {
         let mut results = Vec::with_capacity(self.fork_future.len());
         for future in self.fork_future.iter_mut() {
-            results.push(future.take().unwrap()
-                .await.unwrap());
+            results.push(future.take().unwrap().await.unwrap());
         }
         results
     }
@@ -54,7 +68,7 @@ impl MultipartFork {
 struct ContinuityStats {
     last_ae_view: u64,
     last_ae_block_hash: FutureHash,
-    waiting_on_nack_reply: bool
+    waiting_on_nack_reply: bool,
 }
 
 macro_rules! ask_logserver {
@@ -66,7 +80,6 @@ macro_rules! ask_logserver {
         }
     };
 }
-
 
 /// Receives AppendEntries from other nodes in the network.
 /// Verifies the view change and config change sequence in the sent fork.
@@ -96,9 +109,7 @@ pub struct ForkReceiver {
     continuity_stats: ContinuityStats,
 
     logserver_query_tx: Sender<LogServerQuery>,
-
 }
-
 
 impl ForkReceiver {
     pub fn new(
@@ -124,7 +135,7 @@ impl ForkReceiver {
             continuity_stats: ContinuityStats {
                 last_ae_view: 0,
                 last_ae_block_hash: FutureHash::None,
-                waiting_on_nack_reply: false
+                waiting_on_nack_reply: false,
             },
             logserver_query_tx,
         };
@@ -183,7 +194,7 @@ impl ForkReceiver {
         if !ae.view_is_stable {
             info!("Got New View message for view {}", ae.view);
         }
-        
+
         if ae.view < self.view || ae.config_num < self.config_num {
             warn!("Old view AppendEntry received: ae view {} < my view {} or ae config num {} < my config num {}", ae.view, self.view, ae.config_num, self.config_num);
             return;
@@ -197,9 +208,8 @@ impl ForkReceiver {
             }
         }
 
-
         // BELOW IS A TEST FOR NACKS. DISABLED IN PRODUCTION.
-        // if self.config.get().net_config.name == "node7" 
+        // if self.config.get().net_config.name == "node7"
         // && ae.view_is_stable
         // && (ae.fork.as_ref().unwrap().serialized_blocks.last().unwrap().n >= 10000
         //     && ae.fork.as_ref().unwrap().serialized_blocks.last().unwrap().n < 10105)
@@ -224,37 +234,34 @@ impl ForkReceiver {
             None => return,
         };
 
-
-
-
         // if ae.view > self.view {
-            // The first block of each view from self.view+1..=ae.view must have view_is_stable = false
-            let mut test_view = self.view;
-            for block in &fork.serialized_blocks {
-                if block.view > test_view {
-                    if block.view_is_stable {
-                        self.send_nack(sender, ae).await;
-                        return;
-                    } else {
-                        info!("Got New View message for view {}", block.view);
-                    }
-
-                    test_view = block.view;
+        // The first block of each view from self.view+1..=ae.view must have view_is_stable = false
+        let mut test_view = self.view;
+        for block in &fork.serialized_blocks {
+            if block.view > test_view {
+                if block.view_is_stable {
+                    self.send_nack(sender, ae).await;
+                    return;
+                } else {
+                    info!("Got New View message for view {}", block.view);
                 }
-            }
 
-            if test_view < ae.view {
-                warn!("Malformed AppendEntries: Missing blocks for view {} in AppendEntries", ae.view);
-                // NAck the AppendEntries; ask to backfill.
-                self.send_nack(sender, ae).await;
-                return;
+                test_view = block.view;
             }
+        }
+
+        if test_view < ae.view {
+            warn!(
+                "Malformed AppendEntries: Missing blocks for view {} in AppendEntries",
+                ae.view
+            );
+            // NAck the AppendEntries; ask to backfill.
+            self.send_nack(sender, ae).await;
+            return;
+        }
         // }
 
         self.continuity_stats.waiting_on_nack_reply = false;
-
-
-
 
         // The fork will have the following general structure
         // (view1, config1) <- (view1, config1) <- ... <- (view1, config1)
@@ -277,7 +284,7 @@ impl ForkReceiver {
                 // First block of the new config must have view_is_stable = false
                 if block.view_is_stable {
                     warn!("Invalid block in AppendEntries: First block for config {} has view_is_stable = true", curr_config);
-                    
+
                     return;
                 }
                 curr_part.as_mut().unwrap().push(block);
@@ -302,30 +309,42 @@ impl ForkReceiver {
 
         let first_part = parts.remove(0);
 
-        let (multipart_fut, mut hash_receivers) = self.crypto.prepare_fork(first_part, parts.len(), AppendEntriesStats {
-            view: ae.view,
-            view_is_stable: ae.view_is_stable,
-            config_num: ae.config_num,
-            sender: sender.clone(),
-            ci: ae.commit_index,
-        }, self.byzantine_liveness_threshold()).await;
+        let (multipart_fut, mut hash_receivers) = self
+            .crypto
+            .prepare_fork(
+                first_part,
+                parts.len(),
+                AppendEntriesStats {
+                    view: ae.view,
+                    view_is_stable: ae.view_is_stable,
+                    config_num: ae.config_num,
+                    sender: sender.clone(),
+                    ci: ae.commit_index,
+                },
+                self.byzantine_liveness_threshold(),
+            )
+            .await;
         self.broadcaster_tx.send(multipart_fut).await.unwrap();
 
-        self.continuity_stats.last_ae_block_hash = FutureHash::FutureResult(hash_receivers.pop().unwrap());
+        self.continuity_stats.last_ae_block_hash =
+            FutureHash::FutureResult(hash_receivers.pop().unwrap());
 
         if parts.len() > 0 {
             assert_eq!(self.multipart_buffer.len(), 0); // Due to the Invariant <blocked_on_multipart>
-            self.multipart_buffer.extend(parts.iter().map(|part| (part.clone(), AppendEntriesStats {
-                view: ae.view,
-                view_is_stable: ae.view_is_stable,
-                config_num: ae.config_num,
-                sender: sender.clone(),
-                ci: ae.commit_index,
-            })));
+            self.multipart_buffer.extend(parts.iter().map(|part| {
+                (
+                    part.clone(),
+                    AppendEntriesStats {
+                        view: ae.view,
+                        view_is_stable: ae.view_is_stable,
+                        config_num: ae.config_num,
+                        sender: sender.clone(),
+                        ci: ae.commit_index,
+                    },
+                )
+            }));
             self.blocked_on_multipart = true;
         }
-
-
     }
 
     async fn handle_command(&mut self, cmd: ForkReceiverCommand) {
@@ -342,10 +361,9 @@ impl ForkReceiver {
                 if config_is_updating && self.multipart_buffer.len() > 0 {
                     // Forward the next multipart buffer
                     let (part, ae_stats) = self.multipart_buffer.pop_front().unwrap();
-                    
+
                     // If this is the last part, then the sender must be the leader for this view in this config.
-                    let maybe_legit =
-                    if self.multipart_buffer.len() == 0 {
+                    let maybe_legit = if self.multipart_buffer.len() == 0 {
                         let leader = self.get_leader_for_view(self.view);
                         if leader == ae_stats.sender {
                             true
@@ -357,17 +375,25 @@ impl ForkReceiver {
                     };
 
                     if maybe_legit {
-                        let (multipart_fut, mut hash_receivers) = self.crypto.prepare_fork(part, self.multipart_buffer.len(), ae_stats, self.byzantine_liveness_threshold()).await;
+                        let (multipart_fut, mut hash_receivers) = self
+                            .crypto
+                            .prepare_fork(
+                                part,
+                                self.multipart_buffer.len(),
+                                ae_stats,
+                                self.byzantine_liveness_threshold(),
+                            )
+                            .await;
                         self.broadcaster_tx.send(multipart_fut).await.unwrap();
-                        self.continuity_stats.last_ae_block_hash = FutureHash::FutureResult(hash_receivers.pop().unwrap());
+                        self.continuity_stats.last_ae_block_hash =
+                            FutureHash::FutureResult(hash_receivers.pop().unwrap());
                     }
-
                 }
 
                 if self.multipart_buffer.len() == 0 {
                     self.blocked_on_multipart = false;
                 }
-            },
+            }
             ForkReceiverCommand::MultipartNack(n) => {
                 assert_eq!(n, self.multipart_buffer.len()); // Due to Invariant <blocked_on_multipart>
                 for _ in 0..n {
@@ -377,7 +403,7 @@ impl ForkReceiver {
                 if self.multipart_buffer.len() == 0 {
                     self.blocked_on_multipart = false;
                 }
-            },
+            }
             ForkReceiverCommand::UseBackfillResponse(ae, sender) => {
                 let (name, _) = sender.to_name_and_sub_id();
                 self.process_fork(ae, name).await;
@@ -385,45 +411,55 @@ impl ForkReceiver {
         }
     }
 
-
     async fn send_nack(&mut self, sender: String, ae: ProtoAppendEntries) {
         info!("Nacking AE to {}", sender);
         self.continuity_stats.waiting_on_nack_reply = true;
-        let first_block_n = ae.fork.as_ref().map_or(ae.commit_index, |f| f.serialized_blocks.first().unwrap().n);
-        let last_index_needed = if first_block_n > 100 { first_block_n - 100 } else { 0 };
-        
+        let first_block_n = ae
+            .fork
+            .as_ref()
+            .map_or(ae.commit_index, |f| f.serialized_blocks.first().unwrap().n);
+        let last_index_needed = if first_block_n > 100 {
+            first_block_n - 100
+        } else {
+            0
+        };
+
         let hints = ask_logserver!(self, LogServerQuery::GetHints, last_index_needed);
-        
+
         let my_name = self.config.get().net_config.name.clone();
-        
+
         let nack = ProtoBackfillNack {
             hints,
             last_index_needed,
             reply_name: my_name,
-            origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Ae(ae)),
+            origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Ae(
+                ae,
+            )),
         };
 
         let payload = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::BackfillNack(nack)),
+            message: Some(crate::proto::rpc::proto_payload::Message::BackfillNack(
+                nack,
+            )),
         };
-
 
         let buf = payload.encode_to_vec();
         let sz = buf.len();
 
-        let _ = PinnedClient::send(&self.client, &sender,
-            MessageRef(&buf, sz, &SenderType::Anon)
-        ).await;
-
+        let _ = PinnedClient::send(
+            &self.client,
+            &sender,
+            MessageRef(&buf, sz, &SenderType::Anon),
+        )
+        .await;
     }
-
 
     /// This doesn't have an exact logic.
     /// Since due to no locking, the log server works with a slightly outdated view of the log than staging.
     /// For safety, it is ok to send a nack when the block could pass through staging.
     /// But it is not ok to send a block to staging when it should have been nacked.
     /// Since staging doesn't have the context to send the nack.
-    /// 
+    ///
     /// Logic:
     /// - If the parent of the ae was the last one this fork receiver forwarded, then the fork may be valid. Forward it.
     /// - If the parent of the ae is seen by the log server, then the fork may be valid. Forward it.
@@ -435,23 +471,23 @@ impl ForkReceiver {
             warn!("Empty AppendEntries received");
             return Ok(());
         }
-        
-        let parent_hash = 
-            get_parent_hash_in_proto_block_ser(
-                &fork.serialized_blocks.first().unwrap().serialized_body
-            ).unwrap();
-        
+
+        let parent_hash = get_parent_hash_in_proto_block_ser(
+            &fork.serialized_blocks.first().unwrap().serialized_body,
+        )
+        .unwrap();
+
         let hsh = match self.continuity_stats.last_ae_block_hash.take() {
             FutureHash::None => None,
             FutureHash::Immediate(hsh) => {
                 self.continuity_stats.last_ae_block_hash = FutureHash::Immediate(hsh.clone());
                 Some(hsh.clone())
-            },
+            }
             FutureHash::Future(receiver) => {
                 let hsh = receiver.await.unwrap();
                 self.continuity_stats.last_ae_block_hash = FutureHash::Immediate(hsh.clone());
                 Some(hsh)
-            },
+            }
             FutureHash::FutureResult(receiver) => {
                 let hsh = receiver.await.unwrap();
                 if hsh.is_err() {
@@ -462,7 +498,7 @@ impl ForkReceiver {
                     self.continuity_stats.last_ae_block_hash = FutureHash::Immediate(hsh.clone());
                     Some(hsh)
                 }
-            },
+            }
         };
         if hsh.is_some() {
             let hsh = hsh.unwrap();
@@ -475,15 +511,19 @@ impl ForkReceiver {
 
         // Ask Logserver
         let parent_n = fork.serialized_blocks.first().unwrap().n - 1;
-        let _logserver_has_block = ask_logserver!(self, LogServerQuery::CheckHash, parent_n, parent_hash);
+        let _logserver_has_block =
+            ask_logserver!(self, LogServerQuery::CheckHash, parent_n, parent_hash);
 
-
-        if _logserver_has_block { Ok(()) } else { Err(()) }
+        if _logserver_has_block {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 
     fn byzantine_liveness_threshold(&self) -> usize {
         let n = self.config.get().consensus_config.node_list.len();
-        
+
         #[cfg(feature = "platforms")]
         {
             let u = self.config.get().consensus_config.liveness_u as usize;
