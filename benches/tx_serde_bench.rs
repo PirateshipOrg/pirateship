@@ -1,5 +1,5 @@
 
-use pft::proto::{client::ProtoClientRequest, consensus::{ProtoBlock, ProtoFork, ProtoTransactionList}, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}};
+use pft::proto::{client::ProtoClientRequest, consensus::ProtoBlock, execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionPhase}};
 use prost::Message;
 
 fn get_small_tx_msg() -> ProtoClientRequest {
@@ -14,6 +14,7 @@ fn get_small_tx_msg() -> ProtoClientRequest {
             }),
             on_byzantine_commit: None,
             is_reconfiguration: false,
+            is_2pc: false,
         }),
         origin: String::from("client1"),
         // sig: vec![0u8; SIGNATURE_LENGTH],
@@ -39,6 +40,7 @@ fn get_large_tx_msg() -> ProtoClientRequest {
             // on_crash_commit: None,
             on_byzantine_commit: None,
             is_reconfiguration: false,
+            is_2pc: false,
         }),
         origin: String::from("client1"),
         // sig: vec![0u8; SIGNATURE_LENGTH],
@@ -50,15 +52,13 @@ fn get_large_tx_msg() -> ProtoClientRequest {
 const SAMPLES: usize = 10000;
 fn main() {
     let mut large_lens = Vec::new();
-    let mut large_fork = ProtoFork {
-        blocks: Vec::new(),
-    };
+    let mut large_blocks = Vec::new();
     for i in 0..SAMPLES {
         let tx = get_large_tx_msg();
         let v = tx.encode_to_vec();
         large_lens.push(v.len());
-        large_fork.blocks.push(ProtoBlock {
-            tx: Some(pft::proto::consensus::proto_block::Tx::TxList(ProtoTransactionList {tx_list: vec![tx.tx.unwrap()]})),
+        let block = ProtoBlock {
+            tx_list: vec![tx.tx.unwrap()],
             n: i as u64,
             parent: vec![0u8; 32],
             view: 1,
@@ -67,24 +67,26 @@ fn main() {
             view_is_stable: true,
             config_num: 0,
             sig: Some(pft::proto::consensus::proto_block::Sig::ProposerSig(vec![0u8; 64])),
-        });
+        };
+        large_blocks.push(block);
     }
 
     let mean_large_len = large_lens.iter().sum::<usize>() as f64 / SAMPLES as f64;
 
     println!("Mean large length: {} KiB Total: {} KiB", mean_large_len / 1024.0, mean_large_len * SAMPLES as f64 / 1024.0);
-    println!("Large fork size: {} KiB", large_fork.encode_to_vec().len() as f64 / 1024.0);
     
-    let mut small_fork = ProtoFork {
-        blocks: Vec::new(),
-    };
+    // Calculate total size of all blocks
+    let total_large_blocks_size: usize = large_blocks.iter().map(|b| b.encode_to_vec().len()).sum();
+    println!("Large blocks total size: {} KiB", total_large_blocks_size as f64 / 1024.0);
+    
+    let mut small_blocks = Vec::new();
     let mut small_lens = Vec::new();
     for i in 0..SAMPLES {
         let tx = get_small_tx_msg();
         let v = tx.encode_to_vec();
         small_lens.push(v.len());
-        small_fork.blocks.push(ProtoBlock {
-            tx: Some(pft::proto::consensus::proto_block::Tx::TxList(ProtoTransactionList {tx_list: vec![tx.tx.unwrap()]})),
+        let block = ProtoBlock {
+            tx_list: vec![tx.tx.unwrap()],
             n: i as u64,
             parent: vec![0u8; 32],
             view: 1,
@@ -93,13 +95,17 @@ fn main() {
             view_is_stable: true,
             config_num: 0,
             sig: Some(pft::proto::consensus::proto_block::Sig::ProposerSig(vec![0u8; 64])),
-        });
+        };
+        small_blocks.push(block);
     }
 
     let mean_small_len = small_lens.iter().sum::<usize>() as f64 / SAMPLES as f64;
 
     println!("Mean small length: {} KiB Total {} KiB", mean_small_len / 1024.0, mean_small_len * SAMPLES as f64 / 1024.0);
-    println!("Small fork size: {} KiB", small_fork.encode_to_vec().len() as f64 / 1024.0);
+    
+    // Calculate total size of all blocks
+    let total_small_blocks_size: usize = small_blocks.iter().map(|b| b.encode_to_vec().len()).sum();
+    println!("Small blocks total size: {} KiB", total_small_blocks_size as f64 / 1024.0);
 
     let tx = get_small_tx_msg();
 

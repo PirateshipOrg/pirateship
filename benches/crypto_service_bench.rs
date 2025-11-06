@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
 use pft::crypto::{AtomicKeyStore, CryptoService, CryptoServiceConnector, KeyStore};
+use pft::config::{AtomicConfig, Config, NetConfig, RpcConfig, ConsensusConfig, AppConfig, StorageConfig, RocksDBConfig};
+use std::collections::HashMap;
 use tokio::task::JoinSet;
 
 async fn hash_worker(mut crypto: CryptoServiceConnector, payload_size: usize, iter_num: usize) -> Vec<Duration> {
@@ -65,7 +67,49 @@ async fn run_bench_with_n_tasks(num_tasks: usize) {
         &String::from("configs/node1_signing_privkey.pem"),
     );
 
-    let mut crypto_service = CryptoService::new(num_tasks, AtomicKeyStore::new(key_store));
+    // Create a minimal config for the CryptoService
+    let config = Config {
+        net_config: NetConfig {
+            name: "bench".to_string(),
+            addr: "0.0.0.0:0".to_string(),
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
+            tls_root_ca_cert_path: String::new(),
+            nodes: HashMap::new(),
+            client_max_retry: 0,
+        },
+        rpc_config: RpcConfig {
+            allowed_keylist_path: String::new(),
+            signing_priv_key_path: String::new(),
+            recv_buffer_size: 0,
+            channel_depth: 0,
+        },
+        consensus_config: ConsensusConfig {
+            node_list: vec![],
+            learner_list: vec![],
+            max_backlog_batch_size: 0,
+            batch_max_delay_ms: 0,
+            signature_max_delay_ms: 0,
+            view_timeout_ms: 0,
+            signature_max_delay_blocks: 0,
+            num_crypto_workers: num_tasks,
+            log_storage_config: StorageConfig::RocksDB(RocksDBConfig::default()),
+            liveness_u: 0,
+            commit_index_gap_soft: 0,
+            commit_index_gap_hard: 0,
+        },
+        app_config: AppConfig {
+            logger_stats_report_ms: 0,
+            checkpoint_interval_ms: 0,
+        },
+        #[cfg(feature = "evil")]
+        evil_config: pft::config::EvilConfig {
+            simulate_byzantine_behavior: false,
+            byzantine_start_block: 0,
+        },
+    };
+
+    let mut crypto_service = CryptoService::new(num_tasks, AtomicKeyStore::new(key_store), AtomicConfig::new(config));
     crypto_service.run();
 
     const ITER_NUM: usize = 1_000;
