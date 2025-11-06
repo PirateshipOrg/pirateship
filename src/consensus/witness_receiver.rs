@@ -74,6 +74,19 @@ impl AuditorState {
                         }
                     }
                 }
+
+                if block_witness.n >= 2 {
+                    let prev_block_hash = self.block_hashes.get(&(block_witness.n - 1));
+                    let Some(prev_block_hash) = prev_block_hash else {
+                        error!("Previous block hash not found for block n: {}", block_witness.n);
+                        return;
+                    };
+                    if prev_block_hash != &block_witness.parent_hash {
+                        error!("Parent hash mismatch for block n: {}, old hash: {}, new hash: {}", block_witness.n, Self::display_hash(prev_block_hash), Self::display_hash(&block_witness.parent_hash));
+                    } else {
+                        trace!("Parent hash matches for block n: {}, parent hash: {}", block_witness.n, Self::display_hash(prev_block_hash));
+                    }
+                }
                 self.block_hashes.insert(block_witness.n, block_witness.block_hash.clone());
             }
             Some(Body::VoteWitness(vote_witness)) => {
@@ -189,7 +202,7 @@ impl WitnessReceiver {
             let log_timer = ResettableTimer::new(Duration::from_millis(log_timeout));
             log_timer.run().await;
             witness_receiver.handles.spawn(async move {
-                info!("Auditing task for node");
+                // TODO: Handle load-balancing logic.
                 let mut state = AuditorState::new("*".to_string());
                 loop {
                     tokio::select! {
