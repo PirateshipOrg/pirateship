@@ -7,6 +7,7 @@ package proto.rpc;
 import "consensus.proto";
 import "client.proto";
 import "checkpoint.proto";
+import "dag.proto";
 
 
 message ProtoPayload {
@@ -23,5 +24,11 @@ message ProtoPayload {
 
         proto.checkpoint.ProtoBackfillNack backfill_nack = 7;
 
-    }
+        //  Dag Dissemination Only
+        proto.dag.ProtoAppendBlock append_block = 8;
+        proto.dag.ProtoBlockAck block_ack = 9;
+        proto.dag.ProtoBlockCAR block_CAR = 10;
+        proto.dag.ProtoTipCut tip_cut = 11;
+        proto.dag.ProtoTipCutVote tc_vote = 12;
+   }
 }

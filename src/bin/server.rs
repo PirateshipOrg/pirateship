@@ -42,9 +42,15 @@ fn process_args() -> Config {
 }
 
 #[allow(unused_assignments)]
-fn get_feature_set() -> (&'static str, &'static str) {
+fn get_feature_set() -> (&'static str, &'static str, bool) {
     let mut app = "";
     let mut protocol = "";
+    let mut dag = false;
+
+    #[cfg(feature = "dag")]
+    {
+        dag = true;
+    }
 
     #[cfg(feature = "app_logger")]
     {
@@ -80,7 +86,7 @@ fn get_feature_set() -> (&'static str, &'static str) {
         protocol = "engraft";
     }
 
-    (protocol, app)
+    (protocol, app, dag)
 }
 
 async fn run_main(cfg: Config) -> io::Result<()> {
@@ -124,8 +130,8 @@ fn main() {
 
     let cfg = process_args();
 
-    let (protocol, app) = get_feature_set();
-    info!("Protocol: {}, App: {}", protocol, app);
+    let (protocol, app, dag) = get_feature_set();
+    info!("Protocol: {}, App: {}, DAG: {}", protocol, app, dag);
 
     #[cfg(feature = "evil")]
     if cfg.evil_config.simulate_byzantine_behavior {

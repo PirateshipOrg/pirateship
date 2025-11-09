@@ -3,6 +3,7 @@ pub mod batch_proposal;
 mod block_broadcaster;
 mod block_sequencer;
 pub mod client_reply;
+mod dag;
 pub mod engines;
 pub mod extra_2pc;
 pub mod fork_receiver;
@@ -31,6 +32,9 @@ use crate::{
         RocksDBStorageEngine, StorageService,
     },
 };
+
+#[cfg(feature = "dag")]
+use crate::proto::dag::{ProtoAppendBlock, ProtoBlockAck, ProtoTipCut, ProtoTipCutVote};
 use app::{AppEngine, Application};
 use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
@@ -62,8 +66,21 @@ pub struct ConsensusServerContext {
     config: AtomicConfig,
     keystore: AtomicKeyStore,
     batch_proposal_tx: Sender<TxWithAckChanTag>,
+    
+    #[cfg(not(feature = "dag"))]
     fork_receiver_tx: Sender<(ProtoAppendEntries, SenderType)>,
+    #[cfg(not(feature = "dag"))]
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
+    
+    #[cfg(feature = "dag")]
+    block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
+    #[cfg(feature = "dag")]
+    block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
+    #[cfg(feature = "dag")]
+    tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
+    #[cfg(feature = "dag")]
+    tip_cut_vote_tx: Sender<(ProtoTipCutVote, SenderType)>,
+    
     vote_receiver_tx: Sender<VoteWithSender>,
     view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
     backfill_request_tx: Sender<ProtoBackfillNack>,
@@ -73,6 +90,7 @@ pub struct ConsensusServerContext {
 pub struct PinnedConsensusServerContext(pub Arc<Pin<Box<ConsensusServerContext>>>);
 
 impl PinnedConsensusServerContext {
+    #[cfg(not(feature = "dag"))]
     pub fn new(
         config: AtomicConfig,
         keystore: AtomicKeyStore,
@@ -89,6 +107,33 @@ impl PinnedConsensusServerContext {
             batch_proposal_tx,
             fork_receiver_tx,
             fork_receiver_command_tx,
+            vote_receiver_tx,
+            view_change_receiver_tx,
+            backfill_request_tx,
+        })))
+    }
+
+    #[cfg(feature = "dag")]
+    pub fn new(
+        config: AtomicConfig,
+        keystore: AtomicKeyStore,
+        batch_proposal_tx: Sender<TxWithAckChanTag>,
+        block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
+        block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
+        tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
+        tip_cut_vote_tx: Sender<(ProtoTipCutVote, SenderType)>,
+        vote_receiver_tx: Sender<VoteWithSender>,
+        view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
+        backfill_request_tx: Sender<ProtoBackfillNack>,
+    ) -> Self {
+        Self(Arc::new(Box::pin(ConsensusServerContext {
+            config,
+            keystore,
+            batch_proposal_tx,
+            block_receiver_tx,
+            block_ack_tx,
+            tip_cut_tx,
+            tip_cut_vote_tx,
             vote_receiver_tx,
             view_change_receiver_tx,
             backfill_request_tx,
@@ -144,6 +189,8 @@ impl ServerContextType for PinnedConsensusServerContext {
                     .expect("Channel send error");
                 return Ok(RespType::NoResp);
             }
+            
+            #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::AppendEntries(proto_append_entries) => {
                 // info!("Received append entries from {:?}. Size: {}", sender, proto_append_entries.encoded_len());
                 if proto_append_entries.is_backfill_response {
@@ -162,6 +209,87 @@ impl ServerContextType for PinnedConsensusServerContext {
                 }
                 return Ok(RespType::NoResp);
             }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::AppendEntries(_proto_append_entries) => {
+                warn!("Received AppendEntries in DAG mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::AppendBlock(proto_append_block) => {
+                // TODO: Handle backfill response flag when extended for DAG
+                self.block_receiver_tx
+                    .send((proto_append_block, sender))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::AppendBlock(_proto_append_block) => {
+                warn!("Received AppendBlock in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::BlockAck(proto_block_ack) => {
+                self.block_ack_tx
+                    .send((proto_block_ack, sender))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::BlockAck(_proto_block_ack) => {
+                warn!("Received BlockAck in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::BlockCar(proto_block_car) => {
+                // TODO: Implement BlockCAR handling
+                debug!("Received BlockCAR - not yet implemented");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::BlockCar(_proto_block_car) => {
+                warn!("Received BlockCAR in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::TipCut(proto_tip_cut) => {
+                self.tip_cut_tx
+                    .send((proto_tip_cut, sender))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::TipCut(_proto_tip_cut) => {
+                warn!("Received TipCut in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::TcVote(proto_tc_vote) => {
+                self.tip_cut_vote_tx
+                    .send((proto_tc_vote, sender))
+                    .await
+                    .expect("Channel send error");
+                return Ok(RespType::NoResp);
+            }
+            
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::TcVote(_proto_tc_vote) => {
+                warn!("Received TipCutVote in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+            
             crate::proto::rpc::proto_payload::Message::Vote(proto_vote) => {
                 self.vote_receiver_tx
                     .send((sender, proto_vote))

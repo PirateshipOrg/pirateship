@@ -103,6 +103,7 @@ evil = []
 extra_2pc = []
 no_pipeline = []
 extra_qc_check = []
+dag = []
 
 # Applications
 app_logger = []
@@ -116,6 +117,11 @@ chained_pbft = ["round_robin_leader", "always_sign", "view_change"]
 jolteon = ["round_robin_leader", "always_sign", "view_change", "no_pipeline"]
 hotstuff = ["round_robin_leader", "always_sign", "view_change", "no_pipeline", "extra_qc_check"]
 pirateship = ["round_robin_leader", "dynamic_sign", "view_change"]
+
+# DAG Configurations
+# NOTE: Right now these enforce "always_sign" to get lane identifiers on blocks
+dag_pirateship = ["pirateship", "app_logger", "storage", "fast_path", "platforms", "dag", "always_sign"]
+dag_sraft = ["signed_raft", "app_logger", "storage", "fast_path", "platforms", "dag", "always_sign"]
 
 default = ["pirateship", "app_logger", "storage", "fast_path", "platforms"]
 # default = ["jolteon", "app_logger", "storage"]
