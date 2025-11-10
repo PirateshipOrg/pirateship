@@ -9,7 +9,7 @@ use crate::{
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
     proto::{
         checkpoint::ProtoBackfillNack,
-        consensus::{proto_block::Sig, ProtoAppendBlock},
+        consensus::ProtoAppendBlock,
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, MessageRef, SenderType},
@@ -35,7 +35,7 @@ pub struct AppendBlockStats {
     pub config_num: u64,
     pub sender: String,
     pub ci: u64,
-    pub proposer_sig: Vec<u8>, // Lane identifier
+    pub lane_id: String, // Lane identifier (sender name)
 }
 
 /// A single block with its verification future, ready to send to broadcaster
@@ -103,9 +103,9 @@ pub struct BlockReceiver {
     broadcaster_tx: Sender<SingleBlock>,
 
     // Per-lane continuity tracking
-    // Key: proposer_sig (lane identifier)
+    // Key: lane_id (sender name)
     // Value: continuity stats for that lane
-    lane_continuity: HashMap<Vec<u8>, LaneContinuityStats>,
+    lane_continuity: HashMap<String, LaneContinuityStats>,
 
     // Communication with lane log server
     lane_logserver_query_tx: Sender<LaneLogServerQuery>,
@@ -184,32 +184,6 @@ impl BlockReceiver {
         Ok(())
     }
 
-    /// Extract proposer signature from block to identify the lane
-    fn extract_proposer_sig(&self, block: &ProtoAppendBlock) -> Result<Vec<u8>, ()> {
-        let serialized_body = match &block.block {
-            Some(b) => &b.serialized_body,
-            None => {
-                warn!("AppendBlock has no block");
-                return Err(());
-            }
-        };
-
-        // Deserialize to get the signature
-        match deserialize_proto_block(serialized_body) {
-            Ok(proto_block) => match &proto_block.sig {
-                Some(Sig::ProposerSig(sig)) => Ok(sig.clone()),
-                _ => {
-                    warn!("Block has no proposer signature");
-                    Err(())
-                }
-            },
-            Err(_) => {
-                warn!("Failed to deserialize block");
-                Err(())
-            }
-        }
-    }
-
     async fn process_block(&mut self, block: ProtoAppendBlock, sender: String) {
         if block.view < self.view || block.config_num < self.config_num {
             warn!(
@@ -219,37 +193,35 @@ impl BlockReceiver {
             return;
         }
 
-        // Extract proposer signature to identify lane
-        let proposer_sig = match self.extract_proposer_sig(&block) {
-            Ok(sig) => sig,
-            Err(_) => return,
-        };
+        // Use sender name as lane identifier
+        // In DAG mode, each sender has their own lane
+        let lane_id = sender.clone();
 
         // Check if this lane is waiting on NACK reply
-        if let Some(stats) = self.lane_continuity.get(&proposer_sig) {
+        if let Some(stats) = self.lane_continuity.get(&lane_id) {
             if stats.waiting_on_nack_reply {
                 info!(
-                    "Possible AppendBlock after NACK for lane {:?}",
-                    proposer_sig
+                    "Possible AppendBlock after NACK for lane {}",
+                    lane_id
                 );
             }
         }
 
         // Check lane continuity
         if self
-            .ensure_lane_continuity(&proposer_sig, &block)
+            .ensure_lane_continuity(&lane_id, &block)
             .await
             .is_err()
         {
             // Send NACK for this lane
-            self.send_lane_nack(proposer_sig.clone(), sender, block)
+            self.send_lane_nack(lane_id.clone(), sender, block)
                 .await;
-            info!("Returning after sending NACK for lane {:?}", proposer_sig);
+            info!("Returning after sending NACK for lane {}", lane_id);
             return;
         }
 
         // Mark that we're no longer waiting on NACK for this lane
-        if let Some(stats) = self.lane_continuity.get_mut(&proposer_sig) {
+        if let Some(stats) = self.lane_continuity.get_mut(&lane_id) {
             stats.waiting_on_nack_reply = false;
         }
 
@@ -285,7 +257,7 @@ impl BlockReceiver {
             config_num: block.config_num,
             sender,
             ci: block.commit_index,
-            proposer_sig: proposer_sig.clone(),
+            lane_id: lane_id.clone(),
         };
 
         // Wrap the block receiver to match the expected Result type
@@ -332,7 +304,7 @@ impl BlockReceiver {
 
         let lane_stats = self
             .lane_continuity
-            .entry(proposer_sig.clone())
+            .entry(lane_id.clone())
             .or_insert_with(LaneContinuityStats::new);
 
         lane_stats.last_block_hash = FutureHash::FutureResult(hash_result_rx);
@@ -356,7 +328,7 @@ impl BlockReceiver {
     /// 3. Otherwise -> NACK needed
     async fn ensure_lane_continuity(
         &mut self,
-        proposer_sig: &Vec<u8>,
+        lane_id: &String,
         block: &ProtoAppendBlock,
     ) -> Result<(), ()> {
         let half_serialized = match &block.block {
@@ -378,7 +350,7 @@ impl BlockReceiver {
             })?;
 
         // Check local continuity for this lane
-        let lane_stats = self.lane_continuity.get_mut(proposer_sig);
+        let lane_stats = self.lane_continuity.get_mut(lane_id);
 
         if let Some(stats) = lane_stats {
             let hsh = match stats.last_block_hash.take() {
@@ -418,7 +390,7 @@ impl BlockReceiver {
         let logserver_has_block = ask_lane_logserver!(
             self,
             LaneLogServerQuery::CheckHash,
-            proposer_sig.clone(),
+            lane_id.clone(),
             parent_n,
             parent_hash
         );
@@ -433,19 +405,19 @@ impl BlockReceiver {
     /// Send a NACK for a specific lane requesting backfill
     async fn send_lane_nack(
         &mut self,
-        proposer_sig: Vec<u8>,
+        lane_id: String,
         sender: String,
         block: ProtoAppendBlock,
     ) {
         info!(
-            "NACKing AppendBlock to {} for lane {:?}",
-            sender, proposer_sig
+            "NACKing AppendBlock to {} for lane {}",
+            sender, lane_id
         );
 
         // Mark this lane as waiting on NACK reply
         let lane_stats = self
             .lane_continuity
-            .entry(proposer_sig.clone())
+            .entry(lane_id.clone())
             .or_insert_with(LaneContinuityStats::new);
         lane_stats.waiting_on_nack_reply = true;
 
@@ -460,7 +432,7 @@ impl BlockReceiver {
         let hints = ask_lane_logserver!(
             self,
             LaneLogServerQuery::GetHints,
-            proposer_sig.clone(),
+            lane_id.clone(),
             last_index_needed
         );
 

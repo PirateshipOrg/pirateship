@@ -12,7 +12,7 @@ use crate::{
     crypto::CachedBlock,
     proto::{
         checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint},
-        consensus::{proto_block::Sig, HalfSerializedBlock, ProtoAppendBlock},
+        consensus::{HalfSerializedBlock, ProtoAppendBlock},
         rpc::{proto_payload::Message, ProtoPayload},
     },
     rpc::{client::PinnedClient, MessageRef},
@@ -21,15 +21,6 @@ use crate::{
         StorageServiceConnector,
     },
 };
-
-/// Extract the proposer signature from a block to use as a unique lane identifier.
-/// Assumes DAG mode is enabled with signed messages, so all blocks have ProposerSig.
-fn extract_proposer_sig(block: &CachedBlock) -> Option<Vec<u8>> {
-    match &block.block.sig {
-        Some(Sig::ProposerSig(sig)) => Some(sig.clone()),
-        _ => None,
-    }
-}
 
 /// LRU read cache for GCed blocks per lane.
 /// Deletes older blocks in favor of newer ones.
@@ -93,21 +84,21 @@ impl LaneReadCache {
 
 pub enum LaneLogServerQuery {
     CheckHash(
-        Vec<u8>, /* proposer_sig (lane identifier) */
+        String,  /* lane_id (sender name) */
         u64,     /* block.n */
         Vec<u8>, /* block_hash */
         Sender<bool>,
     ),
     GetHints(
-        Vec<u8>, /* proposer_sig (lane identifier) */
+        String,  /* lane_id (sender name) */
         u64,     /* last needed block.n */
         Sender<Vec<ProtoBlockHint>>,
     ),
 }
 
 pub enum LaneLogServerCommand {
-    NewBlock(CachedBlock),
-    Rollback(Vec<u8> /* proposer_sig (lane identifier) */, u64),
+    NewBlock(String /* lane_id */, CachedBlock),
+    Rollback(String /* lane_id (sender name) */, u64),
     UpdateBCI(u64),
 }
 
@@ -124,11 +115,11 @@ pub struct LaneLogServer {
 
     storage: StorageServiceConnector,
 
-    /// Map from proposer signature to their lane (chain of blocks)
-    lanes: HashMap<Vec<u8>, VecDeque<CachedBlock>>,
+    /// Map from lane_id (sender name) to their lane (chain of blocks)
+    lanes: HashMap<String, VecDeque<CachedBlock>>,
 
     /// Read cache per lane for GCed blocks.
-    read_caches: HashMap<Vec<u8>, LaneReadCache>,
+    read_caches: HashMap<String, LaneReadCache>,
 }
 
 const LOGSERVER_READ_CACHE_WSS: usize = 100;
@@ -171,13 +162,13 @@ impl LaneLogServer {
             biased;
             cmd = self.logserver_rx.recv() => {
                 match cmd {
-                    Some(LaneLogServerCommand::NewBlock(block)) => {
-                        trace!("Received block {}", block.block.n);
-                        self.handle_new_block(block).await;
+                    Some(LaneLogServerCommand::NewBlock(lane_id, block)) => {
+                        trace!("Received block {} for lane {}", block.block.n, lane_id);
+                        self.handle_new_block(lane_id, block).await;
                     },
-                    Some(LaneLogServerCommand::Rollback(proposer_sig, n)) => {
-                        trace!("Rolling back lane {:?} to block {}", proposer_sig, n);
-                        self.handle_rollback(proposer_sig, n).await;
+                    Some(LaneLogServerCommand::Rollback(lane_id, n)) => {
+                        trace!("Rolling back lane {} to block {}", lane_id, n);
+                        self.handle_rollback(lane_id, n).await;
                     },
                     Some(LaneLogServerCommand::UpdateBCI(n)) => {
                         trace!("Updating BCI to {}", n);
@@ -215,8 +206,8 @@ impl LaneLogServer {
         Ok(())
     }
 
-    async fn get_block(&mut self, proposer_sig: &Vec<u8>, n: u64) -> Option<CachedBlock> {
-        let lane = self.lanes.get(proposer_sig)?;
+    async fn get_block(&mut self, lane_id: &String, n: u64) -> Option<CachedBlock> {
+        let lane = self.lanes.get(lane_id)?;
         let last_n = lane.back()?.block.n;
 
         if n == 0 || n > last_n {
@@ -225,7 +216,7 @@ impl LaneLogServer {
 
         let first_n = lane.front()?.block.n;
         if n < first_n {
-            return self.get_gced_block(proposer_sig, n).await;
+            return self.get_gced_block(lane_id, n).await;
         }
 
         let block_idx = lane.binary_search_by(|e| e.block.n.cmp(&n)).ok()?;
@@ -234,8 +225,8 @@ impl LaneLogServer {
         Some(block)
     }
 
-    async fn get_gced_block(&mut self, proposer_sig: &Vec<u8>, n: u64) -> Option<CachedBlock> {
-        let lane = self.lanes.get(proposer_sig)?;
+    async fn get_gced_block(&mut self, lane_id: &String, n: u64) -> Option<CachedBlock> {
+        let lane = self.lanes.get(lane_id)?;
         let first_n = lane.front()?.block.n;
         if n >= first_n {
             return None; // The block is not GCed.
@@ -244,7 +235,7 @@ impl LaneLogServer {
         // Get or create read cache for this lane
         let read_cache = self
             .read_caches
-            .entry(proposer_sig.clone())
+            .entry(lane_id.clone())
             .or_insert_with(|| LaneReadCache::new(LOGSERVER_READ_CACHE_WSS));
 
         // Search in the read cache.
@@ -270,7 +261,7 @@ impl LaneLogServer {
                 .expect("Failed to get block from storage");
 
             // Update cache for this lane
-            if let Some(cache) = self.read_caches.get_mut(proposer_sig) {
+            if let Some(cache) = self.read_caches.get_mut(lane_id) {
                 cache.put(block.clone());
             }
             ret = block;
@@ -305,33 +296,18 @@ impl LaneLogServer {
             }
         };
 
-        // Extract proposer signature from the last block in the fork to identify the lane
-        let proposer_sig = if let Some(last_block) = existing_fork.serialized_blocks.last() {
-            // Deserialize to get the signature
-            match crate::utils::deserialize_proto_block(&last_block.serialized_body) {
-                Ok(block) => match &block.sig {
-                    Some(Sig::ProposerSig(sig)) => sig.clone(),
-                    _ => {
-                        warn!("Last block in fork has no proposer signature");
-                        return Ok(());
-                    }
-                },
-                Err(_) => {
-                    warn!("Failed to deserialize last block in fork");
-                    return Ok(());
-                }
-            }
-        } else {
-            warn!("Empty fork in backfill request");
-            return Ok(());
-        };
+        // In DAG mode, the lane_id is the sender name
+        // The backfill request should specify which lane (sender) needs backfill
+        // For now, we'll use the reply_name (sender of the NACK) as a proxy
+        // TODO: Extend ProtoBackfillNack to include lane_id explicitly
+        let lane_id = sender.clone();
 
         let last_n = existing_fork.serialized_blocks.last().unwrap().n;
         let first_n = backfill_req.last_index_needed;
 
         // Get the requested block from this lane
         let requested_block = self
-            .get_block_for_backfill(&proposer_sig, first_n, last_n, hints)
+            .get_block_for_backfill(&lane_id, first_n, last_n, hints)
             .await;
 
         let payload = match backfill_req.origin.unwrap() {
@@ -378,7 +354,7 @@ impl LaneLogServer {
     /// In DAG mode, we send single blocks, not forks. We find the first block that doesn't match hints.
     async fn get_block_for_backfill(
         &mut self,
-        proposer_sig: &Vec<u8>,
+        lane_id: &String,
         first_n: u64,
         last_n: u64,
         mut hints: Vec<ProtoBlockHint>,
@@ -395,10 +371,10 @@ impl LaneLogServer {
 
         // Search backwards from last_n to first_n to find the first block that doesn't match hints
         for i in (first_n..=last_n).rev() {
-            let block = match self.get_block(proposer_sig, i).await {
+            let block = match self.get_block(lane_id, i).await {
                 Some(block) => block,
                 None => {
-                    warn!("Block {} not found in lane {:?}", i, proposer_sig);
+                    warn!("Block {} not found in lane {}", i, lane_id);
                     continue;
                 }
             };
@@ -522,38 +498,26 @@ impl LaneLogServer {
     }
 
     /// Invariant: Each lane is continuous, increasing seq num and maintains hash chain continuity
-    async fn handle_new_block(&mut self, block: CachedBlock) {
-        // Extract proposer signature to identify which lane this block belongs to
-        let proposer_sig = match extract_proposer_sig(&block) {
-            Some(sig) => sig,
-            None => {
-                error!(
-                    "Block {} has no proposer signature, cannot determine lane",
-                    block.block.n
-                );
-                return;
-            }
-        };
-
-        // Get or create the lane for this proposer
+    async fn handle_new_block(&mut self, lane_id: String, block: CachedBlock) {
+        // Get or create the lane for this sender
         let lane = self
             .lanes
-            .entry(proposer_sig.clone())
+            .entry(lane_id.clone())
             .or_insert_with(VecDeque::new);
 
         let last_n = lane.back().map_or(0, |block| block.block.n);
         if block.block.n != last_n + 1 {
             error!(
-                "Block {} is not the next block in lane {:?}, last_n: {}",
-                block.block.n, proposer_sig, last_n
+                "Block {} is not the next block in lane {}, last_n: {}",
+                block.block.n, lane_id, last_n
             );
             return;
         }
 
         if last_n > 0 && !block.block.parent.eq(&lane.back().unwrap().block_hash) {
             error!(
-                "Parent hash mismatch for block {} in lane {:?}",
-                block.block.n, proposer_sig
+                "Parent hash mismatch for block {} in lane {}",
+                block.block.n, lane_id
             );
             return;
         }
@@ -561,18 +525,18 @@ impl LaneLogServer {
         lane.push_back(block);
     }
 
-    async fn handle_rollback(&mut self, proposer_sig: Vec<u8>, mut n: u64) {
+    async fn handle_rollback(&mut self, lane_id: String, mut n: u64) {
         if n <= self.bci {
             n = self.bci + 1;
         }
 
         // Rollback the specified lane
-        if let Some(lane) = self.lanes.get_mut(&proposer_sig) {
+        if let Some(lane) = self.lanes.get_mut(&lane_id) {
             lane.retain(|block| block.block.n <= n);
         }
 
         // Clean up read cache for this lane
-        if let Some(cache) = self.read_caches.get_mut(&proposer_sig) {
+        if let Some(cache) = self.read_caches.get_mut(&lane_id) {
             cache.cache.retain(|k, _| *k <= n);
         }
     }

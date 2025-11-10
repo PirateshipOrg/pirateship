@@ -45,8 +45,8 @@ use super::{
 #[derive(Clone, Debug)]
 pub struct TipCut {
     /// One CAR per lane (at most)
-    /// Maps lane_id -> CAR
-    pub cars: HashMap<Vec<u8>, ProtoBlockCar>,
+    /// Maps lane_id (sender name) -> CAR
+    pub cars: HashMap<String, ProtoBlockCar>,
 
     /// View number when this tip cut was constructed
     pub view: u64,
@@ -91,10 +91,10 @@ pub struct LaneStaging {
     config_num: u64,
 
     // Per-lane, per-sequence-number storage
-    // Outer key: lane_id (proposer_sig)
+    // Outer key: lane_id (sender name)
     // Inner key: sequence number (block.n)
     // Value: block info with acknowledgments
-    lane_blocks: HashMap<Vec<u8>, HashMap<u64, StoredBlock>>,
+    lane_blocks: HashMap<String, HashMap<u64, StoredBlock>>,
 
     // Current tip cut (one CAR per lane)
     current_tip_cut: TipCut,
@@ -203,11 +203,11 @@ impl LaneStaging {
         storage_ack: oneshot::Receiver<StorageAck>,
         stats: AppendBlockStats,
     ) -> Result<(), ()> {
-        let lane_id = stats.proposer_sig.clone();
+        let lane_id = stats.lane_id.clone();
         let seq_num = block.block.n;
 
         debug!(
-            "Received block n={} for lane {:?} from {}",
+            "Received block n={} for lane {} from {}",
             seq_num, lane_id, stats.sender
         );
 
@@ -247,7 +247,7 @@ impl LaneStaging {
 
                 // Forward to LaneLogServer for persistence and querying
                 self.lane_logserver_tx
-                    .send(LaneLogServerCommand::NewBlock(block.clone()))
+                    .send(LaneLogServerCommand::NewBlock(lane_id.clone(), block.clone()))
                     .await
                     .unwrap();
 
@@ -282,7 +282,7 @@ impl LaneStaging {
     }
 
     /// Send BlockAck message to all nodes after successfully storing a block.
-    async fn send_block_ack(&mut self, block: &CachedBlock, lane_id: &[u8]) -> Result<(), ()> {
+    async fn send_block_ack(&mut self, block: &CachedBlock, lane_id: &String) -> Result<(), ()> {
         let config = self.config.get();
         let my_name = &config.net_config.name;
 
@@ -293,12 +293,12 @@ impl LaneStaging {
         let block_ack = ProtoBlockAck {
             digest: block.block_hash.clone().try_into().unwrap(),
             n: block.block.n,
-            lane: lane_id.to_vec(),
+            lane: lane_id.as_bytes().to_vec(),
             sig: sig.to_vec(),
         };
 
         debug!(
-            "Sending BlockAck for n={} in lane {:?} to all nodes",
+            "Sending BlockAck for n={} in lane {} to all nodes",
             block.block.n, lane_id
         );
 
@@ -364,13 +364,22 @@ impl LaneStaging {
             return Ok(());
         }
 
+        // Convert lane bytes to String
+        let lane_id = match String::from_utf8(block_ack.lane.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("Invalid UTF-8 in lane identifier from {}", sender_name);
+                return Ok(());
+            }
+        };
+
         // Find the block in our lane storage
-        let lane = match self.lane_blocks.get_mut(&block_ack.lane) {
+        let lane = match self.lane_blocks.get_mut(&lane_id) {
             Some(l) => l,
             None => {
                 debug!(
-                    "Received ack for unknown lane {:?} from {}",
-                    block_ack.lane, sender_name
+                    "Received ack for unknown lane {} from {}",
+                    lane_id, sender_name
                 );
                 return Ok(());
             }
@@ -410,13 +419,13 @@ impl LaneStaging {
         );
 
         // Check if we've reached the threshold to form a CAR
-        self.maybe_form_car(&block_ack.lane, block_ack.n).await?;
+        self.maybe_form_car(&lane_id, block_ack.n).await?;
 
         Ok(())
     }
 
     /// Form a CAR (Certificate of Availability and Replication) if threshold reached.
-    async fn maybe_form_car(&mut self, lane_id: &[u8], seq_num: u64) -> Result<(), ()> {
+    async fn maybe_form_car(&mut self, lane_id: &String, seq_num: u64) -> Result<(), ()> {
         // Check if CAR already formed and get the necessary data
         let (should_form_car, block_hash, view, acks) = {
             let lane = match self.lane_blocks.get(lane_id) {
@@ -499,10 +508,10 @@ impl LaneStaging {
         }
 
         // Update the current tip cut with this new CAR
-        self.update_tip_cut(lane_id.to_vec(), car);
+        self.update_tip_cut(lane_id.clone(), car);
 
         info!(
-            "Block n={} in lane {:?} is now stable with CAR",
+            "Block n={} in lane {} is now stable with CAR",
             seq_num, lane_id
         );
 
@@ -603,7 +612,7 @@ impl LaneStaging {
 
     /// Update the current tip cut with a newly formed CAR.
     /// Called after we successfully form and broadcast a CAR.
-    fn update_tip_cut(&mut self, lane_id: Vec<u8>, car: ProtoBlockCar) {
+    fn update_tip_cut(&mut self, lane_id: String, car: ProtoBlockCar) {
         self.current_tip_cut.cars.insert(lane_id, car);
         self.current_tip_cut.view = self.view;
         self.current_tip_cut.config_num = self.config_num;

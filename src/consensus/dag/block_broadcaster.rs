@@ -269,19 +269,6 @@ impl DagBlockBroadcaster {
         Ok(())
     }
 
-    fn extract_proposer_sig(&self, block: &CachedBlock) -> Vec<u8> {
-        match &block.block.sig {
-            Some(crate::proto::consensus::proto_block::Sig::ProposerSig(sig)) => sig.clone(),
-            _ => {
-                log::warn!(
-                    "Block {} missing proposer signature in DAG mode",
-                    block.block.n
-                );
-                vec![]
-            }
-        }
-    }
-
     async fn process_my_block(&mut self, block: CachedBlock) -> Result<(), Error> {
         debug!("Processing my block {}", block.block.n);
         let perf_entry = block.block.n;
@@ -292,8 +279,8 @@ impl DagBlockBroadcaster {
             block.block.config_num,
         );
 
-        // Extract proposer signature for lane identification
-        let proposer_sig = self.extract_proposer_sig(&block);
+        // Use own name as lane identifier
+        let lane_id = self.config.get().net_config.name.clone();
 
         // Store and forward internally
         self.store_and_forward_internally(
@@ -304,7 +291,7 @@ impl DagBlockBroadcaster {
                 config_num,
                 sender: self.config.get().net_config.name.clone(),
                 ci: self.ci,
-                proposer_sig: proposer_sig.clone(),
+                lane_id: lane_id.clone(),
             },
             true,
         )
