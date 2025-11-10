@@ -10,7 +10,7 @@ use crate::{
     crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType},
     proto::{
         checkpoint::ProtoBackfillNack,
-        consensus::{HalfSerializedBlock, ProtoAppendEntries},
+        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoTipCut},
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, MessageRef, SenderType},
@@ -65,6 +65,20 @@ impl MultipartFork {
     }
 }
 
+/// TipCut proposal in DAG mode
+#[cfg(feature = "dag")]
+pub struct MultipartTipCut {
+    pub tipcut: ProtoTipCut,
+    pub ae_stats: AppendEntriesStats,
+}
+
+/// Unified message type for both forks and tip cuts
+pub enum BroadcasterMessage {
+    Fork(MultipartFork),
+    #[cfg(feature = "dag")]
+    TipCut(MultipartTipCut),
+}
+
 struct ContinuityStats {
     last_ae_view: u64,
     last_ae_block_hash: FutureHash,
@@ -96,7 +110,7 @@ pub struct ForkReceiver {
 
     fork_rx: Receiver<(ProtoAppendEntries, SenderType /* Sender */)>,
     command_rx: Receiver<ForkReceiverCommand>,
-    broadcaster_tx: Sender<MultipartFork>,
+    broadcaster_tx: Sender<BroadcasterMessage>,
 
     multipart_buffer: VecDeque<(Vec<HalfSerializedBlock>, AppendEntriesStats)>,
 
@@ -118,15 +132,21 @@ impl ForkReceiver {
         client: PinnedClient,
         fork_rx: Receiver<(ProtoAppendEntries, SenderType)>,
         command_rx: Receiver<ForkReceiverCommand>,
-        broadcaster_tx: Sender<MultipartFork>,
+        broadcaster_tx: Sender<BroadcasterMessage>,
         logserver_query_tx: Sender<LogServerQuery>,
     ) -> Self {
-        let mut ret = Self {
+        #[cfg(feature = "view_change")]
+        let (view, config_num) = (0, 0);
+        
+        #[cfg(not(feature = "view_change"))]
+        let (view, config_num) = (1, 1);
+
+        Self {
             config,
             crypto,
             client,
-            view: 0,
-            config_num: 0,
+            view,
+            config_num,
             fork_rx,
             command_rx,
             broadcaster_tx,
@@ -138,15 +158,7 @@ impl ForkReceiver {
                 waiting_on_nack_reply: false,
             },
             logserver_query_tx,
-        };
-
-        #[cfg(not(feature = "view_change"))]
-        {
-            ret.view = 1;
-            ret.config_num = 1;
         }
-
-        ret
     }
 
     pub async fn run(fork_receiver: Arc<Mutex<Self>>) {
@@ -167,13 +179,24 @@ impl ForkReceiver {
             tokio::select! {
                 ae_sender = self.fork_rx.recv() => {
                     if let Some((ae, SenderType::Auth(sender, _))) = ae_sender {
-                        // Extract the fork from the entry oneof
-                        if let Some(crate::proto::consensus::proto_append_entries::Entry::Fork(ref fork)) = ae.entry {
-                            debug!("Received AppendEntries({}) from {}", fork.serialized_blocks.last().unwrap().n, sender);
-                            self.process_fork(ae, sender).await;
-                        } else {
-                            // This is a tipcut, which shouldn't be processed by the regular fork receiver
-                            warn!("Received non-fork AppendEntries in fork_receiver - ignoring");
+                        // Route based on entry type
+                        match &ae.entry {
+                            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(ref fork)) => {
+                                debug!("Received AppendEntries Fork({}) from {}", fork.serialized_blocks.last().unwrap().n, sender);
+                                self.process_fork(ae, sender).await;
+                            }
+                            #[cfg(feature = "dag")]
+                            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(ref _tipcut)) => {
+                                debug!("Received AppendEntries TipCut from {}", sender);
+                                self.process_tipcut(ae, sender).await;
+                            }
+                            #[cfg(not(feature = "dag"))]
+                            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(_)) => {
+                                warn!("Received TipCut in non-DAG mode - ignoring");
+                            }
+                            None => {
+                                warn!("Received AppendEntries with no entry - ignoring");
+                            }
                         }
                     }
                 },
@@ -330,7 +353,10 @@ impl ForkReceiver {
                 self.byzantine_liveness_threshold(),
             )
             .await;
-        self.broadcaster_tx.send(multipart_fut).await.unwrap();
+        self.broadcaster_tx
+            .send(BroadcasterMessage::Fork(multipart_fut))
+            .await
+            .unwrap();
 
         self.continuity_stats.last_ae_block_hash =
             FutureHash::FutureResult(hash_receivers.pop().unwrap());
@@ -390,7 +416,10 @@ impl ForkReceiver {
                                 self.byzantine_liveness_threshold(),
                             )
                             .await;
-                        self.broadcaster_tx.send(multipart_fut).await.unwrap();
+                        self.broadcaster_tx
+                            .send(BroadcasterMessage::Fork(multipart_fut))
+                            .await
+                            .unwrap();
                         self.continuity_stats.last_ae_block_hash =
                             FutureHash::FutureResult(hash_receivers.pop().unwrap());
                     }
@@ -414,6 +443,72 @@ impl ForkReceiver {
                 let (name, _) = sender.to_name_and_sub_id();
                 self.process_fork(ae, name).await;
             }
+        }
+    }
+
+    #[cfg(feature = "dag")]
+    async fn process_tipcut(&mut self, ae: ProtoAppendEntries, sender: String) {
+        // Basic validation: view, config, leader checks
+        if ae.view < self.view || ae.config_num < self.config_num {
+            warn!(
+                "Old view TipCut received: ae view {} < my view {} or ae config num {} < my config num {}",
+                ae.view, self.view, ae.config_num, self.config_num
+            );
+            return;
+        }
+
+        if ae.config_num == self.config_num {
+            // Check if sender is the expected leader for this view
+            let leader = self.get_leader_for_view(ae.view);
+            if leader != sender {
+                warn!(
+                    "TipCut from non-leader: expected {}, got {}",
+                    leader, sender
+                );
+                return;
+            }
+        }
+
+        // Extract the tipcut from entry
+        let tipcut = match ae.entry {
+            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(tc)) => tc,
+            _ => {
+                warn!("process_tipcut called with non-tipcut entry");
+                return;
+            }
+        };
+
+        info!(
+            "Processing TipCut with {} CARs from {} for view {} (ci={})",
+            tipcut.tips.len(),
+            sender,
+            ae.view,
+            ae.commit_index
+        );
+
+        // Create stats for the tip cut
+        let ae_stats = AppendEntriesStats {
+            view: ae.view,
+            view_is_stable: ae.view_is_stable,
+            config_num: ae.config_num,
+            sender: sender.clone(),
+            ci: ae.commit_index,
+        };
+
+        // Create MultipartTipCut and send to broadcaster (staging)
+        let multipart_tipcut = MultipartTipCut {
+            tipcut,
+            ae_stats,
+        };
+
+        // Send to broadcaster for voting
+        // Note: The broadcaster will forward this to staging for voting
+        if let Err(e) = self
+            .broadcaster_tx
+            .send(BroadcasterMessage::TipCut(multipart_tipcut))
+            .await
+        {
+            error!("Failed to send tipcut to broadcaster: {:?}", e);
         }
     }
 

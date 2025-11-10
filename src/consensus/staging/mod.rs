@@ -14,7 +14,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector},
-    proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote},
+    proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoTipCut, ProtoVote},
     rpc::{client::PinnedClient, SenderType},
     utils::{
         channel::{Receiver, Sender},
@@ -55,8 +55,30 @@ pub type SignatureWithBlockN = (
     ProtoSignatureArrayEntry,
 );
 
+/// Represents a fork (chain of blocks) received for consensus voting
+pub struct ForkProposal {
+    pub block: CachedBlock,
+    pub storage_ack: oneshot::Receiver<StorageAck>,
+    pub ae_stats: AppendEntriesStats,
+    pub this_is_final_block: bool,
+}
+
+/// Represents a tip cut proposal received for consensus voting (DAG mode)
+#[cfg(feature = "dag")]
+pub struct TipCutProposal {
+    pub tipcut: ProtoTipCut,
+    pub ae_stats: AppendEntriesStats,
+}
+
+/// Unified message type for staging to handle both forks and tip cuts
+pub enum StagingMessage {
+    Fork(ForkProposal),
+    #[cfg(feature = "dag")]
+    TipCut(TipCutProposal),
+}
+
 /// This is where all the consensus decisions are made.
-/// Feeds in blocks from block_broadcaster
+/// Feeds in blocks from block_broadcaster (or tip cuts in DAG mode)
 /// Waits for vote / Sends vote.
 /// Whatever makes it to this stage must have been properly verified before.
 /// So this stage will not bother about checking cryptographic validity.
@@ -81,12 +103,7 @@ pub struct Staging {
 
     view_change_timer: Arc<Pin<Box<ResettableTimer>>>,
 
-    block_rx: Receiver<(
-        CachedBlock,
-        oneshot::Receiver<StorageAck>,
-        AppendEntriesStats,
-        bool, /* this_is_final_block */
-    )>,
+    block_rx: Receiver<StagingMessage>,
     vote_rx: Receiver<VoteWithSender>,
     pacemaker_rx: Receiver<PacemakerCommand>,
     pacemaker_tx: Sender<PacemakerCommand>,
@@ -119,12 +136,7 @@ impl Staging {
         config: AtomicConfig,
         client: PinnedClient,
         crypto: CryptoServiceConnector,
-        block_rx: Receiver<(
-            CachedBlock,
-            oneshot::Receiver<StorageAck>,
-            AppendEntriesStats,
-            bool, /* this_is_final_block */
-        )>,
+        block_rx: Receiver<StagingMessage>,
         vote_rx: Receiver<VoteWithSender>,
         pacemaker_rx: Receiver<PacemakerCommand>,
         pacemaker_tx: Sender<PacemakerCommand>,
@@ -245,17 +257,38 @@ impl Staging {
             _tick = self.view_change_timer.wait() => {
                 self.handle_view_change_timer_tick().await?;
             },
-            block = self.block_rx.recv() => {
-                if block.is_none() {
+            msg = self.block_rx.recv() => {
+                if msg.is_none() {
                     return Err(())
                 }
-                let (block, storage_ack, ae_stats, this_is_final_block) = block.unwrap();
-                trace!("Got block {}", block.block.n);
-                if i_am_leader {
-                    self.process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block).await?;
-                } else {
-                    // TODO: Send in bulk.
-                    self.process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block).await?;
+                match msg.unwrap() {
+                    StagingMessage::Fork(fork_proposal) => {
+                        trace!("Got fork block {}", fork_proposal.block.block.n);
+                        if i_am_leader {
+                            self.process_block_as_leader(
+                                fork_proposal.block,
+                                fork_proposal.storage_ack,
+                                fork_proposal.ae_stats,
+                                fork_proposal.this_is_final_block
+                            ).await?;
+                        } else {
+                            self.process_block_as_follower(
+                                fork_proposal.block,
+                                fork_proposal.storage_ack,
+                                fork_proposal.ae_stats,
+                                fork_proposal.this_is_final_block
+                            ).await?;
+                        }
+                    },
+                    #[cfg(feature = "dag")]
+                    StagingMessage::TipCut(tipcut_proposal) => {
+                        trace!("Got tip cut proposal with {} CARs", tipcut_proposal.tipcut.tips.len());
+                        if i_am_leader {
+                            self.process_tipcut_as_leader(tipcut_proposal).await?;
+                        } else {
+                            self.process_tipcut_as_follower(tipcut_proposal).await?;
+                        }
+                    },
                 }
             },
             vote = self.vote_rx.recv() => {
@@ -295,17 +328,38 @@ impl Staging {
             _tick = self.view_change_timer.wait() => {
                 self.handle_view_change_timer_tick().await?;
             },
-            block = self.block_rx.recv() => {
-                if block.is_none() {
+            msg = self.block_rx.recv() => {
+                if msg.is_none() {
                     return Err(())
                 }
-                let (block, storage_ack, ae_stats, this_is_final_block) = block.unwrap();
-                trace!("Got block {}", block.block.n);
-                if i_am_leader {
-                    self.process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block).await?;
-                } else {
-                    // TODO: Send in bulk.
-                    self.process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block).await?;
+                match msg.unwrap() {
+                    StagingMessage::Fork(fork_proposal) => {
+                        trace!("Got fork block {}", fork_proposal.block.block.n);
+                        if i_am_leader {
+                            self.process_block_as_leader(
+                                fork_proposal.block,
+                                fork_proposal.storage_ack,
+                                fork_proposal.ae_stats,
+                                fork_proposal.this_is_final_block
+                            ).await?;
+                        } else {
+                            self.process_block_as_follower(
+                                fork_proposal.block,
+                                fork_proposal.storage_ack,
+                                fork_proposal.ae_stats,
+                                fork_proposal.this_is_final_block
+                            ).await?;
+                        }
+                    },
+                    #[cfg(feature = "dag")]
+                    StagingMessage::TipCut(tipcut_proposal) => {
+                        trace!("Got tip cut proposal with {} CARs", tipcut_proposal.tipcut.tips.len());
+                        if i_am_leader {
+                            self.process_tipcut_as_leader(tipcut_proposal).await?;
+                        } else {
+                            self.process_tipcut_as_follower(tipcut_proposal).await?;
+                        }
+                    },
                 }
             },
             vote = self.vote_rx.recv() => {

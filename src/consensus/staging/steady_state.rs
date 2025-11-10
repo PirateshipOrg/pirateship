@@ -1158,4 +1158,104 @@ impl Staging {
 
         Ok(())
     }
+
+    /// Process tip cut proposal as leader (DAG mode)
+    /// 
+    /// In DAG mode, the leader receives a tip cut proposal from the tip_cut_proposal component.
+    /// The leader should:
+    /// 1. Validate the tip cut (check CARs, verify structure)
+    /// 2. Vote for the tip cut if valid
+    /// 3. Collect votes from other replicas
+    /// 4. Form a QC when enough votes are collected
+    /// 5. Commit the tip cut
+    ///
+    /// TODO: Implement tip cut validation logic
+    /// TODO: Implement tip cut voting logic
+    /// TODO: Implement tip cut QC formation
+    /// TODO: Implement tip cut commit logic
+    #[cfg(feature = "dag")]
+    pub(super) async fn process_tipcut_as_leader(
+        &mut self,
+        tipcut_proposal: super::TipCutProposal,
+    ) -> Result<(), ()> {
+        info!(
+            "Leader processing tip cut with {} CARs for view {} (ci={})",
+            tipcut_proposal.tipcut.tips.len(),
+            tipcut_proposal.ae_stats.view,
+            tipcut_proposal.ae_stats.ci
+        );
+
+        // TODO: Validate tip cut structure
+        // - Check that all CARs are properly formed
+        // - Verify that CARs are from different lanes
+        // - Check parent relationship
+        // - Verify digest computation
+
+        // TODO: Decide whether to vote for this tip cut
+        // This is where the consensus decision logic goes
+        // For now, we'll just log that we received it
+        
+        // TODO: Create and broadcast vote for tip cut
+        // let vote = self.create_tipcut_vote(&tipcut_proposal.tipcut);
+        // self.broadcast_vote(vote).await;
+
+        // TODO: Store tip cut proposal for vote collection
+        // self.pending_tipcuts.push(tipcut_proposal);
+
+        warn!("Tip cut processing as leader not yet implemented");
+        Ok(())
+    }
+
+    /// Process tip cut proposal as follower (DAG mode)
+    ///
+    /// In DAG mode, followers receive tip cut proposals from the leader.
+    /// Followers should:
+    /// 1. Validate the tip cut (check CARs, verify structure)
+    /// 2. Decide whether to vote for the tip cut
+    /// 3. Send vote to leader
+    /// 4. Wait for QC from leader
+    /// 5. Commit the tip cut when QC is received
+    ///
+    /// TODO: Implement tip cut validation logic
+    /// TODO: Implement voting decision logic
+    /// TODO: Implement vote sending
+    /// TODO: Implement QC reception and commit
+    #[cfg(feature = "dag")]
+    pub(super) async fn process_tipcut_as_follower(
+        &mut self,
+        tipcut_proposal: super::TipCutProposal,
+    ) -> Result<(), ()> {
+        info!(
+            "Follower processing tip cut with {} CARs from {} for view {} (ci={})",
+            tipcut_proposal.tipcut.tips.len(),
+            tipcut_proposal.ae_stats.sender,
+            tipcut_proposal.ae_stats.view,
+            tipcut_proposal.ae_stats.ci
+        );
+
+        // TODO: Validate tip cut structure
+        // Same validation as leader
+
+        // TODO: Decide whether to vote for this tip cut
+        // This is the key consensus decision point
+        // Criteria might include:
+        // - All CARs are valid and properly formed
+        // - Tip cut extends the current committed state
+        // - No conflicting tip cuts exist
+        // - Parent relationship is correct
+
+        // TODO: Create vote message
+        // let vote = ProtoVote {
+        //     digest: tipcut_proposal.tipcut.digest.clone(),
+        //     view: tipcut_proposal.ae_stats.view,
+        //     sig: vec![], // Sign the digest
+        // };
+
+        // TODO: Send vote to leader
+        // let leader = self.get_leader_for_view(tipcut_proposal.ae_stats.view);
+        // self.send_vote_to_leader(leader, vote).await;
+
+        warn!("Tip cut processing as follower not yet implemented");
+        Ok(())
+    }
 }

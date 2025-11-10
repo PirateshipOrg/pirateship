@@ -27,22 +27,15 @@ use crate::proto::execution::ProtoTransaction;
 
 use super::{
     app::AppCommand,
-    fork_receiver::{AppendEntriesStats, ForkReceiverCommand, MultipartFork},
+    fork_receiver::{AppendEntriesStats, BroadcasterMessage, ForkReceiverCommand, MultipartFork},
+    staging::{ForkProposal, StagingMessage},
 };
 
 #[cfg(feature = "dag")]
-use super::dag::block_receiver::{AppendBlockStats, BlockReceiverCommand, SingleBlock};
-
-#[cfg(feature = "dag")]
-use crate::{
-    proto::consensus::{proto_block::Sig, ProtoAppendBlock},
-    utils::deserialize_proto_block,
-};
+use super::{fork_receiver::MultipartTipCut, staging::TipCutProposal};
 
 pub enum BlockBroadcasterCommand {
     UpdateCI(u64),
-
-    #[cfg(not(feature = "dag"))]
     NextAEForkPrefix(Vec<oneshot::Receiver<Result<CachedBlock, Error>>>),
 }
 
@@ -51,45 +44,20 @@ pub struct BlockBroadcaster {
     crypto: CryptoServiceConnector,
 
     ci: u64,
-
-    #[cfg(not(feature = "dag"))]
     fork_prefix_buffer: Vec<CachedBlock>,
 
     // Input ports
     my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
-
-    #[cfg(feature = "dag")]
-    other_block_rx: Receiver<SingleBlock>,
-    #[cfg(not(feature = "dag"))]
-    other_block_rx: Receiver<MultipartFork>,
-
+    other_block_rx: Receiver<BroadcasterMessage>,
     control_command_rx: Receiver<BlockBroadcasterCommand>,
 
     // Output ports
     storage: StorageServiceConnector,
     client: PinnedClient,
-
-    #[cfg(feature = "dag")]
-    staging_tx: Sender<(
-        CachedBlock,
-        oneshot::Receiver<StorageAck>,
-        AppendBlockStats,
-        bool, /* this_is_final_block */
-    )>,
-    #[cfg(not(feature = "dag"))]
-    staging_tx: Sender<(
-        CachedBlock,
-        oneshot::Receiver<StorageAck>,
-        AppendEntriesStats,
-        bool, /* this_is_final_block */
-    )>,
+    staging_tx: Sender<StagingMessage>,
 
     // Command ports
-    #[cfg(feature = "dag")]
-    receiver_command_tx: Sender<BlockReceiverCommand>,
-    #[cfg(not(feature = "dag"))]
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
-
     app_command_tx: Sender<AppCommand>,
 
     // Perf Counters
@@ -100,21 +68,15 @@ pub struct BlockBroadcaster {
 }
 
 impl BlockBroadcaster {
-    #[cfg(not(feature = "dag"))]
     pub fn new(
         config: AtomicConfig,
         client: PinnedClient,
         crypto: CryptoServiceConnector,
         my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
-        other_block_rx: Receiver<MultipartFork>,
+        other_block_rx: Receiver<BroadcasterMessage>,
         control_command_rx: Receiver<BlockBroadcasterCommand>,
         storage: StorageServiceConnector,
-        staging_tx: Sender<(
-            CachedBlock,
-            oneshot::Receiver<StorageAck>,
-            AppendEntriesStats,
-            bool,
-        )>,
+        staging_tx: Sender<StagingMessage>,
         fork_receiver_command_tx: Sender<ForkReceiverCommand>,
         app_command_tx: Sender<AppCommand>,
     ) -> Self {
@@ -144,55 +106,6 @@ impl BlockBroadcaster {
             client,
             staging_tx,
             fork_receiver_command_tx,
-            app_command_tx,
-            my_block_perf_counter,
-            evil_last_hash: FutureHash::None,
-        }
-    }
-
-    #[cfg(feature = "dag")]
-    pub fn new(
-        config: AtomicConfig,
-        client: PinnedClient,
-        crypto: CryptoServiceConnector,
-        my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
-        other_block_rx: Receiver<SingleBlock>,
-        control_command_rx: Receiver<BlockBroadcasterCommand>,
-        storage: StorageServiceConnector,
-        staging_tx: Sender<(
-            CachedBlock,
-            oneshot::Receiver<StorageAck>,
-            AppendBlockStats,
-            bool,
-        )>,
-        receiver_command_tx: Sender<BlockReceiverCommand>,
-        app_command_tx: Sender<AppCommand>,
-    ) -> Self {
-        let my_block_event_order = vec![
-            "Retrieve prepared block",
-            "Store block",
-            "Forward block to logserver",
-            "Forward block to staging",
-            "Serialize",
-            "Forward block to other nodes",
-        ];
-
-        let my_block_perf_counter = RefCell::new(PerfCounter::new(
-            "BlockBroadcasterMyBlock",
-            &my_block_event_order,
-        ));
-
-        Self {
-            config,
-            crypto,
-            ci: 0,
-            my_block_rx,
-            other_block_rx,
-            control_command_rx,
-            storage,
-            client,
-            staging_tx,
-            receiver_command_tx,
             app_command_tx,
             my_block_perf_counter,
             evil_last_hash: FutureHash::None,
@@ -272,20 +185,19 @@ impl BlockBroadcaster {
                 trace!("Processed block {}", __n);
             },
 
-            block_vec = self.other_block_rx.recv() => {
-                if block_vec.is_none() {
+            msg = self.other_block_rx.recv() => {
+                if msg.is_none() {
                     return Err(Error::new(ErrorKind::BrokenPipe, "other_block_rx channel closed"));
                 }
-                let blocks = block_vec.unwrap();
-                // info!("Processing other block");
-
-                #[cfg(feature = "dag")]
-                self.process_other_single_block(blocks).await?;
-
-                #[cfg(not(feature = "dag"))]
-                self.process_other_block(blocks).await?;
-
-                // info!("Processed other block");
+                match msg.unwrap() {
+                    BroadcasterMessage::Fork(fork) => {
+                        self.process_other_block(fork).await?;
+                    }
+                    #[cfg(feature = "dag")]
+                    BroadcasterMessage::TipCut(tipcut) => {
+                        self.process_other_tipcut(tipcut).await?;
+                    }
+                }
             },
 
             cmd = self.control_command_rx.recv() => {
@@ -326,8 +238,6 @@ impl BlockBroadcaster {
     async fn handle_control_command(&mut self, cmd: BlockBroadcasterCommand) -> Result<(), Error> {
         match cmd {
             BlockBroadcasterCommand::UpdateCI(ci) => self.ci = ci,
-
-            #[cfg(not(feature = "dag"))]
             BlockBroadcasterCommand::NextAEForkPrefix(blocks) => {
                 for block in blocks {
                     let block = block.await.unwrap().expect("Failed to get block");
@@ -339,7 +249,6 @@ impl BlockBroadcaster {
         Ok(())
     }
 
-    #[cfg(not(feature = "dag"))]
     async fn store_and_forward_internally(
         &mut self,
         block: &CachedBlock,
@@ -358,36 +267,15 @@ impl BlockBroadcaster {
 
         // info!("Sending {}", block.block.n);
         self.staging_tx
-            .send((block.clone(), storage_ack, ae_stats, this_is_final_block))
+            .send(StagingMessage::Fork(ForkProposal {
+                block: block.clone(),
+                storage_ack,
+                ae_stats,
+                this_is_final_block,
+            }))
             .await
             .unwrap();
         // info!("Sent {}", block.block.n);
-        self.perf_add_event(perf_entry, "Forward block to staging");
-
-        Ok(())
-    }
-
-    #[cfg(feature = "dag")]
-    async fn store_and_forward_internally(
-        &mut self,
-        block: &CachedBlock,
-        block_stats: AppendBlockStats,
-        this_is_final_block: bool,
-    ) -> Result<(), Error> {
-        let perf_entry = block.block.n;
-
-        // Store
-        let storage_ack = self.storage.put_block(block).await;
-        self.perf_add_event(perf_entry, "Store block");
-
-        // Forward
-        self.perf_add_event(perf_entry, "Forward block to logserver");
-
-        self.staging_tx
-            .send((block.clone(), storage_ack, block_stats, this_is_final_block))
-            .await
-            .unwrap();
-
         self.perf_add_event(perf_entry, "Forward block to staging");
 
         Ok(())
@@ -403,117 +291,67 @@ impl BlockBroadcaster {
             block.block.config_num,
         );
 
-        #[cfg(not(feature = "dag"))]
-        {
-            // Leader-based: Build fork from prefix buffer + new block
-            let mut ae_fork = Vec::new();
+        // Leader-based: Build fork from prefix buffer + new block
+        let mut ae_fork = Vec::new();
 
-            for block in self.fork_prefix_buffer.drain(..) {
-                ae_fork.push(block);
-            }
-            ae_fork.push(block.clone());
+        for block in self.fork_prefix_buffer.drain(..) {
+            ae_fork.push(block);
+        }
+        ae_fork.push(block.clone());
 
-            if ae_fork.len() > 1 {
-                trace!("AE: {:?}", ae_fork);
-            }
-
-            let _fork_size = ae_fork.len();
-            let mut cnt = 0;
-            for block in &ae_fork {
-                cnt += 1;
-                let this_is_final_block = cnt == _fork_size;
-                self.store_and_forward_internally(
-                    &block,
-                    AppendEntriesStats {
-                        view,
-                        view_is_stable: block.block.view_is_stable,
-                        config_num,
-                        sender: self.config.get().net_config.name.clone(),
-                        ci: self.ci,
-                    },
-                    this_is_final_block,
-                )
-                .await?;
-            }
-
-            // Forward to app for stats.
-            self.app_command_tx
-                .send(AppCommand::NewRequestBatch(
-                    block.block.n,
-                    view,
-                    view_is_stable,
-                    true,
-                    block.block.tx_list.len(),
-                    block.block_hash.clone(),
-                ))
-                .await
-                .unwrap();
-
-            // Forward to other nodes. Involves copies and serialization so done last.
-            let names = self.get_everyone_except_me();
-
-            #[cfg(feature = "evil")]
-            let names = self
-                .maybe_act_evil(names, &ae_fork, view, view_is_stable, config_num)
-                .await;
-
-            self.broadcast_ae_fork(
-                names,
-                ae_fork,
-                view,
-                view_is_stable,
-                config_num,
-                Some(perf_entry),
-            )
-            .await;
+        if ae_fork.len() > 1 {
+            trace!("AE: {:?}", ae_fork);
         }
 
-        #[cfg(feature = "dag")]
-        {
-            // DAG-based: Just forward the single block
-            // Extract proposer signature to identify lane
-            let proposer_sig = self.extract_proposer_sig(&block);
-
+        let _fork_size = ae_fork.len();
+        let mut cnt = 0;
+        for block in &ae_fork {
+            cnt += 1;
+            let this_is_final_block = cnt == _fork_size;
             self.store_and_forward_internally(
                 &block,
-                AppendBlockStats {
+                AppendEntriesStats {
                     view,
-                    view_is_stable,
+                    view_is_stable: block.block.view_is_stable,
                     config_num,
                     sender: self.config.get().net_config.name.clone(),
                     ci: self.ci,
-                    proposer_sig: proposer_sig.clone(),
                 },
-                true, // Single blocks are always final
+                this_is_final_block,
             )
             .await?;
+        }
 
-            // Forward to app for stats.
-            self.app_command_tx
-                .send(AppCommand::NewRequestBatch(
-                    block.block.n,
-                    view,
-                    view_is_stable,
-                    true,
-                    block.block.tx_list.len(),
-                    block.block_hash.clone(),
-                ))
-                .await
-                .unwrap();
-
-            // Forward to other nodes. Involves copies and serialization so done last.
-            let names = self.get_everyone_except_me();
-
-            self.broadcast_single_block(
-                names,
-                block,
+        // Forward to app for stats.
+        self.app_command_tx
+            .send(AppCommand::NewRequestBatch(
+                block.block.n,
                 view,
                 view_is_stable,
-                config_num,
-                Some(perf_entry),
-            )
+                true,
+                block.block.tx_list.len(),
+                block.block_hash.clone(),
+            ))
+            .await
+            .unwrap();
+
+        // Forward to other nodes. Involves copies and serialization so done last.
+        let names = self.get_everyone_except_me();
+
+        #[cfg(feature = "evil")]
+        let names = self
+            .maybe_act_evil(names, &ae_fork, view, view_is_stable, config_num)
             .await;
-        }
+
+        self.broadcast_ae_fork(
+            names,
+            ae_fork,
+            view,
+            view_is_stable,
+            config_num,
+            Some(perf_entry),
+        )
+        .await;
 
         Ok(())
     }
@@ -560,57 +398,6 @@ impl BlockBroadcaster {
         return f + 1;
     }
 
-    #[cfg(feature = "dag")]
-    fn extract_proposer_sig(&self, block: &CachedBlock) -> Vec<u8> {
-        match &block.block.sig {
-            Some(Sig::ProposerSig(sig)) => sig.clone(),
-            _ => {
-                // Fallback: use empty vector or node name
-                // In DAG mode, all blocks should have proposer signatures
-                warn!("Block missing proposer signature in DAG mode");
-                vec![]
-            }
-        }
-    }
-
-    #[cfg(feature = "dag")]
-    async fn process_other_single_block(&mut self, block: SingleBlock) -> Result<(), Error> {
-        let cached_block = match block.block_future.await {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) => {
-                error!("Failed to verify block: {:?}", e);
-                return Ok(());
-            }
-            Err(e) => {
-                error!("Failed to receive block future: {:?}", e);
-                return Ok(());
-            }
-        };
-
-        let (view, view_is_stable) = (block.stats.view, block.stats.view_is_stable);
-
-        // Store and forward the single block
-        self.store_and_forward_internally(&cached_block, block.stats.clone(), true)
-            .await?;
-
-        // Forward to app for stats
-        self.app_command_tx
-            .send(AppCommand::NewRequestBatch(
-                cached_block.block.n,
-                view,
-                view_is_stable,
-                false, // Not my block
-                cached_block.block.tx_list.len(),
-                cached_block.block_hash.clone(),
-            ))
-            .await
-            .unwrap();
-
-        Ok(())
-    }
-
-    #[cfg(not(feature = "dag"))]
-
     async fn process_other_block(&mut self, mut blocks: MultipartFork) -> Result<(), Error> {
         let _blocks = blocks.await_all().await;
         // info!("Await all finished!");
@@ -656,6 +443,31 @@ impl BlockBroadcaster {
                 .await
                 .unwrap();
         }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "dag")]
+    async fn process_other_tipcut(&mut self, tipcut: MultipartTipCut) -> Result<(), Error> {
+        info!(
+            "Processing TipCut with {} CARs from {} for view {} (ci={})",
+            tipcut.tipcut.tips.len(),
+            tipcut.ae_stats.sender,
+            tipcut.ae_stats.view,
+            tipcut.ae_stats.ci
+        );
+
+        // Forward tip cut to staging for consensus voting
+        // Staging will decide whether to vote for this tip cut
+        self.staging_tx
+            .send(StagingMessage::TipCut(TipCutProposal {
+                tipcut: tipcut.tipcut,
+                ae_stats: tipcut.ae_stats,
+            }))
+            .await
+            .unwrap();
+
+        debug!("Forwarded tip cut to staging for voting");
 
         Ok(())
     }
@@ -809,68 +621,6 @@ impl BlockBroadcaster {
         let sz = data.len();
         if !view_is_stable {
             info!("AE size: {} Broadcasting to {:?}", sz, names);
-        }
-        let data = PinnedMessage::from(data, sz, SenderType::Anon);
-        let mut profile = LatencyProfile::new();
-        let _res = PinnedClient::broadcast(
-            &self.client,
-            &names,
-            &data,
-            &mut profile,
-            self.get_byzantine_broadcast_threshold(),
-        )
-        .await;
-
-        if should_perf {
-            self.perf_add_event(perf_entry, "Forward block to other nodes");
-            self.perf_deregister(perf_entry);
-        }
-    }
-
-    #[cfg(feature = "dag")]
-    async fn broadcast_single_block(
-        &mut self,
-        names: Vec<String>,
-        block: CachedBlock,
-        view: u64,
-        view_is_stable: bool,
-        config_num: u64,
-        perf_entry: Option<u64>,
-    ) {
-        let (should_perf, perf_entry) = match perf_entry {
-            Some(e) => (true, e),
-            None => (false, 0),
-        };
-
-        let append_block = ProtoAppendBlock {
-            block: Some(HalfSerializedBlock {
-                n: block.block.n,
-                view: block.block.view,
-                view_is_stable: block.block.view_is_stable,
-                config_num: block.block.config_num,
-                serialized_body: block.block_ser.clone(),
-            }),
-            commit_index: self.ci,
-            view,
-            view_is_stable,
-            config_num,
-            is_backfill_response: false,
-        };
-
-        let rpc = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::AppendBlock(
-                append_block,
-            )),
-        };
-        let data = rpc.encode_to_vec();
-
-        if should_perf {
-            self.perf_add_event(perf_entry, "Serialize");
-        }
-
-        let sz = data.len();
-        if !view_is_stable {
-            info!("AppendBlock size: {} Broadcasting to {:?}", sz, names);
         }
         let data = PinnedMessage::from(data, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
