@@ -1,371 +1,338 @@
 /// Tip Cut Proposal Module for DAG Consensus
+///
 /// This module is responsible for proposing tip cuts in the DAG.
 /// Only the leader proposes tip cuts for each view.
-// TODO: Implement TipCutProposer struct and its methods.
-// Reposnsibilities:
-// 0. Only run when I am the leader, handle view changes accordingly.
-// 1. Periodically get the current tip cut of the DAG and send a ProposeTipCut message to all nodes. (get from lane_staging?)
+///
+/// Flow:
+/// 1. Leader periodically checks if a new tip cut should be proposed
+/// 2. Query lane_staging for the current tip cut (one CAR per lane)
+/// 3. Construct ProtoTipCut message with the tip cut information
+/// 4. Broadcast ProtoTipCut to all nodes
+/// 5. Nodes vote on the tip cut via tip_cut_voting component
+///
+/// Leadership:
+/// - Only the current leader proposes tip cuts
+/// - View changes update leadership via command channel
+/// - Non-leaders skip proposal logic
+use std::sync::Arc;
+use std::time::Duration;
 
-// TipCut Proposal Flow:
-// 0. On verifying I am the leader and that it is time for a tip cut...
-// 1. Query the lane_staging/lane_logserver for the current tip cut
-// 2. Construct a ProtoTipCutProposal message with the tip cut information
-// 3. Broadcast the ProtoTipCutProposal message to all nodes via the rpc layer.
-// 4. All nodes vote on TC in the usual consensus layer
-
-// QUESTION: Do I communicate with clients here or do any sort of "tip cut succeeded reply"? Or should everything be handled in the consensus layer?
-
-// Copied from batch_proposer.rs
-use std::cell::RefCell;
-use std::time::Instant;
-use std::{io::Error, pin::Pin, sync::Arc, time::Duration};
-
-use crate::config::NodeInfo;
-use crate::proto::client::{ProtoClientReply, ProtoCurrentLeader};
-use crate::proto::execution::ProtoTransactionResult;
-use crate::proto::rpc::ProtoPayload;
-use crate::rpc::server::LatencyProfile;
-use crate::rpc::{PinnedMessage, SenderType};
-use crate::utils::channel::{Receiver, Sender};
-use crate::utils::PerfCounter;
-use log::{info, warn};
-use prost::Message as _;
-use std::io::ErrorKind;
+use log::{debug, error, info, trace};
+use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::{
-    config::AtomicConfig, proto::execution::ProtoTransaction, rpc::server::MsgAckChan,
-    utils::timer::ResettableTimer,
+    config::AtomicConfig,
+    proto::{
+        consensus::ProtoTipCut,
+        rpc::{proto_payload, ProtoPayload},
+    },
+    rpc::{client::PinnedClient, MessageRef, SenderType},
+    utils::{
+        channel::{Receiver, Sender},
+        timer::ResettableTimer,
+    },
 };
 
-use super::app::AppCommand;
-use super::client_reply::ClientReplyCommand;
+use super::lane_staging::{LaneStagingQuery, TipCut};
 
-pub type RawBatch = Vec<ProtoTransaction>;
+/// Commands to control TipCutProposal behavior
+pub enum TipCutProposalCommand {
+    /// Update leadership status and current leader name
+    UpdateLeadership(bool, String), // (am_i_leader, leader_name)
 
-pub type MsgAckChanWithTag = (
-    MsgAckChan,
-    u64,        /* client tag */
-    SenderType, /* client name */
-);
-pub type TxWithAckChanTag = (Option<ProtoTransaction>, MsgAckChanWithTag);
+    /// Update view number
+    UpdateView(u64),
 
-pub type BatchProposerCommand = (
-    bool,   /* true == make new batches, false == stop making new batches */
-    String, /* Current leader */
-);
-
-pub struct BatchProposer {
-    config: AtomicConfig,
-
-    batch_proposer_rx: Receiver<TxWithAckChanTag>,
-    block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
-
-    reply_tx: Sender<ClientReplyCommand>,
-    unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-
-    current_raw_batch: Option<RawBatch>, // So that I can take()
-    current_reply_vec: Vec<MsgAckChanWithTag>,
-    batch_timer: Arc<Pin<Box<ResettableTimer>>>,
-
-    perf_counter: RefCell<PerfCounter<usize>>,
-
-    make_new_batches: bool,
-    current_leader: String,
-
-    cmd_rx: Receiver<BatchProposerCommand>,
-
-    last_batch_proposed: Instant,
+    /// Update view stability
+    UpdateViewStability(bool),
 }
 
-impl BatchProposer {
+/// TipCutProposal is responsible for periodically proposing tip cuts.
+/// Only the leader proposes tip cuts.
+pub struct TipCutProposal {
+    config: AtomicConfig,
+    client: PinnedClient,
+
+    // Current state
+    ci: u64,
+    view: u64,
+    view_is_stable: bool,
+
+    // Leadership state
+    i_am_leader: bool,
+    current_leader: String,
+
+    // Timer for periodic proposals
+    tip_cut_timer: Arc<std::pin::Pin<Box<ResettableTimer>>>,
+
+    // Query channel to LaneStaging
+    lane_staging_query_tx: Sender<LaneStagingQuery>,
+
+    // Command channel for view changes and leadership updates
+    cmd_rx: Receiver<TipCutProposalCommand>,
+}
+
+impl TipCutProposal {
     pub fn new(
         config: AtomicConfig,
-        batch_proposer_rx: Receiver<TxWithAckChanTag>,
-        block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
-        reply_tx: Sender<ClientReplyCommand>,
-        unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
-        cmd_rx: Receiver<BatchProposerCommand>,
+        client: PinnedClient,
+        lane_staging_query_tx: Sender<LaneStagingQuery>,
+        cmd_rx: Receiver<TipCutProposalCommand>,
     ) -> Self {
-        let batch_timer = ResettableTimer::new(Duration::from_millis(
-            config.get().consensus_config.batch_max_delay_ms,
-        ));
+        // Get initial configuration
+        let config_snapshot = config.get();
 
-        let max_batch_size = config.get().consensus_config.max_backlog_batch_size;
+        // Set up timer for periodic tip cut proposals
+        // Default to 100ms if not configured
+        let tip_cut_delay_ms = 100; // TODO: Add tip_cut_max_delay_ms to ConsensusConfig
+        let tip_cut_timer = ResettableTimer::new(Duration::from_millis(tip_cut_delay_ms));
 
-        let event_order = vec!["Add request to batch", "Propose batch"];
-
-        let perf_counter = RefCell::new(PerfCounter::new("BatchProposer", &event_order));
-
-        #[allow(unused_mut)]
-        let mut ret = Self {
-            config,
-            batch_proposer_rx,
-            block_maker_tx,
-            current_raw_batch: Some(RawBatch::with_capacity(max_batch_size)),
-            batch_timer,
-            current_reply_vec: Vec::with_capacity(max_batch_size),
-            reply_tx,
-            unlogged_tx,
-            perf_counter,
-            make_new_batches: false,
-            current_leader: String::new(),
-            cmd_rx,
-            last_batch_proposed: Instant::now(),
+        // Determine initial leadership
+        #[cfg(feature = "view_change")]
+        let (view, i_am_leader, current_leader) = {
+            let my_name = &config_snapshot.net_config.name;
+            let leader = config_snapshot.consensus_config.get_leader_for_view(0);
+            (0, leader == *my_name, leader)
         };
 
         #[cfg(not(feature = "view_change"))]
-        {
-            let leader = ret.config.get().consensus_config.get_leader_for_view(1);
-            ret.make_new_batches = leader == ret.config.get().net_config.name;
-            ret.current_leader = leader;
-        }
+        let (view, i_am_leader, current_leader) = {
+            let my_name = &config_snapshot.net_config.name;
+            let leader = config_snapshot.consensus_config.get_leader_for_view(1);
+            (1, leader == *my_name, leader)
+        };
 
-        ret
+        info!(
+            "TipCutProposal initialized: view={}, i_am_leader={}, leader={}",
+            view, i_am_leader, current_leader
+        );
+
+        Self {
+            config,
+            client,
+            ci: 0,
+            view,
+            view_is_stable: false,
+            i_am_leader,
+            current_leader,
+            tip_cut_timer,
+            lane_staging_query_tx,
+            cmd_rx,
+        }
     }
 
-    pub async fn run(batch_proposer: Arc<Mutex<Self>>) {
-        let mut batch_proposer = batch_proposer.lock().await;
-        let batch_timer_handle = batch_proposer.batch_timer.run().await;
+    pub async fn run(tip_cut_proposal: Arc<Mutex<Self>>) {
+        let mut tip_cut_proposal = tip_cut_proposal.lock().await;
 
-        let batch_size = batch_proposer
-            .config
-            .get()
-            .consensus_config
-            .max_backlog_batch_size;
-        let mut total_work = 0;
+        // Start the timer
+        let timer_handle = tip_cut_proposal.tip_cut_timer.run().await;
+
+        info!("TipCutProposal worker starting");
+
         loop {
-            if let Err(_) = batch_proposer.worker(total_work).await {
+            if let Err(_) = tip_cut_proposal.worker().await {
                 break;
             }
-
-            total_work += 1;
-            if total_work % (1000 * batch_size) == 0 {
-                batch_proposer.perf_counter.borrow().log_aggregate();
-            }
         }
 
-        batch_timer_handle.abort();
+        timer_handle.abort();
+        info!("TipCutProposal worker stopped");
     }
 
-    fn perf_register_random(&mut self, entry: usize) {
-        #[cfg(not(feature = "perf"))]
-        return;
-
-        #[cfg(feature = "perf")]
-        {
-            let mut batch_size = self.config.get().consensus_config.max_backlog_batch_size;
-            // Randomly decide whether to register the new entry with probability 1/batch_size (approx)
-            // A random sample gives `true` with prob 1/2.
-            // So for n tries 1/2^n <= 1/batch_size or n >= log2(batch_size)
-            // log2(batch_size) is the number of bits needed to express batch_size.
-            // So an approx way to calculate log2(batch_size) is to keep shifting right until batch_size is 0.
-            let mut should_register = true;
-            while batch_size > 0 {
-                batch_size >>= 1;
-
-                should_register = should_register && rand::random::<bool>();
-            }
-
-            if !should_register {
-                return;
-            }
-            self.perf_counter.borrow_mut().register_new_entry(entry);
-        }
-    }
-
-    fn perf_add_event(&mut self, entry: usize, event: &str) {
-        #[cfg(feature = "perf")]
-        self.perf_counter.borrow_mut().new_event(event, &entry);
-    }
-
-    fn perf_event_and_deregister_all(&mut self, event: &str) {
-        #[cfg(feature = "perf")]
-        {
-            self.perf_counter.borrow_mut().new_event_for_all(event);
-            self.perf_counter.borrow_mut().deregister_all();
-        }
-    }
-
-    async fn worker(&mut self, work_counter: usize) -> Result<(), Error> {
-        let mut new_tx = None;
-        let mut batch_timer_tick = false;
+    async fn worker(&mut self) -> Result<(), ()> {
+        let mut timer_tick = false;
+        let mut cmd = None;
 
         tokio::select! {
-            biased;
-            _new_tx = self.batch_proposer_rx.recv() => {
-                new_tx = _new_tx;
-            },
             _cmd = self.cmd_rx.recv() => {
-                let (make_new_batches, current_leader) = _cmd.unwrap();
-                self.make_new_batches = make_new_batches;
-                self.current_leader = current_leader;
-                return Ok(());
+                cmd = _cmd;
             },
-            _tick = self.batch_timer.wait() => {
-                batch_timer_tick = _tick;
+            _tick = self.tip_cut_timer.wait() => {
+                timer_tick = _tick;
             }
         }
 
-        if new_tx.is_none() && !batch_timer_tick {
-            return Err(Error::new(
-                ErrorKind::BrokenPipe,
-                "Channels not working correctly",
-            ));
+        // Handle commands (leadership updates, view changes)
+        if let Some(command) = cmd {
+            self.handle_command(command);
+            return Ok(());
         }
 
-        if !batch_timer_tick {
-            if self.last_batch_proposed.elapsed().as_millis() as u64
-                >= self.config.get().consensus_config.batch_max_delay_ms
-            {
-                batch_timer_tick = true;
+        // Handle timer tick - propose tip cut if we're the leader
+        if timer_tick {
+            if self.i_am_leader && self.should_propose_tip_cut() {
+                if let Err(_) = self.propose_tip_cut().await {
+                    error!("Failed to propose tip cut");
+                }
+            } else {
+                trace!(
+                    "Skipping tip cut proposal: i_am_leader={}",
+                    self.i_am_leader
+                );
+            }
+            return Ok(());
+        }
+
+        // Channel closed
+        Err(())
+    }
+
+    fn handle_command(&mut self, command: TipCutProposalCommand) {
+        match command {
+            TipCutProposalCommand::UpdateLeadership(am_i_leader, leader_name) => {
+                let was_leader = self.i_am_leader;
+                self.i_am_leader = am_i_leader;
+                self.current_leader = leader_name.clone();
+
+                if was_leader != am_i_leader {
+                    info!(
+                        "Leadership changed: i_am_leader={}, new_leader={}",
+                        am_i_leader, leader_name
+                    );
+                }
+            }
+            TipCutProposalCommand::UpdateView(view) => {
+                if view != self.view {
+                    info!("View changed: {} -> {}", self.view, view);
+                    self.view = view;
+                }
+            }
+            TipCutProposalCommand::UpdateViewStability(stable) => {
+                if stable != self.view_is_stable {
+                    debug!("View stability changed: {}", stable);
+                    self.view_is_stable = stable;
+                }
             }
         }
+    }
 
-        if new_tx.is_some() {
-            // Filter read-only transactions that do not need to go through consensus.
-            // Forward them directly to execution.
-            new_tx = self.filter_unlogged_request(new_tx.unwrap()).await;
-        }
+    /// Determine if a tip cut should be proposed.
+    ///
+    /// TODO: Implement more sophisticated logic:
+    /// - Timer-based: Propose every N milliseconds (current behavior)
+    /// - Threshold-based: Propose when enough new CARs are available
+    /// - Hybrid: Propose when timer expires AND threshold met
+    /// - Adaptive: Adjust timing based on network conditions
+    ///
+    /// For now, returns true (always propose on timer tick if leader).
+    fn should_propose_tip_cut(&self) -> bool {
+        true // For now, always propose when timer ticks
+    }
 
-        if new_tx.is_some() {
-            if !self.i_am_leader() {
-                self.reply_leader(new_tx.unwrap()).await;
+    /// Query lane_staging for current tip cut and broadcast it to all nodes.
+    async fn propose_tip_cut(&mut self) -> Result<(), ()> {
+        // Query LaneStaging for the current tip cut
+        let tip_cut = match self.query_tip_cut().await? {
+            Some(tc) => tc,
+            None => {
+                debug!("No CARs available yet for tip cut proposal");
                 return Ok(());
             }
+        };
 
-            self.perf_register_random(work_counter);
-
-            let new_tx = new_tx.unwrap();
-            if new_tx.0.is_none() {
-                warn!("Malformed transaction");
-                self.register_reply_malformed(new_tx.1).await;
-                return Ok(());
-            }
-
-            let ack_chan = new_tx.1;
-            let new_tx = new_tx.0.unwrap();
-
-            self.current_raw_batch.as_mut().unwrap().push(new_tx);
-            self.current_reply_vec.push(ack_chan);
-            self.perf_add_event(work_counter, "Add request to batch");
+        // Check if tip cut is valid (has at least one CAR)
+        if tip_cut.cars.is_empty() {
+            debug!("Tip cut is empty, skipping proposal");
+            return Ok(());
         }
 
-        let max_batch_size = self.config.get().consensus_config.max_backlog_batch_size;
+        info!(
+            "Proposing tip cut with {} CARs for view {} (ci={})",
+            tip_cut.cars.len(),
+            self.view,
+            self.ci
+        );
 
-        if self.current_raw_batch.as_ref().unwrap().len() >= max_batch_size
-            || (self.make_new_batches && batch_timer_tick)
-        {
-            self.propose_new_batch().await;
-        }
+        // Collect CARs into a vec
+        let cars: Vec<_> = tip_cut.cars.into_values().collect();
+
+        // TODO: Compute proper digest and parent
+        // For now, using placeholder values
+        let digest = vec![0u8; 32]; // Placeholder
+        let parent = vec![0u8; 32]; // Placeholder
+
+        // Construct ProtoTipCut message with new structure
+        let proto_tip_cut = ProtoTipCut {
+            digest,
+            parent,
+            tips: cars,
+        };
+
+        // Wrap in AppendEntries for consensus protocol
+        let append_entries = crate::proto::consensus::ProtoAppendEntries {
+            entry: Some(
+                crate::proto::consensus::proto_append_entries::Entry::Tipcut(proto_tip_cut),
+            ),
+            commit_index: self.ci,
+            view: self.view,
+            view_is_stable: self.view_is_stable,
+            config_num: tip_cut.config_num,
+            is_backfill_response: false,
+        };
+
+        // Broadcast to all nodes
+        self.broadcast_tip_cut(append_entries).await?;
 
         Ok(())
     }
 
-    async fn register_reply_malformed(&mut self, ack_chan: MsgAckChanWithTag) {
-        // TODO
+    /// Query lane_staging for the current tip cut.
+    async fn query_tip_cut(&mut self) -> Result<Option<TipCut>, ()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        // Send query
+        self.lane_staging_query_tx
+            .send(LaneStagingQuery::GetCurrentTipCut(reply_tx))
+            .await
+            .map_err(|e| {
+                error!("Failed to send query to LaneStaging: {:?}", e);
+            })?;
+
+        // Wait for response
+        reply_rx.await.map_err(|e| {
+            error!("Failed to receive tip cut from LaneStaging: {:?}", e);
+        })
     }
 
-    async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) {
-        // TODO
-        let (ack_chan, client_tag, _) = new_tx.1;
-        let node_infos = NodeInfo {
-            nodes: self.config.get().net_config.nodes.clone(),
-        };
-        let reply = ProtoClientReply {
-            reply: Some(crate::proto::client::proto_client_reply::Reply::Leader(
-                ProtoCurrentLeader {
-                    name: self.current_leader.clone(),
-                    serialized_node_infos: node_infos.serialize(),
-                },
-            )),
-            client_tag,
-        };
+    /// Broadcast a tip cut to all nodes wrapped in AppendEntries.
+    async fn broadcast_tip_cut(
+        &mut self,
+        append_entries: crate::proto::consensus::ProtoAppendEntries,
+    ) -> Result<(), ()> {
+        let config = self.config.get();
+        let my_name = &config.net_config.name;
 
-        let reply_ser = reply.encode_to_vec();
-        let _sz = reply_ser.len();
-        let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-        let latency_profile = LatencyProfile::new();
-
-        let _ = ack_chan.send((reply_msg, latency_profile)).await;
-    }
-
-    async fn propose_new_batch(&mut self) {
-        self.last_batch_proposed = Instant::now();
-        let batch = self.current_raw_batch.take().unwrap();
-        self.current_raw_batch = Some(RawBatch::with_capacity(
-            self.config.get().consensus_config.max_backlog_batch_size,
-        ));
-        let reply_chans = self.current_reply_vec.drain(..).collect();
-        let _ = self.block_maker_tx.send((batch, reply_chans)).await;
-        self.perf_event_and_deregister_all("Propose batch");
-        self.batch_timer.reset();
-    }
-
-    fn i_am_leader(&self) -> bool {
-        self.config.get().net_config.name == self.current_leader
-    }
-
-    /// None implies don't process the transaction forward!
-    /// Either the transaction is malformed or it is a read-only transaction.
-    async fn filter_unlogged_request(&mut self, tx: TxWithAckChanTag) -> Option<TxWithAckChanTag> {
-        let (tx, ack_chan) = tx;
-        let tx = tx.unwrap();
-
-        if tx.on_receive.is_some() {
-            if !(tx.on_crash_commit.is_none() && tx.on_byzantine_commit.is_none()) {
-                warn!("Malformed transaction");
-            }
-
-            let (res_tx, res_rx) = oneshot::channel();
-
-            let (is_probe, block_n) = self.is_probe_tx(&tx);
-
-            if !is_probe {
-                self.unlogged_tx.send((tx, res_tx)).await.unwrap();
-                self.reply_tx
-                    .send(ClientReplyCommand::UnloggedRequestAck(res_rx, ack_chan))
-                    .await
-                    .unwrap();
+        // Extract tip count for logging
+        let tip_count =
+            if let Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(ref tc)) =
+                append_entries.entry
+            {
+                tc.tips.len()
             } else {
-                self.reply_tx
-                    .send(ClientReplyCommand::ProbeRequestAck(block_n, ack_chan))
-                    .await
-                    .unwrap();
-            }
+                0
+            };
 
-            return None;
-        }
+        debug!("Broadcasting tip cut with {} CARs to all nodes", tip_count);
 
-        Some((Some(tx), ack_chan))
-    }
-
-    fn is_probe_tx(&self, tx: &ProtoTransaction) -> (bool, u64) {
-        if tx.on_receive.is_none() {
-            return (false, 0);
-        }
-
-        if tx.on_receive.as_ref().unwrap().ops.len() != 1 {
-            return (false, 0);
-        }
-
-        if tx.on_receive.as_ref().unwrap().ops[0].op_type
-            != crate::proto::execution::ProtoTransactionOpType::Probe as i32
-        {
-            return (false, 0);
-        }
-
-        if tx.on_receive.as_ref().unwrap().ops[0].operands.len() != 1 {
-            return (false, 0);
-        }
-
-        let block_n = tx.on_receive.as_ref().unwrap().ops[0].operands[0].clone();
-
-        let block_n = match block_n.as_slice().try_into() {
-            Ok(arr) => u64::from_be_bytes(arr),
-            Err(_) => return (false, 0),
+        // Encode the payload
+        let payload = ProtoPayload {
+            message: Some(proto_payload::Message::AppendEntries(append_entries)),
         };
 
-        (true, block_n)
+        let buf = payload.encode_to_vec();
+        let sz = buf.len();
+
+        // Broadcast to all nodes except myself
+        for node in &config.consensus_config.node_list {
+            if node == my_name {
+                continue;
+            }
+
+            let _ = PinnedClient::send(&self.client, node, MessageRef(&buf, sz, &SenderType::Anon))
+                .await;
+        }
+
+        Ok(())
     }
 }

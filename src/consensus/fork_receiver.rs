@@ -167,8 +167,14 @@ impl ForkReceiver {
             tokio::select! {
                 ae_sender = self.fork_rx.recv() => {
                     if let Some((ae, SenderType::Auth(sender, _))) = ae_sender {
-                        debug!("Received AppendEntries({}) from {}", ae.fork.as_ref().unwrap().serialized_blocks.last().unwrap().n, sender);
-                        self.process_fork(ae, sender).await;
+                        // Extract the fork from the entry oneof
+                        if let Some(crate::proto::consensus::proto_append_entries::Entry::Fork(ref fork)) = ae.entry {
+                            debug!("Received AppendEntries({}) from {}", fork.serialized_blocks.last().unwrap().n, sender);
+                            self.process_fork(ae, sender).await;
+                        } else {
+                            // This is a tipcut, which shouldn't be processed by the regular fork receiver
+                            warn!("Received non-fork AppendEntries in fork_receiver - ignoring");
+                        }
                     }
                 },
                 cmd = self.command_rx.recv() => {
@@ -229,9 +235,9 @@ impl ForkReceiver {
             return;
         }
 
-        let fork = match &mut ae.fork {
-            Some(f) => f,
-            None => return,
+        let fork = match &mut ae.entry {
+            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(f)) => f,
+            _ => return,
         };
 
         // if ae.view > self.view {
@@ -414,10 +420,12 @@ impl ForkReceiver {
     async fn send_nack(&mut self, sender: String, ae: ProtoAppendEntries) {
         info!("Nacking AE to {}", sender);
         self.continuity_stats.waiting_on_nack_reply = true;
-        let first_block_n = ae
-            .fork
-            .as_ref()
-            .map_or(ae.commit_index, |f| f.serialized_blocks.first().unwrap().n);
+        let first_block_n = match &ae.entry {
+            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(f)) => {
+                f.serialized_blocks.first().unwrap().n
+            }
+            _ => ae.commit_index,
+        };
         let last_index_needed = if first_block_n > 100 {
             first_block_n - 100
         } else {
@@ -466,7 +474,13 @@ impl ForkReceiver {
     /// If none of these cases match, then there is high probability you do actually need to backfill.
     /// Assumption on Logserver: Eventually, the log server has all the log entries that staging has.
     async fn ensure_common_prefix(&mut self, ae: &ProtoAppendEntries) -> Result<(), ()> {
-        let fork = ae.fork.as_ref().unwrap();
+        let fork = match &ae.entry {
+            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(f)) => f,
+            _ => {
+                warn!("Empty or non-fork AppendEntries received");
+                return Ok(());
+            }
+        };
         if fork.serialized_blocks.len() == 0 {
             warn!("Empty AppendEntries received");
             return Ok(());

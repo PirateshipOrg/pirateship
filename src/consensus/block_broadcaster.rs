@@ -35,7 +35,7 @@ use super::dag::block_receiver::{AppendBlockStats, BlockReceiverCommand, SingleB
 
 #[cfg(feature = "dag")]
 use crate::{
-    proto::{consensus::proto_block::Sig, dag::ProtoAppendBlock},
+    proto::consensus::{proto_block::Sig, ProtoAppendBlock},
     utils::deserialize_proto_block,
 };
 
@@ -773,18 +773,20 @@ impl BlockBroadcaster {
         };
 
         let append_entry = ProtoAppendEntries {
-            fork: Some(ProtoFork {
-                serialized_blocks: ae_fork
-                    .drain(..)
-                    .map(|block| HalfSerializedBlock {
-                        n: block.block.n,
-                        view: block.block.view,
-                        view_is_stable: block.block.view_is_stable,
-                        config_num: block.block.config_num,
-                        serialized_body: block.block_ser.clone(),
-                    })
-                    .collect(),
-            }),
+            entry: Some(crate::proto::consensus::proto_append_entries::Entry::Fork(
+                ProtoFork {
+                    serialized_blocks: ae_fork
+                        .drain(..)
+                        .map(|block| HalfSerializedBlock {
+                            n: block.block.n,
+                            view: block.block.view,
+                            view_is_stable: block.block.view_is_stable,
+                            config_num: block.block.config_num,
+                            serialized_body: block.block_ser.clone(),
+                        })
+                        .collect(),
+                },
+            )),
             commit_index: self.ci,
             view,
             view_is_stable,

@@ -25,8 +25,7 @@ use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector},
     proto::{
-        consensus::ProtoNameWithSignature,
-        dag::{ProtoBlockAck, ProtoBlockCar},
+        consensus::{ProtoBlockAck, ProtoBlockCar, ProtoNameWithSignature},
         rpc::{proto_payload, ProtoPayload},
     },
     rpc::{client::PinnedClient, MessageRef, SenderType},
@@ -41,6 +40,26 @@ use super::{
     block_receiver::AppendBlockStats,
     lane_logserver::LaneLogServerCommand,
 };
+
+/// Represents the current tip cut across all lanes
+#[derive(Clone, Debug)]
+pub struct TipCut {
+    /// One CAR per lane (at most)
+    /// Maps lane_id -> CAR
+    pub cars: HashMap<Vec<u8>, ProtoBlockCar>,
+
+    /// View number when this tip cut was constructed
+    pub view: u64,
+
+    /// Config number
+    pub config_num: u64,
+}
+
+/// Query interface for LaneStaging
+pub enum LaneStagingQuery {
+    /// Get the current tip cut (one CAR per lane)
+    GetCurrentTipCut(oneshot::Sender<Option<TipCut>>),
+}
 
 /// Information about a block stored in a lane
 struct StoredBlock {
@@ -77,6 +96,9 @@ pub struct LaneStaging {
     // Value: block info with acknowledgments
     lane_blocks: HashMap<Vec<u8>, HashMap<u64, StoredBlock>>,
 
+    // Current tip cut (one CAR per lane)
+    current_tip_cut: TipCut,
+
     // Input channels
     block_rx: Receiver<(
         CachedBlock,
@@ -86,6 +108,8 @@ pub struct LaneStaging {
     )>,
 
     block_ack_rx: Receiver<(ProtoBlockAck, SenderType)>,
+
+    query_rx: Receiver<LaneStagingQuery>,
 
     // Output channels
     client_reply_tx: Sender<ClientReplyCommand>,
@@ -105,6 +129,7 @@ impl LaneStaging {
             bool,
         )>,
         block_ack_rx: Receiver<(ProtoBlockAck, SenderType)>,
+        query_rx: Receiver<LaneStagingQuery>,
         client_reply_tx: Sender<ClientReplyCommand>,
         app_tx: Sender<AppCommand>,
         lane_logserver_tx: Sender<LaneLogServerCommand>,
@@ -117,8 +142,14 @@ impl LaneStaging {
             view: 0,
             config_num: 0,
             lane_blocks: HashMap::new(),
+            current_tip_cut: TipCut {
+                cars: HashMap::new(),
+                view: 0,
+                config_num: 0,
+            },
             block_rx,
             block_ack_rx,
+            query_rx,
             client_reply_tx,
             app_tx,
             lane_logserver_tx,
@@ -151,6 +182,13 @@ impl LaneStaging {
                 }
                 let (block_ack, sender) = block_ack.unwrap();
                 self.process_block_ack(block_ack, sender).await?;
+            },
+
+            query = self.query_rx.recv() => {
+                if query.is_none() {
+                    return Err(());
+                }
+                self.handle_query(query.unwrap());
             },
         }
 
@@ -451,7 +489,7 @@ impl LaneStaging {
         }
 
         // Broadcast the CAR to all nodes
-        self.broadcast_car(car).await?;
+        self.broadcast_car(car.clone()).await?;
 
         // Mark as broadcasted
         if let Some(lane) = self.lane_blocks.get_mut(lane_id) {
@@ -460,13 +498,13 @@ impl LaneStaging {
             }
         }
 
+        // Update the current tip cut with this new CAR
+        self.update_tip_cut(lane_id.to_vec(), car);
+
         info!(
             "Block n={} in lane {:?} is now stable with CAR",
             seq_num, lane_id
         );
-
-        // TODO: Notify tip-cut formation component when implemented
-        // For now, CARs are just broadcasted and stored
 
         Ok(())
     }
@@ -514,5 +552,60 @@ impl LaneStaging {
             let f = n / 3;
             f + 1
         }
+    }
+
+    /// Handle query from TipCutProposal or other components
+    fn handle_query(&mut self, query: LaneStagingQuery) {
+        match query {
+            LaneStagingQuery::GetCurrentTipCut(reply_tx) => {
+                let tip_cut = self.construct_tip_cut();
+                let _ = reply_tx.send(tip_cut);
+            }
+        }
+    }
+
+    /// Construct the current tip cut by selecting the latest CAR from each lane.
+    /// Returns None if no CARs are available yet.
+    fn construct_tip_cut(&self) -> Option<TipCut> {
+        let mut cars = HashMap::new();
+
+        // For each lane, find the CAR with the highest sequence number
+        for (lane_id, blocks) in &self.lane_blocks {
+            let mut highest_seq = None;
+            let mut highest_car = None;
+
+            for (seq_num, stored_block) in blocks {
+                if let Some(ref car) = stored_block.car {
+                    if highest_seq.is_none() || *seq_num > highest_seq.unwrap() {
+                        highest_seq = Some(*seq_num);
+                        highest_car = Some(car.clone());
+                    }
+                }
+            }
+
+            // Add the highest CAR for this lane to the tip cut
+            if let Some(car) = highest_car {
+                cars.insert(lane_id.clone(), car);
+            }
+        }
+
+        // Return None if we have no CARs yet
+        if cars.is_empty() {
+            return None;
+        }
+
+        Some(TipCut {
+            cars,
+            view: self.view,
+            config_num: self.config_num,
+        })
+    }
+
+    /// Update the current tip cut with a newly formed CAR.
+    /// Called after we successfully form and broadcast a CAR.
+    fn update_tip_cut(&mut self, lane_id: Vec<u8>, car: ProtoBlockCar) {
+        self.current_tip_cut.cars.insert(lane_id, car);
+        self.current_tip_cut.view = self.view;
+        self.current_tip_cut.config_num = self.config_num;
     }
 }

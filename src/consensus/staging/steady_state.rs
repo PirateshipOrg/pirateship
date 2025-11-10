@@ -237,14 +237,14 @@ impl Staging {
 
         let mut vote = ProtoVote {
             sig_array: Vec::with_capacity(1),
-            fork_digest: last_block.block.block_hash.clone(),
+            digest: last_block.block.block_hash.clone(),
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
         };
 
         #[cfg(feature = "extra_2pc")]
-        let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
+        let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.digest.clone());
 
         // If this block is signed, need a signature for the vote.
         if let Some(Sig::ProposerSig(_)) = last_block.block.block.sig {
@@ -335,14 +335,14 @@ impl Staging {
 
         let mut vote = ProtoVote {
             sig_array,
-            fork_digest: last_block.block.block_hash.clone(),
+            digest: last_block.block.block_hash.clone(),
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
         };
 
         #[cfg(feature = "extra_2pc")]
-        let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
+        let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.digest.clone());
 
         // If this block is signed, need a signature for the vote.
         if let Some(Sig::ProposerSig(_)) = last_block.block.block.sig {

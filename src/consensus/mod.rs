@@ -34,7 +34,7 @@ use crate::{
 };
 
 #[cfg(feature = "dag")]
-use crate::proto::dag::{ProtoAppendBlock, ProtoBlockAck, ProtoTipCut, ProtoTipCutVote};
+use crate::proto::consensus::{ProtoAppendBlock, ProtoBlockAck, ProtoTipCut};
 use app::{AppEngine, Application};
 use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
@@ -66,12 +66,12 @@ pub struct ConsensusServerContext {
     config: AtomicConfig,
     keystore: AtomicKeyStore,
     batch_proposal_tx: Sender<TxWithAckChanTag>,
-    
+
     #[cfg(not(feature = "dag"))]
     fork_receiver_tx: Sender<(ProtoAppendEntries, SenderType)>,
     #[cfg(not(feature = "dag"))]
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
-    
+
     #[cfg(feature = "dag")]
     block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
     #[cfg(feature = "dag")]
@@ -80,7 +80,7 @@ pub struct ConsensusServerContext {
     tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
     #[cfg(feature = "dag")]
     tip_cut_vote_tx: Sender<(ProtoTipCutVote, SenderType)>,
-    
+
     vote_receiver_tx: Sender<VoteWithSender>,
     view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
     backfill_request_tx: Sender<ProtoBackfillNack>,
@@ -189,7 +189,7 @@ impl ServerContextType for PinnedConsensusServerContext {
                     .expect("Channel send error");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::AppendEntries(proto_append_entries) => {
                 // info!("Received append entries from {:?}. Size: {}", sender, proto_append_entries.encoded_len());
@@ -209,13 +209,13 @@ impl ServerContextType for PinnedConsensusServerContext {
                 }
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::AppendEntries(_proto_append_entries) => {
                 warn!("Received AppendEntries in DAG mode - ignoring");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::AppendBlock(proto_append_block) => {
                 // TODO: Handle backfill response flag when extended for DAG
@@ -225,13 +225,13 @@ impl ServerContextType for PinnedConsensusServerContext {
                     .expect("Channel send error");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::AppendBlock(_proto_append_block) => {
                 warn!("Received AppendBlock in leader mode - ignoring");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::BlockAck(proto_block_ack) => {
                 self.block_ack_tx
@@ -240,26 +240,26 @@ impl ServerContextType for PinnedConsensusServerContext {
                     .expect("Channel send error");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::BlockAck(_proto_block_ack) => {
                 warn!("Received BlockAck in leader mode - ignoring");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::BlockCar(proto_block_car) => {
                 // TODO: Implement BlockCAR handling
                 debug!("Received BlockCAR - not yet implemented");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::BlockCar(_proto_block_car) => {
                 warn!("Received BlockCAR in leader mode - ignoring");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::TipCut(proto_tip_cut) => {
                 self.tip_cut_tx
@@ -268,28 +268,15 @@ impl ServerContextType for PinnedConsensusServerContext {
                     .expect("Channel send error");
                 return Ok(RespType::NoResp);
             }
-            
+
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::TipCut(_proto_tip_cut) => {
                 warn!("Received TipCut in leader mode - ignoring");
                 return Ok(RespType::NoResp);
             }
-            
-            #[cfg(feature = "dag")]
-            crate::proto::rpc::proto_payload::Message::TcVote(proto_tc_vote) => {
-                self.tip_cut_vote_tx
-                    .send((proto_tc_vote, sender))
-                    .await
-                    .expect("Channel send error");
-                return Ok(RespType::NoResp);
-            }
-            
-            #[cfg(not(feature = "dag"))]
-            crate::proto::rpc::proto_payload::Message::TcVote(_proto_tc_vote) => {
-                warn!("Received TipCutVote in leader mode - ignoring");
-                return Ok(RespType::NoResp);
-            }
-            
+
+            // Note: TipCut votes now use the regular Vote message (ProtoVote)
+            // which supports voting for both Fork and TipCut via the digest field
             crate::proto::rpc::proto_payload::Message::Vote(proto_vote) => {
                 self.vote_receiver_tx
                     .send((sender, proto_vote))

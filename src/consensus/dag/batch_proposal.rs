@@ -253,31 +253,6 @@ impl BatchProposer {
         // TODO
     }
 
-    // NOTE: We don't need to reply leader in DAG, as all workers accept requests
-    // async fn reply_leader(&mut self, new_tx: TxWithAckChanTag) {
-    //     // TODO
-    //     let (ack_chan, client_tag, _) = new_tx.1;
-    //     let node_infos = NodeInfo {
-    //         nodes: self.config.get().net_config.nodes.clone(),
-    //     };
-    //     let reply = ProtoClientReply {
-    //         reply: Some(crate::proto::client::proto_client_reply::Reply::Leader(
-    //             ProtoCurrentLeader {
-    //                 name: self.current_leader.clone(),
-    //                 serialized_node_infos: node_infos.serialize(),
-    //             },
-    //         )),
-    //         client_tag,
-    //     };
-
-    //     let reply_ser = reply.encode_to_vec();
-    //     let _sz = reply_ser.len();
-    //     let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-    //     let latency_profile = LatencyProfile::new();
-
-    //     let _ = ack_chan.send((reply_msg, latency_profile)).await;
-    // }
-
     async fn propose_new_batch(&mut self) {
         self.last_batch_proposed = Instant::now();
         let batch = self.current_raw_batch.take().unwrap();

@@ -253,10 +253,10 @@ impl LogServer {
         let sender = backfill_req.reply_name;
         let hints = backfill_req.hints;
         let existing_fork = match &backfill_req.origin {
-            Some(Origin::Ae(ae)) => match ae.fork.as_ref() {
-                Some(fork) => fork,
-                None => {
-                    warn!("Malformed request");
+            Some(Origin::Ae(ae)) => match &ae.entry {
+                Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
+                _ => {
+                    warn!("Malformed request - no fork in AppendEntries");
                     return Ok(());
                 }
             },
@@ -290,7 +290,9 @@ impl LogServer {
         let payload = match backfill_req.origin.unwrap() {
             Origin::Ae(ae) => ProtoPayload {
                 message: Some(Message::AppendEntries(ProtoAppendEntries {
-                    fork: Some(new_fork),
+                    entry: Some(crate::proto::consensus::proto_append_entries::Entry::Fork(
+                        new_fork,
+                    )),
                     is_backfill_response: true,
                     ..ae
                 })),

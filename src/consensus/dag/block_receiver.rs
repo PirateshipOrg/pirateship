@@ -8,7 +8,8 @@ use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
     proto::{
-        checkpoint::ProtoBackfillNack, consensus::proto_block::Sig, dag::ProtoAppendBlock,
+        checkpoint::ProtoBackfillNack,
+        consensus::{proto_block::Sig, ProtoAppendBlock},
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, MessageRef, SenderType},
@@ -99,7 +100,6 @@ pub struct BlockReceiver {
     block_rx: Receiver<(ProtoAppendBlock, SenderType /* Sender */)>,
     command_rx: Receiver<BlockReceiverCommand>,
 
-    // TODO: Update to use DAG-specific broadcaster type when implemented
     broadcaster_tx: Sender<SingleBlock>,
 
     // Per-lane continuity tracking
@@ -477,9 +477,11 @@ impl BlockReceiver {
                 // TODO: This is a temporary workaround - need to extend BackfillNack
                 // to support AppendBlock origin directly
                 crate::proto::consensus::ProtoAppendEntries {
-                    fork: Some(crate::proto::consensus::ProtoFork {
-                        serialized_blocks: block.block.map_or(vec![], |b| vec![b]),
-                    }),
+                    entry: Some(crate::proto::consensus::proto_append_entries::Entry::Fork(
+                        crate::proto::consensus::ProtoFork {
+                            serialized_blocks: block.block.map_or(vec![], |b| vec![b]),
+                        },
+                    )),
                     commit_index: block.commit_index,
                     view: block.view,
                     view_is_stable: block.view_is_stable,

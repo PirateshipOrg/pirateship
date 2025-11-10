@@ -70,8 +70,6 @@ message ProtoBlock {
         DefferedSignature no_sig = 9;
         bytes proposer_sig = 10;
     }
-
-
 }
 
 message HalfSerializedBlock {
@@ -87,9 +85,49 @@ message ProtoFork {
     repeated HalfSerializedBlock serialized_blocks = 1;
 }
 
+// Append Block (eliminates forks from dissemination)
+message ProtoAppendBlock {
+    proto.consensus.HalfSerializedBlock block = 1;
+    uint64 commit_index = 2;
+    uint64 view = 3;
+    bool view_is_stable = 4;
+    uint64 config_num = 6;
+    bool is_backfill_response = 7;
+}
 
+// Block Acknowledgement for constructing PoA
+// QUESTION: DO we need a sig array here or just one?
+message ProtoBlockAck {
+    bytes digest = 1;       // Hash of block
+    uint64 n = 2;           // Sequence Number of block
+    bytes lane = 3;         // Proposer Signature to ID lane
+    bytes sig = 4;          // My Signature for voting
+}
+
+// PoA (CAR) for a block with a digest
+message ProtoBlockCAR {
+    bytes digest = 1;       // Hash of Block
+    // QUESTION: Do we need a parent link here too?
+    uint64 n = 2;           // Sequence Number
+    repeated ProtoNameWithSignature sig = 3; // signer node -> Signature mapping
+    uint64 view = 4;        // QUESTION: Do we actually need a view number here??
+}
+
+// Tip Cut proposal of up to N CARs
+// Will be wrapped in an AppendEntries for view info
+message ProtoTipCut {
+    bytes digest = 1;       // Digest of tip cut to use in commit log
+    bytes parent = 2;       // Digest of parent
+    repeated ProtoBlockCAR tips = 3;  // Tip Cut of up to N CARs (which give digest, seq num, lane sig, etc.)
+}
+
+// AppendEntries
+// either Fork or TipCut
 message ProtoAppendEntries {
-    ProtoFork fork = 1;
+    oneof entry {
+        ProtoFork fork = 1;
+        ProtoTipCut tipcut = 8;
+    }
     uint64 commit_index = 2;
     uint64 view = 4;
     bool view_is_stable = 5;
@@ -97,14 +135,16 @@ message ProtoAppendEntries {
     bool is_backfill_response = 7;
 }
 
+// Array of signatures
 message ProtoSignatureArrayEntry {
     uint64 n = 1;                                // Sequence number
     bytes sig = 2;
 }
 
+// Vote for a Fork or TipCut 
 message ProtoVote {
     repeated ProtoSignatureArrayEntry sig_array = 1;
-    bytes fork_digest = 2;
+    bytes digest = 2;       // Digest of either fork or tip cut
     uint64 n = 3;
     uint64 view = 4;
     uint64 config_num = 5;
