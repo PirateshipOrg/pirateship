@@ -2,8 +2,6 @@
 ///
 /// In the DAG consensus protocol, nodes are constantly receiving client transactions and proposing
 /// batches to other nodes. Every node maintains a lane of batches for every other nodes in the system.
-/// Once the batch proposer receives u+1 acknowledgements for a batch, it forwards the PoA or CAR to the leader
-/// for that view.
 use std::cell::RefCell;
 use std::time::Instant;
 use std::{io::Error, pin::Pin, sync::Arc, time::Duration};

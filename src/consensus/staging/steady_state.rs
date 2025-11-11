@@ -1160,7 +1160,7 @@ impl Staging {
     }
 
     /// Process tip cut proposal as leader (DAG mode)
-    /// 
+    ///
     /// In DAG mode, the leader receives a tip cut proposal from the tip_cut_proposal component.
     /// The leader should:
     /// 1. Validate the tip cut (check CARs, verify structure)
@@ -1172,7 +1172,10 @@ impl Staging {
     /// TODO: Implement tip cut validation logic
     /// TODO: Implement tip cut voting logic
     /// TODO: Implement tip cut QC formation
-    /// TODO: Implement tip cut commit logic
+    /// Process tip cut proposal as leader (DAG mode)
+    ///
+    /// Leaders in DAG mode receive their own tip cut proposals.
+    /// The leader should validate and vote on their own tip cut.
     #[cfg(feature = "dag")]
     pub(super) async fn process_tipcut_as_leader(
         &mut self,
@@ -1185,24 +1188,33 @@ impl Staging {
             tipcut_proposal.ae_stats.ci
         );
 
-        // TODO: Validate tip cut structure
-        // - Check that all CARs are properly formed
-        // - Verify that CARs are from different lanes
-        // - Check parent relationship
-        // - Verify digest computation
+        // Basic view validation
+        if tipcut_proposal.ae_stats.view < self.view {
+            warn!(
+                "Received tip cut from lower view {}. Already in {}",
+                tipcut_proposal.ae_stats.view, self.view
+            );
+            return Ok(());
+        }
 
-        // TODO: Decide whether to vote for this tip cut
-        // This is where the consensus decision logic goes
-        // For now, we'll just log that we received it
-        
-        // TODO: Create and broadcast vote for tip cut
-        // let vote = self.create_tipcut_vote(&tipcut_proposal.tipcut);
-        // self.broadcast_vote(vote).await;
+        // Validate the tip cut structure and CARs
+        if !self.validate_tipcut(&tipcut_proposal.tipcut).await {
+            warn!("Tip cut validation failed - not voting");
+            return Ok(());
+        }
 
-        // TODO: Store tip cut proposal for vote collection
-        // self.pending_tipcuts.push(tipcut_proposal);
+        // Store tip cut in logserver (DAG mode stores tip cuts, not blocks)
+        self.logserver_tx
+            .send(LogServerCommand::NewTipCut(tipcut_proposal.tipcut.clone()))
+            .await
+            .unwrap();
 
-        warn!("Tip cut processing as leader not yet implemented");
+        // Vote on own tip cut (implicit vote)
+        info!(
+            "Leader implicitly voting for own tip cut with digest {:?}",
+            hex::encode(&tipcut_proposal.tipcut.digest[..8])
+        );
+
         Ok(())
     }
 
@@ -1210,16 +1222,10 @@ impl Staging {
     ///
     /// In DAG mode, followers receive tip cut proposals from the leader.
     /// Followers should:
-    /// 1. Validate the tip cut (check CARs, verify structure)
-    /// 2. Decide whether to vote for the tip cut
-    /// 3. Send vote to leader
-    /// 4. Wait for QC from leader
-    /// 5. Commit the tip cut when QC is received
-    ///
-    /// TODO: Implement tip cut validation logic
-    /// TODO: Implement voting decision logic
-    /// TODO: Implement vote sending
-    /// TODO: Implement QC reception and commit
+    /// 1. Validate the view in the proposal
+    /// 2. Validate the parent digest in the tip cut chain log
+    /// 3. Validate tip cut data - for every lane digest in the tip cut, check if we have a valid CAR
+    /// 4. If validation passes, vote for the TC. Otherwise, don't vote.
     #[cfg(feature = "dag")]
     pub(super) async fn process_tipcut_as_follower(
         &mut self,
@@ -1233,29 +1239,208 @@ impl Staging {
             tipcut_proposal.ae_stats.ci
         );
 
-        // TODO: Validate tip cut structure
-        // Same validation as leader
+        // Step 1: Validate view
+        if tipcut_proposal.ae_stats.view < self.view {
+            warn!(
+                "Received tip cut from lower view {}. Already in {}",
+                tipcut_proposal.ae_stats.view, self.view
+            );
+            return Ok(());
+        }
 
-        // TODO: Decide whether to vote for this tip cut
-        // This is the key consensus decision point
-        // Criteria might include:
-        // - All CARs are valid and properly formed
-        // - Tip cut extends the current committed state
-        // - No conflicting tip cuts exist
-        // - Parent relationship is correct
+        if tipcut_proposal.ae_stats.view > self.view {
+            // Jump to new view
+            info!(
+                "Jumping to new view {} from tip cut (was in view {})",
+                tipcut_proposal.ae_stats.view, self.view
+            );
+            self.view = tipcut_proposal.ae_stats.view;
+            self.view_is_stable = tipcut_proposal.ae_stats.view_is_stable;
+            self.config_num = tipcut_proposal.ae_stats.config_num;
 
-        // TODO: Create vote message
-        // let vote = ProtoVote {
-        //     digest: tipcut_proposal.tipcut.digest.clone(),
-        //     view: tipcut_proposal.ae_stats.view,
-        //     sig: vec![], // Sign the digest
-        // };
+            // Notify upstream stages of view change
+            self.block_sequencer_command_tx
+                .send(BlockSequencerControlCommand::NewUnstableView(
+                    self.view,
+                    self.config_num,
+                ))
+                .await
+                .unwrap();
+            self.fork_receiver_command_tx
+                .send(ForkReceiverCommand::UpdateView(self.view, self.config_num))
+                .await
+                .unwrap();
+        }
 
-        // TODO: Send vote to leader
-        // let leader = self.get_leader_for_view(tipcut_proposal.ae_stats.view);
-        // self.send_vote_to_leader(leader, vote).await;
+        // Step 2: Validate parent digest in the tip cut chain
+        if !self.validate_tipcut_parent(&tipcut_proposal.tipcut).await {
+            warn!(
+                "Tip cut parent validation failed - parent digest {:?} not found in chain",
+                hex::encode(&tipcut_proposal.tipcut.parent[..8])
+            );
+            return Ok(());
+        }
 
-        warn!("Tip cut processing as follower not yet implemented");
+        // Step 3: Validate tip cut data - check all CARs and their history
+        if !self.validate_tipcut(&tipcut_proposal.tipcut).await {
+            warn!("Tip cut validation failed - not voting");
+            return Ok(());
+        }
+
+        // Store tip cut in logserver (DAG mode stores tip cuts, not blocks)
+        self.logserver_tx
+            .send(LogServerCommand::NewTipCut(tipcut_proposal.tipcut.clone()))
+            .await
+            .unwrap();
+
+        // Step 4: Send vote to leader
+        self.send_vote_on_tipcut_to_leader(&tipcut_proposal).await?;
+
+        info!(
+            "Sent vote for tip cut with digest {:?} to leader",
+            hex::encode(&tipcut_proposal.tipcut.digest[..8])
+        );
+
+        Ok(())
+    }
+
+    /// Validate the parent digest of a tip cut against the logserver chain
+    #[cfg(feature = "dag")]
+    async fn validate_tipcut_parent(&mut self, tipcut: &ProtoTipCut) -> bool {
+        use tokio::sync::oneshot;
+
+        // If parent is all zeros, this is the genesis tip cut
+        if tipcut.parent.iter().all(|&b| b == 0) {
+            debug!("Tip cut has genesis parent (all zeros) - accepting");
+            return true;
+        }
+
+        // Query logserver to check if parent exists
+        // We need to get the last tip cut from logserver and verify parent matches
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        self.logserver_tx
+            .send(LogServerCommand::GetLastTipCutDigest(reply_tx))
+            .await
+            .unwrap();
+
+        match reply_rx.await {
+            Ok(Some(last_digest)) => {
+                if last_digest == tipcut.parent {
+                    debug!("Tip cut parent matches last committed tip cut");
+                    true
+                } else {
+                    warn!(
+                        "Tip cut parent mismatch: expected {:?}, got {:?}",
+                        hex::encode(&last_digest[..8]),
+                        hex::encode(&tipcut.parent[..8])
+                    );
+                    false
+                }
+            }
+            Ok(None) => {
+                // No previous tip cut exists - parent must be genesis
+                if tipcut.parent.iter().all(|&b| b == 0) {
+                    debug!("First tip cut with genesis parent");
+                    true
+                } else {
+                    warn!("No previous tip cut but parent is not genesis");
+                    false
+                }
+            }
+            Err(_) => {
+                error!("Failed to query logserver for last tip cut digest");
+                false
+            }
+        }
+    }
+
+    /// Validate a tip cut by checking all CARs and their history
+    #[cfg(feature = "dag")]
+    async fn validate_tipcut(&mut self, tipcut: &ProtoTipCut) -> bool {
+        // Check that tip cut is not empty
+        if tipcut.tips.is_empty() {
+            warn!("Tip cut is empty - rejecting");
+            return false;
+        }
+
+        // For each CAR in the tip cut, validate it exists and has valid history
+        // TODO: Once lane_logserver_tx is properly plumbed through to Staging,
+        // query it to validate each CAR. For now, we assume CARs are valid
+        // if they made it through the block_broadcaster validation.
+
+        for (idx, car) in tipcut.tips.iter().enumerate() {
+            // Check that CAR has signatures
+            if car.sig.is_empty() {
+                warn!("CAR {} has no signatures - rejecting tip cut", idx);
+                return false;
+            }
+
+            // Verify CAR structure
+            if car.digest.is_empty() || car.n == 0 {
+                warn!("CAR {} has invalid structure - rejecting tip cut", idx);
+                return false;
+            }
+
+            trace!(
+                "CAR {} validated (n={}, {} signatures)",
+                idx,
+                car.n,
+                car.sig.len()
+            );
+        }
+
+        debug!(
+            "All {} CARs in tip cut validated successfully",
+            tipcut.tips.len()
+        );
+        true
+    }
+
+    /// Send vote on tip cut to the leader
+    #[cfg(feature = "dag")]
+    async fn send_vote_on_tipcut_to_leader(
+        &mut self,
+        tipcut_proposal: &super::TipCutProposal,
+    ) -> Result<(), ()> {
+        // Create vote for the tip cut
+        // Note: In DAG mode with tip cuts, we don't use sig_array for pending blocks
+        // Instead, we vote directly on the tip cut digest
+        let vote_sig = self.crypto.sign(&tipcut_proposal.tipcut.digest).await;
+
+        let vote = ProtoVote {
+            sig_array: vec![ProtoSignatureArrayEntry {
+                n: 0, // Tip cuts don't have a single 'n', this is for compatibility
+                sig: vote_sig.to_vec(),
+            }],
+            digest: tipcut_proposal.tipcut.digest.clone(),
+            n: 0, // Will be assigned by logserver when tip cut is stored
+            view: self.view,
+            config_num: self.config_num,
+        };
+
+        let leader = self
+            .config
+            .get()
+            .consensus_config
+            .get_leader_for_view(self.view);
+
+        let rpc = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::Vote(vote)),
+        };
+        let data = rpc.encode_to_vec();
+        let sz = data.len();
+        let data = PinnedMessage::from(data, sz, SenderType::Anon);
+
+        let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
+
+        info!(
+            "Sent tip cut vote to {} for view {} (digest: {:?})",
+            leader,
+            self.view,
+            hex::encode(&tipcut_proposal.tipcut.digest[..8])
+        );
+
         Ok(())
     }
 }

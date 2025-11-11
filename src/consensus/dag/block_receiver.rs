@@ -1,3 +1,9 @@
+/// Block Receiver
+/// Receives and processes AppendBlock messages from workers in the DAG dissemination layer.
+/// Key differences from ForkReceiver:
+/// - Handles single blocks instead of forks
+/// - Accepts messages from any worker (not just leader)
+/// - Maintains per-lane continuity tracking
 use std::{collections::HashMap, io::Error, sync::Arc};
 
 use log::{debug, info, warn};
@@ -7,11 +13,7 @@ use tokio::sync::{oneshot, Mutex};
 use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
-    proto::{
-        checkpoint::ProtoBackfillNack,
-        consensus::ProtoAppendBlock,
-        rpc::ProtoPayload,
-    },
+    proto::{checkpoint::ProtoBackfillNack, consensus::ProtoAppendBlock, rpc::ProtoPayload},
     rpc::{client::PinnedClient, MessageRef, SenderType},
     utils::{
         channel::{make_channel, Receiver, Sender},
@@ -200,22 +202,14 @@ impl BlockReceiver {
         // Check if this lane is waiting on NACK reply
         if let Some(stats) = self.lane_continuity.get(&lane_id) {
             if stats.waiting_on_nack_reply {
-                info!(
-                    "Possible AppendBlock after NACK for lane {}",
-                    lane_id
-                );
+                info!("Possible AppendBlock after NACK for lane {}", lane_id);
             }
         }
 
         // Check lane continuity
-        if self
-            .ensure_lane_continuity(&lane_id, &block)
-            .await
-            .is_err()
-        {
+        if self.ensure_lane_continuity(&lane_id, &block).await.is_err() {
             // Send NACK for this lane
-            self.send_lane_nack(lane_id.clone(), sender, block)
-                .await;
+            self.send_lane_nack(lane_id.clone(), sender, block).await;
             info!("Returning after sending NACK for lane {}", lane_id);
             return;
         }
@@ -403,16 +397,8 @@ impl BlockReceiver {
     }
 
     /// Send a NACK for a specific lane requesting backfill
-    async fn send_lane_nack(
-        &mut self,
-        lane_id: String,
-        sender: String,
-        block: ProtoAppendBlock,
-    ) {
-        info!(
-            "NACKing AppendBlock to {} for lane {}",
-            sender, lane_id
-        );
+    async fn send_lane_nack(&mut self, lane_id: String, sender: String, block: ProtoAppendBlock) {
+        info!("NACKing AppendBlock to {} for lane {}", sender, lane_id);
 
         // Mark this lane as waiting on NACK reply
         let lane_stats = self
@@ -438,27 +424,24 @@ impl BlockReceiver {
 
         let my_name = self.config.get().net_config.name.clone();
 
-        // TODO: Update ProtoBackfillNack to support lane-specific requests
-        // For now, we create a synthetic AppendEntries-like structure
-        // This will need to be updated when BackfillNack protocol is extended for DAG
+        // Use AppendBlockLane origin for DAG mode backfill
         let nack = ProtoBackfillNack {
-            hints,
+            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints }
+            )),
             last_index_needed,
             reply_name: my_name,
-            origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Ae(
-                // TODO: This is a temporary workaround - need to extend BackfillNack
-                // to support AppendBlock origin directly
-                crate::proto::consensus::ProtoAppendEntries {
-                    entry: Some(crate::proto::consensus::proto_append_entries::Entry::Fork(
-                        crate::proto::consensus::ProtoFork {
-                            serialized_blocks: block.block.map_or(vec![], |b| vec![b]),
-                        },
-                    )),
-                    commit_index: block.commit_index,
-                    view: block.view,
-                    view_is_stable: block.view_is_stable,
-                    config_num: block.config_num,
-                    is_backfill_response: false,
+            origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Abl(
+                crate::proto::consensus::ProtoAppendBlockLane {
+                    name: lane_id.clone(),
+                    ab: Some(crate::proto::consensus::ProtoAppendBlock {
+                        block: block.block,
+                        commit_index: block.commit_index,
+                        view: block.view,
+                        view_is_stable: block.view_is_stable,
+                        config_num: block.config_num,
+                        is_backfill_response: false,
+                    }),
                 },
             )),
         };

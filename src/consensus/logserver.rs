@@ -12,7 +12,9 @@ use crate::{
     crypto::CachedBlock,
     proto::{
         checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint},
-        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange},
+        consensus::{
+            HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoTipCut, ProtoViewChange,
+        },
         rpc::{proto_payload::Message, ProtoPayload},
     },
     rpc::{client::PinnedClient, MessageRef, PinnedMessage},
@@ -97,6 +99,10 @@ pub enum LogServerCommand {
     NewBlock(CachedBlock),
     Rollback(u64),
     UpdateBCI(u64),
+    #[cfg(feature = "dag")]
+    NewTipCut(ProtoTipCut),
+    #[cfg(feature = "dag")]
+    GetLastTipCutDigest(oneshot::Sender<Option<Vec<u8>>>),
 }
 
 pub struct LogServer {
@@ -115,6 +121,10 @@ pub struct LogServer {
 
     /// LFU read cache for GCed blocks.
     read_cache: ReadCache,
+
+    /// DAG mode: chain of tip cuts instead of blocks
+    #[cfg(feature = "dag")]
+    tipcut_log: VecDeque<ProtoTipCut>,
 }
 
 const LOGSERVER_READ_CACHE_WSS: usize = 100;
@@ -140,6 +150,8 @@ impl LogServer {
             log: VecDeque::new(),
             read_cache: ReadCache::new(LOGSERVER_READ_CACHE_WSS),
             bci: 0,
+            #[cfg(feature = "dag")]
+            tipcut_log: VecDeque::new(),
         }
     }
 
@@ -168,6 +180,16 @@ impl LogServer {
                     Some(LogServerCommand::UpdateBCI(n)) => {
                         trace!("Updating BCI to {}", n);
                         self.bci = n;
+                    },
+                    #[cfg(feature = "dag")]
+                    Some(LogServerCommand::NewTipCut(tipcut)) => {
+                        trace!("Received tip cut with {} CARs", tipcut.tips.len());
+                        self.handle_new_tipcut(tipcut).await;
+                    },
+                    #[cfg(feature = "dag")]
+                    Some(LogServerCommand::GetLastTipCutDigest(reply_tx)) => {
+                        let digest = self.tipcut_log.back().map(|tc| tc.digest.clone());
+                        let _ = reply_tx.send(digest);
                     },
                     None => {
                         error!("LogServerCommand channel closed");
@@ -251,7 +273,23 @@ impl LogServer {
 
     async fn respond_backfill(&mut self, backfill_req: ProtoBackfillNack) -> Result<(), ()> {
         let sender = backfill_req.reply_name;
-        let hints = backfill_req.hints;
+        
+        // Extract hints - traditional mode uses 'blocks', ignore DAG 'lanes'
+        let hints = match backfill_req.hints {
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(wrapper)) => {
+                wrapper.hints
+            }
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lanes(_)) => {
+                // DAG mode backfill - not handled by traditional logserver
+                warn!("Received DAG-style backfill request (lanes) in traditional mode - ignoring");
+                return Ok(());
+            }
+            None => {
+                warn!("Backfill request has no hints");
+                return Ok(());
+            }
+        };
+        
         let existing_fork = match &backfill_req.origin {
             Some(Origin::Ae(ae)) => match &ae.entry {
                 Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
@@ -268,6 +306,12 @@ impl LogServer {
                     return Ok(());
                 }
             },
+            
+            Some(Origin::Abl(_)) => {
+                // DAG mode backfill - not handled by traditional logserver
+                warn!("Received DAG-style backfill request (AppendBlockLane) in traditional mode - ignoring");
+                return Ok(());
+            }
 
             None => {
                 warn!("Malformed request");
@@ -304,6 +348,13 @@ impl LogServer {
                     ..vc
                 })),
             },
+            
+            Origin::Abl(_) => {
+                // This case should have been filtered out earlier
+                // If we reach here, there's a logic error
+                error!("DAG-style backfill request reached traditional logserver payload construction");
+                return Ok(());
+            }
         };
 
         // Send the payload to the sender.
@@ -485,5 +536,36 @@ impl LogServer {
 
         // Clean up read cache.
         self.read_cache.cache.retain(|k, _| *k <= n);
+    }
+
+    #[cfg(feature = "dag")]
+    async fn handle_new_tipcut(&mut self, tipcut: ProtoTipCut) {
+        // In DAG mode, store tip cuts instead of blocks
+        info!(
+            "Storing tip cut with {} CARs (digest: {:?})",
+            tipcut.tips.len(),
+            hex::encode(&tipcut.digest[..8])
+        );
+
+        // Verify parent relationship if not the first tip cut
+        if !self.tipcut_log.is_empty() {
+            let last_tipcut = self.tipcut_log.back().unwrap();
+            if tipcut.parent != last_tipcut.digest {
+                error!(
+                    "Tip cut parent mismatch: expected {:?}, got {:?}",
+                    hex::encode(&last_tipcut.digest[..8]),
+                    hex::encode(&tipcut.parent[..8])
+                );
+                return;
+            }
+        } else {
+            // First tip cut should have genesis parent (all zeros)
+            if !tipcut.parent.iter().all(|&b| b == 0) {
+                error!("First tip cut should have genesis parent");
+                return;
+            }
+        }
+
+        self.tipcut_log.push_back(tipcut);
     }
 }

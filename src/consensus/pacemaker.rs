@@ -284,11 +284,13 @@ impl Pacemaker {
         hints: Vec<ProtoBlockHint>,
     ) -> Result<(), ()> {
         let nack = ProtoBackfillNack {
-            hints,
             last_index_needed: self.bci,
             reply_name: self.config.get().net_config.name.clone(),
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Vc(
                 vc,
+            )),
+            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
             )),
         };
         info!("Nack: {:?}", nack);

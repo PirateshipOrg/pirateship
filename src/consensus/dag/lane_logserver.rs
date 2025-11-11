@@ -1,3 +1,5 @@
+/// Lane LogServer for DAG consensus protocol.
+/// Maintains per-lane logs of blocks, handles backfill requests, and serves block queries.
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
@@ -90,8 +92,8 @@ pub enum LaneLogServerQuery {
         Sender<bool>,
     ),
     GetHints(
-        String,  /* lane_id (sender name) */
-        u64,     /* last needed block.n */
+        String, /* lane_id (sender name) */
+        u64,    /* last needed block.n */
         Sender<Vec<ProtoBlockHint>>,
     ),
 }
@@ -272,74 +274,160 @@ impl LaneLogServer {
 
     async fn respond_backfill(&mut self, backfill_req: ProtoBackfillNack) -> Result<(), ()> {
         let sender = backfill_req.reply_name;
-        let hints = backfill_req.hints;
-        let existing_fork = match &backfill_req.origin {
-            Some(Origin::Ae(ae)) => match &ae.entry {
-                Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
-                _ => {
-                    warn!("Malformed request - no fork in AppendEntries");
-                    return Ok(());
-                }
-            },
 
-            Some(Origin::Vc(vc)) => match vc.fork.as_ref() {
-                Some(fork) => fork,
-                None => {
-                    warn!("Malformed request");
-                    return Ok(());
-                }
-            },
+        // Extract hints from wrapper
+        let hints = match backfill_req.hints {
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(wrapper)) => {
+                wrapper.hints
+            }
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lanes(_)) => {
+                warn!("Lane hints not yet supported in DAG backfill");
+                return Ok(());
+            }
+            None => {
+                vec![]
+            }
+        };
+
+        // Handle different origin types
+        match &backfill_req.origin {
+            Some(Origin::Abl(abl)) => {
+                // AppendBlockLane is the proper DAG mode path
+                self.respond_backfill_abl(sender, abl, hints, backfill_req.last_index_needed)
+                    .await
+            }
+
+            Some(Origin::Ae(ae)) => {
+                // Traditional AppendEntries backfill (for backward compatibility)
+                // QUESTION: In DAG mode, should we even support AE backfill?
+                self.respond_backfill_ae(sender, ae, hints, backfill_req.last_index_needed)
+                    .await
+            }
+
+            Some(Origin::Vc(_vc)) => {
+                // ViewChange backfill not supported in DAG mode
+                // QUESTION: Is this correct...?
+                warn!("ViewChange backfill not supported in DAG mode");
+                Ok(())
+            }
 
             None => {
-                warn!("Malformed request");
+                warn!("Malformed backfill request - no origin");
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle backfill for AppendBlockLane (DAG mode)
+    async fn respond_backfill_abl(
+        &mut self,
+        sender: String,
+        abl: &crate::proto::consensus::ProtoAppendBlockLane,
+        hints: Vec<ProtoBlockHint>,
+        last_index_needed: u64,
+    ) -> Result<(), ()> {
+        // Extract lane_id and AppendBlock from the request
+        let lane_id = abl.name.clone();
+        let ab = match &abl.ab {
+            Some(ab) => ab,
+            None => {
+                warn!("Malformed AppendBlockLane request - no AppendBlock");
                 return Ok(());
             }
         };
 
-        // In DAG mode, the lane_id is the sender name
-        // The backfill request should specify which lane (sender) needs backfill
-        // For now, we'll use the reply_name (sender of the NACK) as a proxy
-        // TODO: Extend ProtoBackfillNack to include lane_id explicitly
-        let lane_id = sender.clone();
+        // The requesting node has a block at some index and needs earlier blocks
+        // Extract the block_n from the AppendBlock request
+        let requester_block_n = match &ab.block {
+            Some(block) => block.n,
+            None => ab.commit_index, // Fallback to commit_index if no block
+        };
 
-        let last_n = existing_fork.serialized_blocks.last().unwrap().n;
-        let first_n = backfill_req.last_index_needed;
+        let first_n = last_index_needed;
+        let last_n = requester_block_n;
 
         // Get the requested block from this lane
         let requested_block = self
             .get_block_for_backfill(&lane_id, first_n, last_n, hints)
             .await;
 
-        let payload = match backfill_req.origin.unwrap() {
-            Origin::Ae(ae) => {
-                if let Some(block) = requested_block {
-                    ProtoPayload {
-                        message: Some(Message::AppendBlock(ProtoAppendBlock {
-                            block: Some(block),
-                            commit_index: ae.commit_index,
-                            view: ae.view,
-                            view_is_stable: ae.view_is_stable,
-                            config_num: ae.config_num,
-                            is_backfill_response: true,
-                        })),
-                    }
-                } else {
-                    warn!("Could not find requested block for backfill");
-                    return Ok(());
-                }
+        // Construct response as AppendBlock with backfill flag
+        let payload = if let Some(block) = requested_block {
+            ProtoPayload {
+                message: Some(Message::AppendBlock(ProtoAppendBlock {
+                    block: Some(block),
+                    commit_index: ab.commit_index,
+                    view: ab.view,
+                    view_is_stable: ab.view_is_stable,
+                    config_num: ab.config_num,
+                    is_backfill_response: true,
+                })),
             }
+        } else {
+            warn!(
+                "Could not find requested block for backfill in lane {}",
+                lane_id
+            );
+            return Ok(());
+        };
 
-            Origin::Vc(_vc) => {
-                // ViewChange still uses forks, so we need to keep fork logic for VC
-                // For now, we'll skip VC backfill in DAG mode or handle it separately
-                warn!("ViewChange backfill not yet implemented for DAG mode");
+        // Send the payload to the sender
+        let buf = payload.encode_to_vec();
+        let _ = PinnedClient::send(
+            &self.client,
+            &sender,
+            MessageRef(&buf, buf.len(), &crate::rpc::SenderType::Anon),
+        )
+        .await;
+
+        Ok(())
+    }
+
+    /// Handle backfill for AppendEntries (backward compatibility)
+    async fn respond_backfill_ae(
+        &mut self,
+        sender: String,
+        ae: &crate::proto::consensus::ProtoAppendEntries,
+        hints: Vec<ProtoBlockHint>,
+        last_index_needed: u64,
+    ) -> Result<(), ()> {
+        let existing_fork = match &ae.entry {
+            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
+            _ => {
+                warn!("Malformed request - no fork in AppendEntries");
                 return Ok(());
             }
         };
 
-        // Send the payload to the sender.
-        let buf = payload.encode_to_vec();
+        // In DAG mode with AE origin, use the sender name as lane_id
+        let lane_id = sender.clone();
 
+        let last_n = existing_fork.serialized_blocks.last().unwrap().n;
+        let first_n = last_index_needed;
+
+        // Get the requested block from this lane
+        let requested_block = self
+            .get_block_for_backfill(&lane_id, first_n, last_n, hints)
+            .await;
+
+        let payload = if let Some(block) = requested_block {
+            ProtoPayload {
+                message: Some(Message::AppendBlock(ProtoAppendBlock {
+                    block: Some(block),
+                    commit_index: ae.commit_index,
+                    view: ae.view,
+                    view_is_stable: ae.view_is_stable,
+                    config_num: ae.config_num,
+                    is_backfill_response: true,
+                })),
+            }
+        } else {
+            warn!("Could not find requested block for backfill");
+            return Ok(());
+        };
+
+        // Send the payload to the sender
+        let buf = payload.encode_to_vec();
         let _ = PinnedClient::send(
             &self.client,
             &sender,

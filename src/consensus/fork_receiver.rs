@@ -532,11 +532,13 @@ impl ForkReceiver {
         let my_name = self.config.get().net_config.name.clone();
 
         let nack = ProtoBackfillNack {
-            hints,
             last_index_needed,
             reply_name: my_name,
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Ae(
                 ae,
+            )),
+            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
             )),
         };
 

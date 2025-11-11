@@ -24,15 +24,32 @@ message ProtoBlockHint {
     bytes digest = 2;
 }
 
+message ProtoLaneBlockHints {
+    string name = 1;
+    repeated ProtoBlockHint hints = 2;
+}
+
+// Wrapper for repeated block hints (for oneof compatibility)
+message ProtoBlockHintsWrapper {
+    repeated ProtoBlockHint hints = 1;
+}
+
+// Wrapper for repeated lane hints (for oneof compatibility)
+message ProtoLaneBlockHintsWrapper {
+    repeated ProtoLaneBlockHints lane_hints = 1;
+}
+
 message ProtoBackfillNack {
     oneof origin {
         proto.consensus.ProtoAppendEntries ae = 1;
         proto.consensus.ProtoViewChange vc = 2;
+        proto.consensus.ProtoAppendBlockLane abl = 3;
     }
 
-    repeated ProtoBlockHint hints = 3;
-    uint64 last_index_needed = 4;
-    string reply_name = 5;
-
-
+    oneof hints {
+        ProtoBlockHintsWrapper blocks = 4;
+        ProtoLaneBlockHintsWrapper lanes = 5;
+    }
+    uint64 last_index_needed = 6;
+    string reply_name = 7;
 }
