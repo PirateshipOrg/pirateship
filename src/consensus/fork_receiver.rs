@@ -1,7 +1,7 @@
 use crate::{crypto::FutureHash, utils::channel::make_channel};
 use std::{collections::VecDeque, io::Error, sync::Arc};
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 

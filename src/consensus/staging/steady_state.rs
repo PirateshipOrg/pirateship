@@ -16,7 +16,7 @@ use crate::{
     proto::{
         consensus::{
             proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
-            ProtoSignatureArrayEntry, ProtoVote,
+            ProtoSignatureArrayEntry, ProtoTipCut, ProtoVote,
         },
         rpc::ProtoPayload,
     },

@@ -34,7 +34,7 @@ use crate::{
 };
 
 #[cfg(feature = "dag")]
-use crate::proto::consensus::{ProtoAppendBlock, ProtoBlockAck, ProtoTipCut};
+use crate::proto::consensus::{ProtoAppendBlock, ProtoBlockAck, ProtoTipCut, ProtoVote};
 use app::{AppEngine, Application};
 use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
@@ -78,8 +78,6 @@ pub struct ConsensusServerContext {
     block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
     #[cfg(feature = "dag")]
     tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
-    #[cfg(feature = "dag")]
-    tip_cut_vote_tx: Sender<(ProtoTipCutVote, SenderType)>,
 
     vote_receiver_tx: Sender<VoteWithSender>,
     view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
@@ -121,7 +119,6 @@ impl PinnedConsensusServerContext {
         block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
         block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
         tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
-        tip_cut_vote_tx: Sender<(ProtoTipCutVote, SenderType)>,
         vote_receiver_tx: Sender<VoteWithSender>,
         view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
         backfill_request_tx: Sender<ProtoBackfillNack>,
@@ -133,7 +130,6 @@ impl PinnedConsensusServerContext {
             block_receiver_tx,
             block_ack_tx,
             tip_cut_tx,
-            tip_cut_vote_tx,
             vote_receiver_tx,
             view_change_receiver_tx,
             backfill_request_tx,
@@ -319,10 +315,26 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     storage: Arc<Mutex<StorageService<RocksDBStorageEngine>>>,
     crypto: CryptoService,
 
-    /// This will be owned by the task that runs batch_proposer
-    /// So the lock will be taken exactly ONCE and held forever.
+    // Traditional mode components
+    #[cfg(not(feature = "dag"))]
     batch_proposer: Arc<Mutex<BatchProposer>>,
+    #[cfg(not(feature = "dag"))]
     block_sequencer: Arc<Mutex<BlockSequencer>>,
+    // DAG mode components
+    #[cfg(feature = "dag")]
+    dag_batch_proposer: Arc<Mutex<dag::batch_proposal::BatchProposer>>,
+    #[cfg(feature = "dag")]
+    dag_block_broadcaster: Arc<Mutex<dag::block_broadcaster::DagBlockBroadcaster>>,
+    #[cfg(feature = "dag")]
+    dag_block_receiver: Arc<Mutex<dag::block_receiver::BlockReceiver>>,
+    #[cfg(feature = "dag")]
+    dag_lane_staging: Arc<Mutex<dag::lane_staging::LaneStaging>>,
+    #[cfg(feature = "dag")]
+    dag_lane_logserver: Arc<Mutex<dag::lane_logserver::LaneLogServer>>,
+    #[cfg(feature = "dag")]
+    dag_tip_cut_proposal: Arc<Mutex<dag::tip_cut_proposal::TipCutProposal>>,
+
+    // Shared components (used in both modes, but behavior may differ)
     block_broadcaster: Arc<Mutex<BlockBroadcaster>>,
     staging: Arc<Mutex<Staging>>,
     fork_receiver: Arc<Mutex<ForkReceiver>>,
@@ -354,6 +366,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     ///  /\_/\
     /// ( o.o )
     ///  > ^ <
+    #[cfg(not(feature = "dag"))]
     pub fn mew(
         config: Config,
         batch_proposer_tx: Sender<TxWithAckChanTag>,
@@ -573,6 +586,362 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         }
     }
 
+    /// DAG mode version of mew()
+    ///  /\_/\
+    /// ( ^.^ )  <-- DAG cat is different!
+    ///  > ^ <
+    #[cfg(feature = "dag")]
+    pub fn mew(
+        config: Config,
+        batch_proposer_tx: Sender<TxWithAckChanTag>,
+        batch_proposer_rx: Receiver<TxWithAckChanTag>,
+    ) -> Self {
+        let _chan_depth = config.rpc_config.channel_depth as usize;
+        let _num_crypto_tasks = config.consensus_config.num_crypto_workers;
+
+        let key_store = KeyStore::new(
+            &config.rpc_config.allowed_keylist_path,
+            &config.rpc_config.signing_priv_key_path,
+        );
+        let config = AtomicConfig::new(config);
+        let keystore = AtomicKeyStore::new(key_store);
+        let mut crypto = CryptoService::new(_num_crypto_tasks, keystore.clone(), config.clone());
+        crypto.run();
+        let storage_config = &config.get().consensus_config.log_storage_config;
+        let storage = match storage_config {
+            rocksdb_config @ crate::config::StorageConfig::RocksDB(_) => {
+                let _db = RocksDBStorageEngine::new(rocksdb_config.clone());
+                StorageService::new(_db, _chan_depth)
+            }
+            crate::config::StorageConfig::FileStorage(_) => {
+                panic!("File storage not supported!");
+            }
+        };
+
+        // Create clients for different components
+        let client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let staging_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let logserver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let pacemaker_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let dag_block_receiver_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let dag_block_broadcaster_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let dag_lane_logserver_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let dag_lane_staging_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let dag_tip_cut_proposal_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+
+        #[cfg(feature = "extra_2pc")]
+        let extra_2pc_client = Client::new_atomic(config.clone(), keystore.clone(), true, 50);
+
+        // DAG batch proposal channels
+        let (dag_batch_proposer_command_tx, dag_batch_proposer_command_rx) =
+            make_channel(_chan_depth);
+        let (dag_raw_batch_tx, dag_raw_batch_rx) = make_channel(_chan_depth);
+
+        // DAG block preparation channels (TODO: Need to implement block preparation from batches)
+        // For now, creating placeholder channels - will need a component to convert raw batches to prepared blocks
+        let (dag_prepared_block_tx, dag_prepared_block_rx) = make_channel(_chan_depth);
+
+        // DAG block broadcasting channels
+        let (dag_other_block_tx, dag_other_block_rx) = make_channel(_chan_depth);
+        let (dag_broadcaster_control_command_tx, dag_broadcaster_control_command_rx) =
+            make_channel(_chan_depth);
+
+        // DAG block receiver channels
+        let (dag_block_rx, dag_block_rx_receiver) = make_channel(_chan_depth);
+        let (dag_block_receiver_command_tx, dag_block_receiver_command_rx) =
+            make_channel(_chan_depth);
+
+        // DAG lane staging channels
+        let (dag_block_ack_rx, dag_block_ack_rx_receiver) = make_channel(_chan_depth);
+        let (dag_lane_staging_tx, dag_lane_staging_rx) = make_channel(_chan_depth);
+        let (dag_lane_staging_query_tx, dag_lane_staging_query_rx) = make_channel(_chan_depth);
+
+        // DAG lane logserver channels
+        let (dag_lane_logserver_tx, dag_lane_logserver_rx) = make_channel(_chan_depth);
+        let (dag_lane_logserver_query_tx, dag_lane_logserver_query_rx) = make_channel(_chan_depth);
+        let (dag_lane_backfill_request_tx, dag_lane_backfill_request_rx) =
+            make_channel(_chan_depth);
+        let (dag_lane_gc_tx, dag_lane_gc_rx) = make_channel(_chan_depth);
+
+        // DAG tip cut proposal channels
+        let (dag_tip_cut_proposal_command_tx, dag_tip_cut_proposal_command_rx) =
+            make_channel(_chan_depth);
+        let (dag_tip_cut_tx, dag_tip_cut_rx) = make_channel(_chan_depth);
+
+        // Shared components channels (used by both DAG and tip cut consensus)
+        let (client_reply_tx, client_reply_rx) = make_channel(_chan_depth);
+        let (client_reply_command_tx, client_reply_command_rx) = make_channel(_chan_depth);
+        let (app_tx, app_rx) = make_channel(_chan_depth);
+        let (unlogged_tx, unlogged_rx) = make_channel(_chan_depth);
+
+        // Tip cut consensus channels (reusing traditional consensus components for tip cuts)
+        let (staging_tx, staging_rx) = make_channel(_chan_depth);
+        let (vote_tx, vote_rx) = make_channel(_chan_depth);
+        let (view_change_tx, view_change_rx) = make_channel(_chan_depth);
+        let (pacemaker_cmd_tx, pacemaker_cmd_rx) = make_channel(_chan_depth);
+        let (pacemaker_cmd_tx2, pacemaker_cmd_rx2) = make_channel(_chan_depth);
+        let (logserver_tx, logserver_rx) = make_channel(_chan_depth);
+        let (logserver_query_tx, logserver_query_rx) = make_channel(_chan_depth);
+        let (backfill_request_tx, backfill_request_rx) = make_channel(_chan_depth);
+        let (gc_tx, gc_rx) = make_channel(_chan_depth);
+        let (qc_tx, qc_rx) = unbounded_channel(); // QC for tip cut consensus
+
+        // Tip cut proposal uses block_broadcaster-like interface
+        // In DAG mode, tip cuts are proposed through AppendEntries (like forks in traditional mode)
+        let (tip_cut_broadcast_control_tx, tip_cut_broadcast_control_rx) =
+            make_channel(_chan_depth);
+        let (tip_cut_sequencer_control_tx, tip_cut_sequencer_control_rx) =
+            make_channel(_chan_depth);
+        let (tip_cut_receiver_command_tx, tip_cut_receiver_command_rx) = make_channel(_chan_depth);
+
+        // Crypto and storage connectors
+        let dag_block_broadcaster_crypto = crypto.get_connector();
+        let dag_block_broadcaster_crypto2 = crypto.get_connector();
+        let dag_block_broadcaster_storage = storage.get_connector(dag_block_broadcaster_crypto);
+        let dag_block_receiver_crypto = crypto.get_connector();
+        let dag_lane_staging_crypto = crypto.get_connector();
+        let dag_lane_logserver_crypto = crypto.get_connector();
+        let dag_lane_logserver_storage = storage.get_connector(dag_lane_logserver_crypto);
+        let staging_crypto = crypto.get_connector();
+        let logserver_crypto = crypto.get_connector();
+        let logserver_storage = storage.get_connector(logserver_crypto);
+        let pacemaker_crypto = crypto.get_connector();
+
+        #[cfg(feature = "extra_2pc")]
+        let (extra_2pc_command_tx, extra_2pc_command_rx) = make_channel(10 * _chan_depth);
+        #[cfg(feature = "extra_2pc")]
+        let (extra_2pc_phase_message_tx, extra_2pc_phase_message_rx) =
+            make_channel(10 * _chan_depth);
+        #[cfg(feature = "extra_2pc")]
+        let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
+
+        // Create server context for RPC handling
+        let ctx = PinnedConsensusServerContext::new(
+            config.clone(),
+            keystore.clone(),
+            batch_proposer_tx.clone(),
+            dag_block_rx,
+            dag_block_ack_rx,
+            dag_tip_cut_tx,
+            vote_tx,
+            view_change_tx,
+            backfill_request_tx,
+        );
+
+        // Create DAG components
+        let dag_batch_proposer = dag::batch_proposal::BatchProposer::new(
+            config.clone(),
+            batch_proposer_rx,
+            dag_raw_batch_tx, // TODO: This needs to connect to a block preparer component
+            client_reply_command_tx.clone(),
+            unlogged_tx,
+            dag_batch_proposer_command_rx,
+        );
+
+        // TODO: Need to add a DAG block sequencer/preparer component here that:
+        // 1. Receives raw batches from dag_batch_proposer
+        // 2. Prepares CachedBlocks
+        // 3. Sends prepared blocks to dag_block_broadcaster via oneshot channels
+
+        let dag_block_broadcaster = dag::block_broadcaster::DagBlockBroadcaster::new(
+            config.clone(),
+            dag_block_broadcaster_client.into(),
+            dag_block_broadcaster_crypto2,
+            dag_prepared_block_rx, // TODO: Connect to block preparer output
+            dag_other_block_rx,
+            dag_broadcaster_control_command_rx,
+            dag_block_broadcaster_storage,
+            dag_lane_staging_tx,
+            dag_block_receiver_command_tx,
+            app_tx.clone(),
+        );
+
+        let dag_block_receiver = dag::block_receiver::BlockReceiver::new(
+            config.clone(),
+            dag_block_receiver_crypto,
+            dag_block_receiver_client.into(),
+            dag_block_rx_receiver,
+            dag_block_receiver_command_rx,
+            dag_other_block_tx,
+            dag_lane_logserver_query_tx.clone(),
+        );
+
+        let dag_lane_staging = dag::lane_staging::LaneStaging::new(
+            config.clone(),
+            dag_lane_staging_client.into(),
+            dag_lane_staging_crypto,
+            dag_lane_staging_rx,
+            dag_block_ack_rx_receiver,
+            dag_lane_staging_query_rx,
+            client_reply_command_tx.clone(),
+            app_tx.clone(),
+            dag_lane_logserver_tx,
+        );
+
+        let dag_lane_logserver = dag::lane_logserver::LaneLogServer::new(
+            config.clone(),
+            dag_lane_logserver_client.into(),
+            dag_lane_logserver_rx,
+            dag_lane_backfill_request_rx,
+            dag_lane_gc_rx,
+            dag_lane_logserver_query_rx,
+            dag_lane_logserver_storage,
+        );
+
+        let dag_tip_cut_proposal = dag::tip_cut_proposal::TipCutProposal::new(
+            config.clone(),
+            dag_tip_cut_proposal_client.into(),
+            dag_lane_staging_query_tx,
+            dag_tip_cut_proposal_command_rx,
+        );
+
+        // Create shared components that work differently in DAG mode
+        // In DAG mode, block_broadcaster and fork_receiver handle tip cuts (via AppendEntries)
+        // instead of traditional forks
+        let block_broadcaster_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let fork_receiver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let block_broadcaster_crypto = crypto.get_connector();
+        let block_broadcaster_crypto2 = crypto.get_connector();
+        let block_broadcaster_storage = storage.get_connector(block_broadcaster_crypto);
+        let fork_receiver_crypto = crypto.get_connector();
+
+        let (tip_cut_fork_tx, tip_cut_fork_rx) = make_channel(_chan_depth);
+        let (tip_cut_fork_receiver_command_tx, tip_cut_fork_receiver_command_rx) = make_channel(_chan_depth);
+        let (tip_cut_other_block_tx, tip_cut_other_block_rx) = make_channel(_chan_depth);
+        let (tip_cut_block_broadcaster_rx_chan, tip_cut_block_broadcaster_rx) = make_channel(_chan_depth);
+
+        let block_broadcaster = BlockBroadcaster::new(
+            config.clone(),
+            block_broadcaster_client.into(),
+            block_broadcaster_crypto2,
+            tip_cut_block_broadcaster_rx,
+            tip_cut_other_block_rx,
+            tip_cut_broadcast_control_rx,
+            block_broadcaster_storage,
+            staging_tx.clone(),
+            tip_cut_fork_receiver_command_tx.clone(),
+            app_tx.clone(),
+        );
+
+        let fork_receiver = ForkReceiver::new(
+            config.clone(),
+            fork_receiver_crypto,
+            fork_receiver_client.into(),
+            tip_cut_fork_rx,
+            tip_cut_fork_receiver_command_rx,
+            tip_cut_other_block_tx,
+            logserver_query_tx.clone(),
+        );
+
+        // Create shared components (staging processes tip cuts, logserver stores tip cuts)
+        // In DAG mode, Staging handles tip cut consensus (like fork consensus in traditional mode)
+        let staging = Staging::new(
+            config.clone(),
+            staging_client.into(),
+            staging_crypto,
+            staging_rx,
+            vote_rx,
+            pacemaker_cmd_rx,
+            pacemaker_cmd_tx2,
+            client_reply_command_tx.clone(),
+            app_tx.clone(),
+            tip_cut_broadcast_control_tx, // Control commands for tip cut broadcasting
+            tip_cut_sequencer_control_tx, // Control commands for tip cut sequencing
+            tip_cut_receiver_command_tx,  // Control commands for tip cut receiver
+            qc_tx,                        // QC sender for tip cut consensus
+            dag_batch_proposer_command_tx, // Control batch proposer
+            logserver_tx,
+            #[cfg(feature = "extra_2pc")]
+            extra_2pc_command_tx,
+            #[cfg(feature = "extra_2pc")]
+            extra_2pc_staging_rx,
+        );
+
+        let app = Application::new(
+            config.clone(),
+            app_rx,
+            unlogged_rx,
+            client_reply_command_tx.clone(),
+            gc_tx.clone(),
+            #[cfg(feature = "extra_2pc")]
+            extra_2pc_phase_message_tx,
+        );
+
+        let client_reply =
+            ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
+
+        let logserver = LogServer::new(
+            config.clone(),
+            logserver_client.into(),
+            logserver_rx,
+            backfill_request_rx,
+            gc_rx,
+            logserver_query_rx,
+            logserver_storage,
+        );
+
+        let pacemaker = Pacemaker::new(
+            config.clone(),
+            pacemaker_client.into(),
+            pacemaker_crypto,
+            view_change_rx,
+            pacemaker_cmd_tx,
+            pacemaker_cmd_rx2,
+            logserver_query_tx,
+        );
+
+        #[cfg(feature = "extra_2pc")]
+        let extra_2pc = extra_2pc::TwoPCHandler::new(
+            config.clone(),
+            extra_2pc_client.into(),
+            storage.get_connector(crypto.get_connector()),
+            storage.get_connector(crypto.get_connector()),
+            extra_2pc_command_rx,
+            extra_2pc_phase_message_rx,
+            extra_2pc_staging_tx,
+        );
+
+        let handles = JoinSet::new();
+
+        Self {
+            config: config.clone(),
+            keystore: keystore.clone(),
+            server: Arc::new(Server::new_atomic(config.clone(), ctx, keystore.clone())),
+
+            // DAG components
+            dag_batch_proposer: Arc::new(Mutex::new(dag_batch_proposer)),
+            dag_block_broadcaster: Arc::new(Mutex::new(dag_block_broadcaster)),
+            dag_block_receiver: Arc::new(Mutex::new(dag_block_receiver)),
+            dag_lane_staging: Arc::new(Mutex::new(dag_lane_staging)),
+            dag_lane_logserver: Arc::new(Mutex::new(dag_lane_logserver)),
+            dag_tip_cut_proposal: Arc::new(Mutex::new(dag_tip_cut_proposal)),
+
+            // Shared components (behavior differs in DAG mode)
+            block_broadcaster: Arc::new(Mutex::new(block_broadcaster)),
+            fork_receiver: Arc::new(Mutex::new(fork_receiver)),
+            staging: Arc::new(Mutex::new(staging)),
+            app: Arc::new(Mutex::new(app)),
+            client_reply: Arc::new(Mutex::new(client_reply)),
+            logserver: Arc::new(Mutex::new(logserver)),
+            pacemaker: Arc::new(Mutex::new(pacemaker)),
+
+            #[cfg(feature = "extra_2pc")]
+            extra_2pc: Arc::new(Mutex::new(extra_2pc)),
+
+            crypto,
+            storage: Arc::new(Mutex::new(storage)),
+            __sink_handles: handles,
+
+            batch_proposer_tx,
+        }
+    }
+
+    #[cfg(not(feature = "dag"))]
     pub async fn run(&mut self) -> JoinSet<()> {
         let server = self.server.clone();
         let batch_proposer = self.batch_proposer.clone();
@@ -638,6 +1007,121 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         {
             let extra_2pc = self.extra_2pc.clone();
             handles.spawn(async move {
+                extra_2pc::TwoPCHandler::run(extra_2pc).await;
+            });
+        }
+
+        handles
+    }
+
+    #[cfg(feature = "dag")]
+    pub async fn run(&mut self) -> JoinSet<()> {
+        let server = self.server.clone();
+        let storage = self.storage.clone();
+        
+        // DAG components
+        let dag_batch_proposer = self.dag_batch_proposer.clone();
+        let dag_block_broadcaster = self.dag_block_broadcaster.clone();
+        let dag_block_receiver = self.dag_block_receiver.clone();
+        let dag_lane_staging = self.dag_lane_staging.clone();
+        let dag_lane_logserver = self.dag_lane_logserver.clone();
+        let dag_tip_cut_proposal = self.dag_tip_cut_proposal.clone();
+        
+        // Shared components (behavior differs in DAG mode - handle tip cuts)
+        let block_broadcaster = self.block_broadcaster.clone();
+        let fork_receiver = self.fork_receiver.clone();
+        let staging = self.staging.clone();
+        let app = self.app.clone();
+        let client_reply = self.client_reply.clone();
+        let logserver = self.logserver.clone();
+        let pacemaker = self.pacemaker.clone();
+
+        let mut handles = JoinSet::new();
+
+        // Storage service
+        handles.spawn(async move {
+            let mut storage = storage.lock().await;
+            storage.run().await;
+        });
+
+        // RPC server
+        handles.spawn(async move {
+            let _ = Server::<PinnedConsensusServerContext>::run(server).await;
+        });
+
+        // DAG workflow components
+        handles.spawn(async move {
+            info!("Starting DAG BatchProposer");
+            dag::batch_proposal::BatchProposer::run(dag_batch_proposer).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG BlockBroadcaster");
+            dag::block_broadcaster::DagBlockBroadcaster::run(dag_block_broadcaster).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG BlockReceiver");
+            dag::block_receiver::BlockReceiver::run(dag_block_receiver).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG LaneStaging");
+            dag::lane_staging::LaneStaging::run(dag_lane_staging).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG LaneLogServer");
+            dag::lane_logserver::LaneLogServer::run(dag_lane_logserver).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG TipCutProposal");
+            dag::tip_cut_proposal::TipCutProposal::run(dag_tip_cut_proposal).await;
+        });
+
+        // Tip cut consensus components (shared, handle tip cuts in DAG mode)
+        handles.spawn(async move {
+            info!("Starting BlockBroadcaster (for tip cuts)");
+            BlockBroadcaster::run(block_broadcaster).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting ForkReceiver (for tip cuts)");
+            ForkReceiver::run(fork_receiver).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting Staging (for tip cuts)");
+            Staging::run(staging).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting LogServer (for tip cuts)");
+            LogServer::run(logserver).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting Pacemaker");
+            Pacemaker::run(pacemaker).await;
+        });
+
+        // Execution and client response components
+        handles.spawn(async move {
+            info!("Booting up Application");
+            Application::run(app).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting ClientReplyHandler");
+            ClientReplyHandler::run(client_reply).await;
+        });
+
+        #[cfg(feature = "extra_2pc")]
+        {
+            let extra_2pc = self.extra_2pc.clone();
+            handles.spawn(async move {
+                info!("Starting Extra2PC Handler");
                 extra_2pc::TwoPCHandler::run(extra_2pc).await;
             });
         }

@@ -32,11 +32,16 @@ use super::{
 };
 
 #[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoTipCut;
+
+#[cfg(feature = "dag")]
 use super::{fork_receiver::MultipartTipCut, staging::TipCutProposal};
 
 pub enum BlockBroadcasterCommand {
     UpdateCI(u64),
     NextAEForkPrefix(Vec<oneshot::Receiver<Result<CachedBlock, Error>>>),
+    #[cfg(feature = "dag")]
+    BroadcastTipCut(ProtoTipCut, u64, bool, u64), // (tipcut, view, view_is_stable, config_num)
 }
 
 pub struct BlockBroadcaster {
@@ -243,6 +248,10 @@ impl BlockBroadcaster {
                     let block = block.await.unwrap().expect("Failed to get block");
                     self.fork_prefix_buffer.push(block);
                 }
+            }
+            #[cfg(feature = "dag")]
+            BlockBroadcasterCommand::BroadcastTipCut(tipcut, view, view_is_stable, config_num) => {
+                self.process_my_tipcut(tipcut, view, view_is_stable, config_num).await?;
             }
         }
 
@@ -472,6 +481,49 @@ impl BlockBroadcaster {
         Ok(())
     }
 
+    /// Process and broadcast our own tip cut proposal (DAG mode only)
+    /// This is called when the local node (as leader) proposes a tip cut for consensus
+    #[cfg(feature = "dag")]
+    async fn process_my_tipcut(
+        &mut self,
+        tipcut: ProtoTipCut,
+        view: u64,
+        view_is_stable: bool,
+        config_num: u64,
+    ) -> Result<(), Error> {
+        info!(
+            "Broadcasting my TipCut with {} CARs for view {} (ci={})",
+            tipcut.tips.len(),
+            view,
+            self.ci
+        );
+
+        // First, forward to staging for our own vote
+        // Note: No storage needed for tip cuts - they reference already-stored CARs
+        self.staging_tx
+            .send(StagingMessage::TipCut(TipCutProposal {
+                tipcut: tipcut.clone(),
+                ae_stats: AppendEntriesStats {
+                    view,
+                    view_is_stable,
+                    config_num,
+                    sender: self.config.get().net_config.name.clone(),
+                    ci: self.ci,
+                },
+            }))
+            .await
+            .unwrap();
+
+        debug!("Forwarded my tip cut to staging for voting");
+
+        // Then broadcast to other nodes
+        let names = self.get_everyone_except_me();
+        self.broadcast_ae_tipcut(names, tipcut, view, view_is_stable, config_num)
+            .await;
+
+        Ok(())
+    }
+
     // TODO: Implement evil behavior for DAG mode
     #[cfg(not(feature = "dag"))]
     async fn maybe_act_evil(
@@ -569,7 +621,6 @@ impl BlockBroadcaster {
         }
     }
 
-    #[cfg(not(feature = "dag"))]
     async fn broadcast_ae_fork(
         &mut self,
         names: Vec<String>,
@@ -637,5 +688,59 @@ impl BlockBroadcaster {
             self.perf_add_event(perf_entry, "Forward block to other nodes");
             self.perf_deregister(perf_entry);
         }
+    }
+
+    /// Broadcast a tip cut wrapped in AppendEntries to all other nodes (DAG mode only)
+    /// Tip cuts are consensus proposals for committing a set of CARs
+    #[cfg(feature = "dag")]
+    async fn broadcast_ae_tipcut(
+        &mut self,
+        names: Vec<String>,
+        tipcut: ProtoTipCut,
+        view: u64,
+        view_is_stable: bool,
+        config_num: u64,
+    ) {
+        let tip_count = tipcut.tips.len();
+        
+        // Wrap tip cut in AppendEntries message
+        let append_entry = ProtoAppendEntries {
+            entry: Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(
+                tipcut,
+            )),
+            commit_index: self.ci,
+            view,
+            view_is_stable,
+            config_num,
+            is_backfill_response: false,
+        };
+
+        // Serialize to protobuf
+        let rpc = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::AppendEntries(
+                append_entry,
+            )),
+        };
+        let data = rpc.encode_to_vec();
+
+        let sz = data.len();
+        info!(
+            "Broadcasting TipCut with {} CARs (size: {} bytes) to {:?}",
+            tip_count, sz, names
+        );
+
+        // Broadcast to all nodes using the same threshold as blocks
+        let data = PinnedMessage::from(data, sz, SenderType::Anon);
+        let mut profile = LatencyProfile::new();
+        let _res = PinnedClient::broadcast(
+            &self.client,
+            &names,
+            &data,
+            &mut profile,
+            self.get_byzantine_broadcast_threshold(),
+        )
+        .await;
+
+        debug!("TipCut broadcast completed");
     }
 }
