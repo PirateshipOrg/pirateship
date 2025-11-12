@@ -39,6 +39,9 @@ pub(super) mod fork_choice;
 pub(super) mod steady_state;
 pub(super) mod view_change;
 
+#[cfg(feature = "dag")]
+pub mod tip_cut_sort;
+
 struct CachedBlockWithVotes {
     block: CachedBlock,
 

@@ -18,16 +18,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use log::{debug, error, info, trace};
-use prost::Message;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     config::AtomicConfig,
-    proto::{
-        consensus::ProtoTipCut,
-        rpc::{proto_payload, ProtoPayload},
-    },
-    rpc::{client::PinnedClient, MessageRef, SenderType},
+    proto::consensus::ProtoTipCut,
+    rpc::client::PinnedClient,
     utils::{
         channel::{Receiver, Sender},
         timer::ResettableTimer,
@@ -71,6 +67,9 @@ pub struct TipCutProposal {
 
     // Command channel for view changes and leadership updates
     cmd_rx: Receiver<TipCutProposalCommand>,
+
+    // Output channel to send tip cuts to block_sequencer for digest computation
+    tipcut_tx: Sender<ProtoTipCut>,
 }
 
 impl TipCutProposal {
@@ -79,6 +78,7 @@ impl TipCutProposal {
         client: PinnedClient,
         lane_staging_query_tx: Sender<LaneStagingQuery>,
         cmd_rx: Receiver<TipCutProposalCommand>,
+        tipcut_tx: Sender<ProtoTipCut>,
     ) -> Self {
         // Get initial configuration
         let config_snapshot = config.get();
@@ -119,6 +119,7 @@ impl TipCutProposal {
             tip_cut_timer,
             lane_staging_query_tx,
             cmd_rx,
+            tipcut_tx,
         }
     }
 
@@ -247,33 +248,23 @@ impl TipCutProposal {
         // Collect CARs into a vec
         let cars: Vec<_> = tip_cut.cars.into_values().collect();
 
-        // TODO: Compute proper digest and parent
-        // For now, using placeholder values
-        let digest = vec![0u8; 32]; // Placeholder
-        let parent = vec![0u8; 32]; // Placeholder
-
-        // Construct ProtoTipCut message with new structure
+        // Construct ProtoTipCut message
+        // Digest and parent will be computed by block_sequencer
         let proto_tip_cut = ProtoTipCut {
-            digest,
-            parent,
+            digest: vec![], // Will be computed by block_sequencer
+            parent: vec![], // Will be computed by block_sequencer
             tips: cars,
         };
 
-        // Wrap in AppendEntries for consensus protocol
-        let append_entries = crate::proto::consensus::ProtoAppendEntries {
-            entry: Some(
-                crate::proto::consensus::proto_append_entries::Entry::Tipcut(proto_tip_cut),
-            ),
-            commit_index: self.ci,
-            view: self.view,
-            view_is_stable: self.view_is_stable,
-            config_num: tip_cut.config_num,
-            is_backfill_response: false,
-        };
+        // Send to block_sequencer for digest computation and broadcasting
+        self.tipcut_tx
+            .send(proto_tip_cut)
+            .await
+            .map_err(|e| {
+                error!("Failed to send tip cut to block_sequencer: {:?}", e);
+            })?;
 
-        // Broadcast to all nodes
-        self.broadcast_tip_cut(append_entries).await?;
-
+        trace!("Tip cut sent to block_sequencer for processing");
         Ok(())
     }
 
@@ -293,46 +284,5 @@ impl TipCutProposal {
         reply_rx.await.map_err(|e| {
             error!("Failed to receive tip cut from LaneStaging: {:?}", e);
         })
-    }
-
-    /// Broadcast a tip cut to all nodes wrapped in AppendEntries.
-    async fn broadcast_tip_cut(
-        &mut self,
-        append_entries: crate::proto::consensus::ProtoAppendEntries,
-    ) -> Result<(), ()> {
-        let config = self.config.get();
-        let my_name = &config.net_config.name;
-
-        // Extract tip count for logging
-        let tip_count =
-            if let Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(ref tc)) =
-                append_entries.entry
-            {
-                tc.tips.len()
-            } else {
-                0
-            };
-
-        debug!("Broadcasting tip cut with {} CARs to all nodes", tip_count);
-
-        // Encode the payload
-        let payload = ProtoPayload {
-            message: Some(proto_payload::Message::AppendEntries(append_entries)),
-        };
-
-        let buf = payload.encode_to_vec();
-        let sz = buf.len();
-
-        // Broadcast to all nodes except myself
-        for node in &config.consensus_config.node_list {
-            if node == my_name {
-                continue;
-            }
-
-            let _ = PinnedClient::send(&self.client, node, MessageRef(&buf, sz, &SenderType::Anon))
-                .await;
-        }
-
-        Ok(())
     }
 }

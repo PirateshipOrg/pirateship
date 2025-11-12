@@ -19,6 +19,11 @@ use crate::{
 
 use super::batch_proposal::{MsgAckChanWithTag, RawBatch};
 
+#[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoTipCut;
+#[cfg(feature = "dag")]
+use super::block_broadcaster::BlockBroadcasterCommand;
+
 pub enum BlockSequencerControlCommand {
     NewUnstableView(u64 /* view num */, u64 /* config num */), // View changed to a new view, it is not stable, so don't propose new blocks.
     ViewStabilised(u64 /* view num */, u64 /* config num */), // View is stable now, if I am the leader in this view, propose new blocks.
@@ -59,9 +64,16 @@ pub struct BlockSequencer {
 
     __last_qc_n_seen: u64,
     __blocks_proposed_in_this_view: u64,
+
+    // DAG mode fields
+    #[cfg(feature = "dag")]
+    tipcut_rx: Receiver<ProtoTipCut>,
+    #[cfg(feature = "dag")]
+    block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
 }
 
 impl BlockSequencer {
+    #[cfg(not(feature = "dag"))]
     pub fn new(
         config: AtomicConfig,
         control_command_rx: Receiver<BlockSequencerControlCommand>,
@@ -108,6 +120,69 @@ impl BlockSequencer {
             perf_counter_unsigned,
             __last_qc_n_seen: 0,
             __blocks_proposed_in_this_view: 0,
+        };
+
+        #[cfg(not(feature = "view_change"))]
+        {
+            ret.view_is_stable = true;
+            ret.view = 1;
+            ret.config_num = 1;
+        }
+
+        ret
+    }
+
+    #[cfg(feature = "dag")]
+    pub fn new(
+        config: AtomicConfig,
+        control_command_rx: Receiver<BlockSequencerControlCommand>,
+        batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
+        qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
+        block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+        client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
+        crypto: CryptoServiceConnector,
+        tipcut_rx: Receiver<ProtoTipCut>,
+        block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
+    ) -> Self {
+        let signature_timer = ResettableTimer::new(Duration::from_millis(
+            config.get().consensus_config.signature_max_delay_ms,
+        ));
+
+        let event_order = vec![
+            "Add QCs",
+            "Create Block",
+            "Send to Client Reply",
+            "Send to Block Broadcaster",
+        ];
+
+        let perf_counter_signed =
+            RefCell::new(PerfCounter::new("BlockSequencerSigned", &event_order));
+        let perf_counter_unsigned =
+            RefCell::new(PerfCounter::new("BlockSequencerUnsigned", &event_order));
+
+        let mut ret = Self {
+            config,
+            control_command_rx,
+            batch_rx,
+            signature_timer,
+            qc_rx,
+            current_qc_list: Vec::new(),
+            block_broadcaster_tx,
+            client_reply_tx,
+            crypto,
+            parent_hash_rx: FutureHash::None,
+            seq_num: 0,
+            view: 0,
+            config_num: 0,
+            view_is_stable: false,
+            force_sign_next_batch: false,
+            last_signed_seq_num: 0,
+            perf_counter_signed,
+            perf_counter_unsigned,
+            __last_qc_n_seen: 0,
+            __blocks_proposed_in_this_view: 0,
+            tipcut_rx,
+            block_broadcaster_command_tx,
         };
 
         #[cfg(not(feature = "view_change"))]
@@ -196,6 +271,26 @@ impl BlockSequencer {
     }
 
     async fn worker(&mut self, chan_depth: usize) -> Result<(), ()> {
+        // DAG mode: sequence tip cuts for consensus layer
+        #[cfg(feature = "dag")]
+        {
+            tokio::select! {
+                biased;
+                _tipcut = self.tipcut_rx.recv() => {
+                    if let Some(tipcut) = _tipcut {
+                        self.handle_new_tipcut(tipcut).await;
+                    }
+                },
+                _cmd = self.control_command_rx.recv() => {
+                    self.handle_control_command(_cmd).await;
+                },
+            }
+            return Ok(());
+        }
+
+        // Traditional mode: sequence batches into blocks
+        #[cfg(not(feature = "dag"))]
+        {
         // The slow path needs 2-hop QCs to byz-commit.
         // If we assume the head of the chain is crash committed immediately (best case),
         // On average, need the 2-hop to happen within config.consensus_config.commit_index_gap_hard.
@@ -298,6 +393,7 @@ impl BlockSequencer {
         }
 
         Ok(())
+        } // end cfg(not(feature = "dag"))
     }
 
     async fn handle_new_batch(
@@ -449,5 +545,57 @@ impl BlockSequencer {
                     .await;
             }
         }
+    }
+
+    /// Handle a new tip cut in DAG mode.
+    /// Compute digest using crypto service and send to block_broadcaster.
+    #[cfg(feature = "dag")]
+    async fn handle_new_tipcut(&mut self, mut tipcut: ProtoTipCut) {
+        use prost::Message;
+
+        trace!("Sequencing tip cut with {} tips", tipcut.tips.len());
+
+        // Get parent hash
+        let parent = match &self.parent_hash_rx {
+            FutureHash::None => vec![0u8; 32], // Genesis
+            FutureHash::Immediate(h) => h.clone(),
+            FutureHash::Future(rx) => {
+                // This shouldn't happen in DAG mode, but handle it
+                warn!("Unexpected FutureHash::Future in DAG mode");
+                vec![0u8; 32]
+            }
+        };
+
+        tipcut.parent = parent.clone();
+
+        // Serialize the tip cut content (parent + tips) for hashing
+        // We exclude the digest field itself from the hash computation
+        let mut hash_content = Vec::new();
+        hash_content.extend_from_slice(&tipcut.parent);
+        for tip in &tipcut.tips {
+            hash_content.extend_from_slice(&tip.encode_to_vec());
+        }
+
+        // Compute digest using crypto service
+        let digest = self.crypto.hash(&hash_content).await;
+
+        // Update tip cut with computed digest
+        tipcut.digest = digest.clone();
+        self.parent_hash_rx = FutureHash::Immediate(digest);
+
+        // Send to block_broadcaster via command
+        let cmd = BlockBroadcasterCommand::BroadcastTipCut(
+            tipcut,
+            self.view,
+            self.view_is_stable,
+            self.config_num,
+        );
+
+        self.block_broadcaster_command_tx
+            .send(cmd)
+            .await
+            .expect("Should be able to send to block_broadcaster");
+
+        trace!("Tip cut sequenced and sent to block_broadcaster");
     }
 }

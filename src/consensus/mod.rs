@@ -324,6 +324,8 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     #[cfg(feature = "dag")]
     dag_batch_proposer: Arc<Mutex<dag::batch_proposal::BatchProposer>>,
     #[cfg(feature = "dag")]
+    dag_block_sequencer: Arc<Mutex<dag::block_sequencer::DagBlockSequencer>>,
+    #[cfg(feature = "dag")]
     dag_block_broadcaster: Arc<Mutex<dag::block_broadcaster::DagBlockBroadcaster>>,
     #[cfg(feature = "dag")]
     dag_block_receiver: Arc<Mutex<dag::block_receiver::BlockReceiver>>,
@@ -461,20 +463,38 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let batch_proposer = BatchProposer::new(
             config.clone(),
             batch_proposer_rx,
-            block_maker_tx,
+            block_maker_tx.clone(),
             client_reply_command_tx.clone(),
             unlogged_tx,
             batch_proposer_command_rx,
         );
+
+        #[cfg(not(feature = "dag"))]
         let block_sequencer = BlockSequencer::new(
             config.clone(),
             control_command_rx,
             block_maker_rx,
             qc_rx,
-            block_broadcaster_tx,
+            block_broadcaster_tx.clone(),
             client_reply_tx,
             block_maker_crypto,
         );
+
+        #[cfg(feature = "dag")]
+        let (tipcut_tx, tipcut_rx) = make_channel(_chan_depth);
+        #[cfg(feature = "dag")]
+        let block_sequencer = BlockSequencer::new(
+            config.clone(),
+            control_command_rx,
+            block_maker_rx,
+            qc_rx,
+            block_broadcaster_tx.clone(),
+            client_reply_tx,
+            block_maker_crypto,
+            tipcut_rx,
+            broadcaster_control_command_tx.clone(),
+        );
+
         let block_broadcaster = BlockBroadcaster::new(
             config.clone(),
             client.into(),
@@ -642,8 +662,11 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             make_channel(_chan_depth);
         let (dag_raw_batch_tx, dag_raw_batch_rx) = make_channel(_chan_depth);
 
-        // DAG block preparation channels (TODO: Need to implement block preparation from batches)
-        // For now, creating placeholder channels - will need a component to convert raw batches to prepared blocks
+        // DAG block sequencer channels
+        let (dag_block_sequencer_control_tx, dag_block_sequencer_control_rx) =
+            make_channel(_chan_depth);
+
+        // DAG block preparation channels (prepared blocks from sequencer to broadcaster)
         let (dag_prepared_block_tx, dag_prepared_block_rx) = make_channel(_chan_depth);
 
         // DAG block broadcasting channels
@@ -737,22 +760,28 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let dag_batch_proposer = dag::batch_proposal::BatchProposer::new(
             config.clone(),
             batch_proposer_rx,
-            dag_raw_batch_tx, // TODO: This needs to connect to a block preparer component
+            dag_raw_batch_tx,
             client_reply_command_tx.clone(),
             unlogged_tx,
             dag_batch_proposer_command_rx,
         );
 
-        // TODO: Need to add a DAG block sequencer/preparer component here that:
-        // 1. Receives raw batches from dag_batch_proposer
-        // 2. Prepares CachedBlocks
-        // 3. Sends prepared blocks to dag_block_broadcaster via oneshot channels
+        // Create DAG block sequencer (converts raw batches to prepared blocks)
+        let dag_block_sequencer_crypto = crypto.get_connector();
+        let dag_block_sequencer = dag::block_sequencer::DagBlockSequencer::new(
+            config.clone(),
+            dag_block_sequencer_control_rx,
+            dag_raw_batch_rx,
+            dag_prepared_block_tx,
+            client_reply_tx.clone(),
+            dag_block_sequencer_crypto,
+        );
 
         let dag_block_broadcaster = dag::block_broadcaster::DagBlockBroadcaster::new(
             config.clone(),
             dag_block_broadcaster_client.into(),
             dag_block_broadcaster_crypto2,
-            dag_prepared_block_rx, // TODO: Connect to block preparer output
+            dag_prepared_block_rx,
             dag_other_block_rx,
             dag_broadcaster_control_command_rx,
             dag_block_broadcaster_storage,
@@ -793,13 +822,6 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             dag_lane_logserver_storage,
         );
 
-        let dag_tip_cut_proposal = dag::tip_cut_proposal::TipCutProposal::new(
-            config.clone(),
-            dag_tip_cut_proposal_client.into(),
-            dag_lane_staging_query_tx,
-            dag_tip_cut_proposal_command_rx,
-        );
-
         // Create shared components that work differently in DAG mode
         // In DAG mode, block_broadcaster and fork_receiver handle tip cuts (via AppendEntries)
         // instead of traditional forks
@@ -814,6 +836,25 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (tip_cut_fork_receiver_command_tx, tip_cut_fork_receiver_command_rx) = make_channel(_chan_depth);
         let (tip_cut_other_block_tx, tip_cut_other_block_rx) = make_channel(_chan_depth);
         let (tip_cut_block_broadcaster_rx_chan, tip_cut_block_broadcaster_rx) = make_channel(_chan_depth);
+
+        // Tip cut proposal channel - sends tip cuts for broadcast
+        let (dag_tip_cut_broadcast_tx, dag_tip_cut_broadcast_rx) = make_channel(_chan_depth);
+
+        let dag_tip_cut_proposal = dag::tip_cut_proposal::TipCutProposal::new(
+            config.clone(),
+            dag_tip_cut_proposal_client.into(),
+            dag_lane_staging_query_tx,
+            dag_tip_cut_proposal_command_rx,
+            dag_tip_cut_broadcast_tx,
+        );
+
+        // TODO: Tip cut broadcasting mechanism not yet implemented
+        // dag_tip_cut_broadcast_rx should be consumed by a component that:
+        // 1. Wraps tip cuts in blocks
+        // 2. Computes digests/signatures
+        // 3. Broadcasts via AppendEntries to all nodes
+        // For now, tip cuts won't be broadcast
+        drop(dag_tip_cut_broadcast_rx);
 
         let block_broadcaster = BlockBroadcaster::new(
             config.clone(),
@@ -915,6 +956,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
 
             // DAG components
             dag_batch_proposer: Arc::new(Mutex::new(dag_batch_proposer)),
+            dag_block_sequencer: Arc::new(Mutex::new(dag_block_sequencer)),
             dag_block_broadcaster: Arc::new(Mutex::new(dag_block_broadcaster)),
             dag_block_receiver: Arc::new(Mutex::new(dag_block_receiver)),
             dag_lane_staging: Arc::new(Mutex::new(dag_lane_staging)),
@@ -1018,9 +1060,10 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
     pub async fn run(&mut self) -> JoinSet<()> {
         let server = self.server.clone();
         let storage = self.storage.clone();
-        
+
         // DAG components
         let dag_batch_proposer = self.dag_batch_proposer.clone();
+        let dag_block_sequencer = self.dag_block_sequencer.clone();
         let dag_block_broadcaster = self.dag_block_broadcaster.clone();
         let dag_block_receiver = self.dag_block_receiver.clone();
         let dag_lane_staging = self.dag_lane_staging.clone();
@@ -1053,6 +1096,11 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         handles.spawn(async move {
             info!("Starting DAG BatchProposer");
             dag::batch_proposal::BatchProposer::run(dag_batch_proposer).await;
+        });
+
+        handles.spawn(async move {
+            info!("Starting DAG BlockSequencer");
+            dag::block_sequencer::DagBlockSequencer::run(dag_block_sequencer).await;
         });
 
         handles.spawn(async move {
