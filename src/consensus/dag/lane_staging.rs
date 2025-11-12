@@ -109,6 +109,8 @@ pub struct LaneStaging {
 
     block_ack_rx: Receiver<(ProtoBlockAck, SenderType)>,
 
+    car_rx: Receiver<(ProtoBlockCar, SenderType)>,
+
     query_rx: Receiver<LaneStagingQuery>,
 
     // Output channels
@@ -129,6 +131,7 @@ impl LaneStaging {
             bool,
         )>,
         block_ack_rx: Receiver<(ProtoBlockAck, SenderType)>,
+        car_rx: Receiver<(ProtoBlockCar, SenderType)>,
         query_rx: Receiver<LaneStagingQuery>,
         client_reply_tx: Sender<ClientReplyCommand>,
         app_tx: Sender<AppCommand>,
@@ -149,6 +152,7 @@ impl LaneStaging {
             },
             block_rx,
             block_ack_rx,
+            car_rx,
             query_rx,
             client_reply_tx,
             app_tx,
@@ -182,6 +186,14 @@ impl LaneStaging {
                 }
                 let (block_ack, sender) = block_ack.unwrap();
                 self.process_block_ack(block_ack, sender).await?;
+            },
+
+            car = self.car_rx.recv() => {
+                if car.is_none() {
+                    return Err(());
+                }
+                let (car, sender) = car.unwrap();
+                self.process_remote_car(car, sender).await?;
             },
 
             query = self.query_rx.recv() => {
@@ -483,11 +495,13 @@ impl LaneStaging {
         }
 
         // Build the CAR
+        let my_name = self.config.get().net_config.name.clone();
         let car = ProtoBlockCar {
             digest: block_hash.try_into().unwrap(),
             n: seq_num,
             sig: acks,
             view,
+            origin_node: my_name,  // Track which node accepted the client requests
         };
 
         // Store the CAR
@@ -538,6 +552,85 @@ impl LaneStaging {
             let _ = PinnedClient::send(&self.client, node, MessageRef(&buf, sz, &SenderType::Anon))
                 .await;
         }
+
+        Ok(())
+    }
+
+    /// Process a CAR received from another node via RPC.
+    /// Validate the CAR and update the tip cut state if valid.
+    async fn process_remote_car(
+        &mut self,
+        car: ProtoBlockCar,
+        sender: SenderType,
+    ) -> Result<(), ()> {
+        let sender_name = match &sender {
+            SenderType::Auth(name, _) => name.clone(),
+            SenderType::Anon => {
+                warn!("Received CAR from anonymous sender - rejecting");
+                return Ok(());
+            }
+        };
+
+        let lane_id = &car.origin_node;
+
+        debug!(
+            "Processing remote CAR from {} for lane {} seq {}",
+            sender_name, lane_id, car.n
+        );
+
+        // Basic validation
+        if lane_id.is_empty() {
+            warn!("Received CAR with empty origin_node - rejecting");
+            return Ok(());
+        }
+
+        if car.sig.is_empty() {
+            warn!(
+                "Received CAR with no signatures from {} - rejecting",
+                sender_name
+            );
+            return Ok(());
+        }
+
+        // Verify the sender is the owner of the lane (origin_node should match sender)
+        if lane_id != &sender_name {
+            warn!(
+                "Received CAR for lane {} from different sender {} - rejecting",
+                lane_id, sender_name
+            );
+            return Ok(());
+        }
+
+        // Verify signature threshold
+        let threshold = self.liveness_threshold();
+        if car.sig.len() < threshold {
+            warn!(
+                "Received CAR with insufficient signatures ({} < {}) - rejecting",
+                car.sig.len(),
+                threshold
+            );
+            return Ok(());
+        }
+
+        // TODO: Verify signatures are valid (crypto verification)
+        // For now, we trust authenticated senders
+
+        // TODO: Verify parent references match expected DAG structure
+        // This would require querying LaneLogServer for parent blocks
+
+        // TODO: Check sequence number is reasonable (not too far in future)
+        // This prevents memory exhaustion attacks
+
+        info!(
+            "Accepting remote CAR from {} for lane {} seq {} with {} signatures",
+            sender_name,
+            lane_id,
+            car.n,
+            car.sig.len()
+        );
+
+        // Update tip cut with this remote CAR
+        self.update_tip_cut(lane_id.clone(), car);
 
         Ok(())
     }

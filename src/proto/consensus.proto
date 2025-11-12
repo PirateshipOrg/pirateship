@@ -118,6 +118,7 @@ message ProtoBlockCAR {
     uint64 n = 2;           // Sequence Number
     repeated ProtoNameWithSignature sig = 3; // signer node -> Signature mapping
     uint64 view = 4;        // QUESTION: Do we actually need a view number here??
+    string origin_node = 5; // Node that originally accepted the client requests (for proxy pattern)
 }
 
 // Tip Cut proposal of up to N CARs
@@ -155,4 +156,12 @@ message ProtoVote {
     uint64 n = 3;
     uint64 view = 4;
     uint64 config_num = 5;
+}
+
+// Execution Results for DAG Proxy Pattern
+// Leader sends this to origin nodes so they can respond to their local clients
+message ProtoExecutionResults {
+    bytes block_hash = 1;                               // Hash of block that was executed
+    repeated proto.execution.ProtoTransactionResult results = 2;  // Execution results for each transaction
+    string origin_node = 3;                             // Target node that should receive these results
 }

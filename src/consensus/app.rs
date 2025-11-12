@@ -42,8 +42,18 @@ pub enum AppCommand {
     CrashCommit(
         Vec<CachedBlock>, /* all blocks from old_ci + 1 to new_ci */
     ),
+    #[cfg(feature = "dag")]
+    CrashCommitWithOrigins(
+        Vec<CachedBlock>,                            /* all blocks from old_ci + 1 to new_ci */
+        std::collections::HashMap<HashType, String>, /* block_hash -> origin_node map for proxy pattern */
+    ),
     ByzCommit(
         Vec<CachedBlock>, /* all blocks from old_bci + 1 to new_bci */
+    ),
+    #[cfg(feature = "dag")]
+    ByzCommitWithOrigins(
+        Vec<CachedBlock>,                         /* all blocks from old_bci + 1 to new_bci */
+        std::collections::HashMap<HashType, String>, /* block_hash -> origin_node map for proxy pattern */
     ),
     Rollback(u64 /* new last block */),
 }
@@ -374,6 +384,64 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     self.perf_add_event(n, "Send Reply");
                 }
             }
+            #[cfg(feature = "dag")]
+            AppCommand::CrashCommitWithOrigins(blocks, origin_map) => {
+                // DAG mode: Handle crash commit with origin node information for proxy pattern
+                let my_name = self.config.get().net_config.name.clone();
+                
+                let mut new_ci = self.stats.ci;
+                let mut new_last_qc = self.stats.last_qc;
+                let (block_hashes, block_ns) = blocks
+                    .iter()
+                    .map(|block| {
+                        if new_ci < block.block.n {
+                            new_ci = block.block.n;
+                        }
+                        if new_last_qc < block.block.n {
+                            new_last_qc = block.block.n;
+                        }
+                        (block.block_hash.clone(), block.block.n)
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
+                    
+                let results = self.engine.handle_crash_commit(blocks);
+
+                for n in &block_ns {
+                    self.perf_add_event(*n, "Process Crash Committed Block");
+                }
+
+                self.stats.total_crash_committed_txs +=
+                    results.iter().map(|e| e.len() as u64).sum::<u64>();
+                self.stats.ci = new_ci;
+                self.stats.last_qc = new_last_qc;
+
+                assert_eq!(block_hashes.len(), results.len());
+
+                let block_ns_cp = block_ns.clone();
+                
+                // Build result map with origin node information
+                let result_map_with_origins: std::collections::HashMap<_, _> = block_hashes
+                    .into_iter()
+                    .zip(block_ns.into_iter().zip(results.into_iter()))
+                    .map(|(hash, (n, results))| {
+                        let origin_node = origin_map.get(&hash).cloned();
+                        (hash, (n, results, origin_node))
+                    })
+                    .collect();
+                
+                // Send to ClientReplyHandler with origin info
+                self.client_reply_tx
+                    .send(ClientReplyCommand::CrashCommitAckWithOrigins(
+                        result_map_with_origins,
+                        my_name,
+                    ))
+                    .await
+                    .unwrap();
+                    
+                for n in block_ns_cp {
+                    self.perf_add_event(n, "Send Reply");
+                }
+            }
             AppCommand::ByzCommit(blocks) => {
                 let mut new_bci = self.stats.bci;
                 let (block_hashes, block_ns) = blocks
@@ -402,6 +470,57 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     .collect();
                 self.client_reply_tx
                     .send(ClientReplyCommand::ByzCommitAck(result_map))
+                    .await
+                    .unwrap();
+
+                for n in block_ns_cp {
+                    self.perf_deregister(n);
+                }
+            }
+            #[cfg(feature = "dag")]
+            AppCommand::ByzCommitWithOrigins(blocks, origin_map) => {
+                // DAG mode: Handle execution with origin node information for proxy pattern
+                let my_name = self.config.get().net_config.name.clone();
+                
+                let mut new_bci = self.stats.bci;
+                let (block_hashes, block_ns) = blocks
+                    .iter()
+                    .map(|block| {
+                        if new_bci < block.block.n {
+                            new_bci = block.block.n;
+                        }
+                        (block.block_hash.clone(), block.block.n)
+                    })
+                    .collect::<(Vec<_>, Vec<_>)>();
+                    
+                let results = self.engine.handle_byz_commit(blocks);
+                self.stats.total_byz_committed_txs +=
+                    results.iter().map(|e| e.len() as u64).sum::<u64>();
+                self.stats.bci = new_bci;
+
+                assert_eq!(block_hashes.len(), results.len());
+
+                let block_ns_cp = block_ns.clone();
+                
+                // Build result map with origin node information
+                // For each block, check if it has an origin_node and if it's different from us
+                let result_map_with_origins: std::collections::HashMap<_, _> = block_hashes
+                    .into_iter()
+                    .zip(block_ns.into_iter().zip(results.into_iter()))
+                    .map(|(hash, (n, results))| {
+                        let origin_node = origin_map.get(&hash).cloned();
+                        (hash, (n, results, origin_node))
+                    })
+                    .collect();
+                
+                // Send to ClientReplyHandler which will decide whether to:
+                // 1. Handle locally (if we are the origin node)
+                // 2. Forward via RPC (if origin node is different)
+                self.client_reply_tx
+                    .send(ClientReplyCommand::ByzCommitAckWithOrigins(
+                        result_map_with_origins,
+                        my_name,
+                    ))
                     .await
                     .unwrap();
 

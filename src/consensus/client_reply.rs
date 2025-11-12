@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use log::{info, trace};
+use log::{debug, info, trace, warn};
 use prost::Message as _;
 use tokio::{
     sync::{oneshot, Mutex},
@@ -22,13 +22,29 @@ use crate::{
     utils::channel::{Receiver, Sender},
 };
 
+#[cfg(feature = "dag")]
+use crate::{
+    proto::{consensus::ProtoExecutionResults, rpc::proto_payload},
+    rpc::client::PinnedClient,
+};
+
 use super::batch_proposal::MsgAckChanWithTag;
 
 pub enum ClientReplyCommand {
     CancelAllRequests,
     StopCancelling,
     CrashCommitAck(HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>),
+    #[cfg(feature = "dag")]
+    CrashCommitAckWithOrigins(
+        HashMap<HashType, (u64, Vec<ProtoTransactionResult>, Option<String>)>, /* hash -> (block_n, results, origin_node) */
+        String,                                                                /* my node name */
+    ),
     ByzCommitAck(HashMap<HashType, (u64, Vec<ProtoByzResponse>)>),
+    #[cfg(feature = "dag")]
+    ByzCommitAckWithOrigins(
+        HashMap<HashType, (u64, Vec<ProtoByzResponse>, Option<String>)>, /* hash -> (block_n, results, origin_node) */
+        String,                                                          /* my node name */
+    ),
     UnloggedRequestAck(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
     ProbeRequestAck(u64 /* block_n */, MsgAckChanWithTag),
 }
@@ -57,6 +73,11 @@ pub struct ClientReplyHandler {
     batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
     reply_command_rx: Receiver<ClientReplyCommand>,
 
+    #[cfg(feature = "dag")]
+    client: PinnedClient,
+    #[cfg(feature = "dag")]
+    execution_results_rx: Receiver<crate::proto::consensus::ProtoExecutionResults>,
+
     reply_map: HashMap<HashType, Vec<MsgAckChanWithTag>>,
     byz_reply_map: HashMap<HashType, Vec<(u64, SenderType)>>,
 
@@ -82,12 +103,20 @@ impl ClientReplyHandler {
         config: AtomicConfig,
         batch_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         reply_command_rx: Receiver<ClientReplyCommand>,
+        #[cfg(feature = "dag")] client: PinnedClient,
+        #[cfg(feature = "dag")] execution_results_rx: Receiver<
+            crate::proto::consensus::ProtoExecutionResults,
+        >,
     ) -> Self {
         let _chan_depth = config.get().rpc_config.channel_depth as usize;
         Self {
             config,
             batch_rx,
             reply_command_rx,
+            #[cfg(feature = "dag")]
+            client,
+            #[cfg(feature = "dag")]
+            execution_results_rx,
             reply_map: HashMap::new(),
             byz_reply_map: HashMap::new(),
             crash_commit_reply_buf: HashMap::new(),
@@ -210,48 +239,106 @@ impl ClientReplyHandler {
     }
 
     async fn worker(&mut self) -> Result<(), ()> {
-        tokio::select! {
-            batch = self.batch_rx.recv() => {
-                if batch.is_none() {
-                    return Ok(());
-                }
-
-                let (batch_hash_chan, mut reply_vec) = batch.unwrap();
-                let batch_hash = batch_hash_chan.await.unwrap();
-
-                if batch_hash.is_empty() || self.must_cancel {
-                    // This is called when !listen_on_new_batch
-                    // This must be cancelled.
-                    if reply_vec.len() > 0 {
-                        info!("Clearing out queued replies of size {}", reply_vec.len());
-                        let node_infos = NodeInfo {
-                            nodes: self.config.get().net_config.nodes.clone()
-                        };
-                        for (chan, tag, _) in reply_vec.drain(..) {
-                            let reply = Self::get_try_again_message(tag, &node_infos);
-                            let reply_ser = reply.encode_to_vec();
-                            let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-                            let _ = chan.send((reply_msg, LatencyProfile::new())).await;
-                        }
+        #[cfg(feature = "dag")]
+        {
+            tokio::select! {
+                batch = self.batch_rx.recv() => {
+                    if batch.is_none() {
+                        return Ok(());
                     }
-                    return Ok(());
-                }
 
-                self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
-                self.reply_map.insert(batch_hash.clone(), reply_vec);
+                    let (batch_hash_chan, mut reply_vec) = batch.unwrap();
+                    let batch_hash = batch_hash_chan.await.unwrap();
 
-                self.maybe_clear_reply_buf(batch_hash).await;
-            },
-            cmd = self.reply_command_rx.recv() => {
-                if cmd.is_none() {
-                    return Ok(());
-                }
+                    if batch_hash.is_empty() || self.must_cancel {
+                        // This is called when !listen_on_new_batch
+                        // This must be cancelled.
+                        if reply_vec.len() > 0 {
+                            info!("Clearing out queued replies of size {}", reply_vec.len());
+                            let node_infos = NodeInfo {
+                                nodes: self.config.get().net_config.nodes.clone()
+                            };
+                            for (chan, tag, _) in reply_vec.drain(..) {
+                                let reply = Self::get_try_again_message(tag, &node_infos);
+                                let reply_ser = reply.encode_to_vec();
+                                let _sz = reply_ser.len();
+                                let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                                let _ = chan.send((reply_msg, LatencyProfile::new())).await;
+                            }
+                        }
+                        return Ok(());
+                    }
 
-                let cmd = cmd.unwrap();
+                    self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
+                    self.reply_map.insert(batch_hash.clone(), reply_vec);
 
-                self.handle_reply_command(cmd).await;
-            },
+                    self.maybe_clear_reply_buf(batch_hash).await;
+                },
+                cmd = self.reply_command_rx.recv() => {
+                    if cmd.is_none() {
+                        return Ok(());
+                    }
+
+                    let cmd = cmd.unwrap();
+
+                    self.handle_reply_command(cmd).await;
+                },
+                execution_results = self.execution_results_rx.recv() => {
+                    if execution_results.is_none() {
+                        return Ok(());
+                    }
+
+                    let results = execution_results.unwrap();
+                    self.handle_forwarded_results(results).await;
+                },
+            }
+        }
+
+        #[cfg(not(feature = "dag"))]
+        {
+            tokio::select! {
+                batch = self.batch_rx.recv() => {
+                    if batch.is_none() {
+                        return Ok(());
+                    }
+
+                    let (batch_hash_chan, mut reply_vec) = batch.unwrap();
+                    let batch_hash = batch_hash_chan.await.unwrap();
+
+                    if batch_hash.is_empty() || self.must_cancel {
+                        // This is called when !listen_on_new_batch
+                        // This must be cancelled.
+                        if reply_vec.len() > 0 {
+                            info!("Clearing out queued replies of size {}", reply_vec.len());
+                            let node_infos = NodeInfo {
+                                nodes: self.config.get().net_config.nodes.clone()
+                            };
+                            for (chan, tag, _) in reply_vec.drain(..) {
+                                let reply = Self::get_try_again_message(tag, &node_infos);
+                                let reply_ser = reply.encode_to_vec();
+                                let _sz = reply_ser.len();
+                                let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                                let _ = chan.send((reply_msg, LatencyProfile::new())).await;
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
+                    self.reply_map.insert(batch_hash.clone(), reply_vec);
+
+                    self.maybe_clear_reply_buf(batch_hash).await;
+                },
+                cmd = self.reply_command_rx.recv() => {
+                    if cmd.is_none() {
+                        return Ok(());
+                    }
+
+                    let cmd = cmd.unwrap();
+
+                    self.handle_reply_command(cmd).await;
+                },
+            }
         }
         Ok(())
     }
@@ -382,6 +469,16 @@ impl ClientReplyHandler {
 
                 self.maybe_clear_probe_buf().await;
             }
+            #[cfg(feature = "dag")]
+            ClientReplyCommand::CrashCommitAckWithOrigins(crash_commit_ack_with_origins) => {
+                self.handle_crash_commit_ack_with_origins(crash_commit_ack_with_origins)
+                    .await;
+            }
+            #[cfg(feature = "dag")]
+            ClientReplyCommand::ByzCommitAckWithOrigins(byz_commit_ack_with_origins) => {
+                self.handle_byz_commit_ack_with_origins(byz_commit_ack_with_origins)
+                    .await;
+            }
         }
     }
 
@@ -437,6 +534,142 @@ impl ClientReplyHandler {
                 self.do_crash_commit_reply(reply_sender_vec, batch_hash.clone(), n, reply_vec)
                     .await;
             }
+        }
+    }
+
+    /// Handle crash commit acknowledgment with origin nodes (DAG mode)
+    /// For each result, check if it originated from this node or needs forwarding
+    #[cfg(feature = "dag")]
+    async fn handle_crash_commit_ack_with_origins(
+        &mut self,
+        crash_commit_ack_with_origins: Vec<(HashType, (u64, Vec<ProtoTransactionResult>, String))>,
+    ) {
+        use crate::proto::consensus::ProtoExecutionResults;
+        use crate::proto::rpc::proto_payload;
+
+        let my_name = self.config.get().consensus_config.name.clone();
+
+        for (hash, (n, reply_vec, origin_node)) in crash_commit_ack_with_origins {
+            if origin_node == my_name {
+                // This result originated from this node - handle locally
+                if let Some(reply_sender_vec) = self.reply_map.remove(&hash) {
+                    self.do_crash_commit_reply(reply_sender_vec, hash, n, reply_vec)
+                        .await;
+                } else {
+                    // Store for later if request hasn't arrived yet
+                    self.crash_commit_reply_buf.insert(hash, (n, reply_vec));
+                }
+            } else {
+                // Forward to origin node
+                self.forward_results_to_origin(hash, n, reply_vec, origin_node)
+                    .await;
+            }
+        }
+    }
+
+    /// Handle byzantine commit acknowledgment with origin nodes (DAG mode)
+    /// For each result, check if it originated from this node or needs forwarding
+    #[cfg(feature = "dag")]
+    async fn handle_byz_commit_ack_with_origins(
+        &mut self,
+        byz_commit_ack_with_origins: Vec<(HashType, (u64, Vec<ProtoByzResponse>, String))>,
+    ) {
+        use crate::proto::consensus::ProtoExecutionResults;
+        use crate::proto::rpc::proto_payload;
+
+        let my_name = self.config.get().consensus_config.name.clone();
+
+        for (hash, (n, reply_vec, origin_node)) in byz_commit_ack_with_origins {
+            if origin_node == my_name {
+                // This result originated from this node - handle locally
+                if let Some(reply_sender_vec) = self.byz_reply_map.remove(&hash) {
+                    self.do_byz_commit_reply(reply_sender_vec, hash, n, reply_vec)
+                        .await;
+                } else {
+                    // Store for later if request hasn't arrived yet
+                    self.byz_commit_reply_buf.insert(hash, (n, reply_vec));
+                }
+            } else {
+                // Forward to origin node (convert ProtoByzResponse to ProtoTransactionResult)
+                let transaction_results: Vec<ProtoTransactionResult> = reply_vec
+                    .into_iter()
+                    .map(|byz_resp| byz_resp.result)
+                    .collect();
+
+                self.forward_results_to_origin(hash, n, transaction_results, origin_node)
+                    .await;
+            }
+        }
+    }
+
+    /// Forward execution results to the origin node via RPC
+    #[cfg(feature = "dag")]
+    async fn forward_results_to_origin(
+        &mut self,
+        block_hash: HashType,
+        block_n: u64,
+        results: Vec<ProtoTransactionResult>,
+        origin_node: String,
+    ) {
+        use crate::proto::consensus::ProtoExecutionResults;
+        use crate::proto::rpc::proto_payload;
+
+        debug!(
+            "Forwarding execution results for block {} (hash={:?}) to origin node {}",
+            block_n,
+            hex::encode(&block_hash),
+            origin_node
+        );
+
+        let execution_results = ProtoExecutionResults {
+            block_hash,
+            block_n,
+            results,
+            origin_node: origin_node.clone(),
+        };
+
+        let payload = crate::proto::rpc::ProtoPayload {
+            msg: Some(proto_payload::Msg::ExecutionResults(execution_results)),
+        };
+
+        // Send to origin node - failures are acceptable (node may have crashed)
+        if let Err(e) = self.client.send(origin_node.clone(), payload).await {
+            warn!(
+                "Failed to forward execution results to origin node {}: {:?}",
+                origin_node, e
+            );
+        }
+    }
+
+    /// Handle execution results forwarded from another node (DAG mode)
+    /// This is called when receiving ProtoExecutionResults via RPC
+    #[cfg(feature = "dag")]
+    async fn handle_forwarded_results(
+        &mut self,
+        results: crate::proto::consensus::ProtoExecutionResults,
+    ) {
+        debug!(
+            "Handling forwarded execution results for block {} (hash={:?})",
+            results.block_n,
+            hex::encode(&results.block_hash)
+        );
+
+        // Match results with local reply channels
+        if let Some(reply_sender_vec) = self.reply_map.remove(&results.block_hash) {
+            self.do_crash_commit_reply(
+                reply_sender_vec,
+                results.block_hash,
+                results.block_n,
+                results.results,
+            )
+            .await;
+        } else {
+            // No local reply channels found - this is expected if the forwarded
+            // results arrived before the local reply channels were registered
+            debug!(
+                "No local reply channels found for forwarded results (block_hash={:?})",
+                hex::encode(&results.block_hash)
+            );
         }
     }
 }

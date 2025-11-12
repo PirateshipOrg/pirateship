@@ -23,7 +23,6 @@ use tokio::sync::{oneshot, Mutex};
 use crate::{
     config::AtomicConfig,
     proto::consensus::ProtoTipCut,
-    rpc::client::PinnedClient,
     utils::{
         channel::{Receiver, Sender},
         timer::ResettableTimer,
@@ -48,7 +47,6 @@ pub enum TipCutProposalCommand {
 /// Only the leader proposes tip cuts.
 pub struct TipCutProposal {
     config: AtomicConfig,
-    client: PinnedClient,
 
     // Current state
     ci: u64,
@@ -65,20 +63,19 @@ pub struct TipCutProposal {
     // Query channel to LaneStaging
     lane_staging_query_tx: Sender<LaneStagingQuery>,
 
+    // Send tip cuts to BlockSequencer for wrapping and broadcasting
+    tipcut_tx: Sender<ProtoTipCut>,
+
     // Command channel for view changes and leadership updates
     cmd_rx: Receiver<TipCutProposalCommand>,
-
-    // Output channel to send tip cuts to block_sequencer for digest computation
-    tipcut_tx: Sender<ProtoTipCut>,
 }
 
 impl TipCutProposal {
     pub fn new(
         config: AtomicConfig,
-        client: PinnedClient,
         lane_staging_query_tx: Sender<LaneStagingQuery>,
-        cmd_rx: Receiver<TipCutProposalCommand>,
         tipcut_tx: Sender<ProtoTipCut>,
+        cmd_rx: Receiver<TipCutProposalCommand>,
     ) -> Self {
         // Get initial configuration
         let config_snapshot = config.get();
@@ -110,7 +107,6 @@ impl TipCutProposal {
 
         Self {
             config,
-            client,
             ci: 0,
             view,
             view_is_stable: false,
@@ -118,8 +114,8 @@ impl TipCutProposal {
             current_leader,
             tip_cut_timer,
             lane_staging_query_tx,
-            cmd_rx,
             tipcut_tx,
+            cmd_rx,
         }
     }
 
@@ -249,22 +245,24 @@ impl TipCutProposal {
         let cars: Vec<_> = tip_cut.cars.into_values().collect();
 
         // Construct ProtoTipCut message
-        // Digest and parent will be computed by block_sequencer
         let proto_tip_cut = ProtoTipCut {
-            digest: vec![], // Will be computed by block_sequencer
-            parent: vec![], // Will be computed by block_sequencer
+            digest: vec![], // Will be computed by BlockSequencer
+            parent: vec![], // Will be computed by BlockSequencer
             tips: cars,
         };
 
-        // Send to block_sequencer for digest computation and broadcasting
+        // Send to BlockSequencer which will:
+        // 1. Compute digest and parent
+        // 2. Send to BlockBroadcaster
+        // 3. BlockBroadcaster wraps in AppendEntries and broadcasts to all nodes
         self.tipcut_tx
             .send(proto_tip_cut)
             .await
             .map_err(|e| {
-                error!("Failed to send tip cut to block_sequencer: {:?}", e);
+                error!("Failed to send tip cut to BlockSequencer: {:?}", e);
             })?;
 
-        trace!("Tip cut sent to block_sequencer for processing");
+        info!("Sent tip cut to BlockSequencer for sequencing and broadcasting");
         Ok(())
     }
 

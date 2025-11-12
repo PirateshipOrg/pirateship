@@ -77,7 +77,11 @@ pub struct ConsensusServerContext {
     #[cfg(feature = "dag")]
     block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
     #[cfg(feature = "dag")]
+    car_tx: Sender<(crate::proto::consensus::ProtoBlockCar, SenderType)>,
+    #[cfg(feature = "dag")]
     tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
+    #[cfg(feature = "dag")]
+    execution_results_tx: Sender<crate::proto::consensus::ProtoExecutionResults>,
 
     vote_receiver_tx: Sender<VoteWithSender>,
     view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
@@ -118,7 +122,9 @@ impl PinnedConsensusServerContext {
         batch_proposal_tx: Sender<TxWithAckChanTag>,
         block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
         block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
+        car_tx: Sender<(crate::proto::consensus::ProtoBlockCar, SenderType)>,
         tip_cut_tx: Sender<(ProtoTipCut, SenderType)>,
+        execution_results_tx: Sender<crate::proto::consensus::ProtoExecutionResults>,
         vote_receiver_tx: Sender<VoteWithSender>,
         view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
         backfill_request_tx: Sender<ProtoBackfillNack>,
@@ -129,7 +135,9 @@ impl PinnedConsensusServerContext {
             batch_proposal_tx,
             block_receiver_tx,
             block_ack_tx,
+            car_tx,
             tip_cut_tx,
+            execution_results_tx,
             vote_receiver_tx,
             view_change_receiver_tx,
             backfill_request_tx,
@@ -207,8 +215,23 @@ impl ServerContextType for PinnedConsensusServerContext {
             }
 
             #[cfg(feature = "dag")]
-            crate::proto::rpc::proto_payload::Message::AppendEntries(_proto_append_entries) => {
-                warn!("Received AppendEntries in DAG mode - ignoring");
+            crate::proto::rpc::proto_payload::Message::AppendEntries(proto_append_entries) => {
+                // In DAG mode, AppendEntries contains tip cuts for consensus
+                // Route to ForkReceiver which will extract and process tip cuts
+                if proto_append_entries.is_backfill_response {
+                    self.fork_receiver_command_tx
+                        .send(ForkReceiverCommand::UseBackfillResponse(
+                            proto_append_entries,
+                            sender,
+                        ))
+                        .await
+                        .expect("Channel send error");
+                } else {
+                    self.fork_receiver_tx
+                        .send((proto_append_entries, sender))
+                        .await
+                        .expect("Channel send error");
+                }
                 return Ok(RespType::NoResp);
             }
 
@@ -245,8 +268,17 @@ impl ServerContextType for PinnedConsensusServerContext {
 
             #[cfg(feature = "dag")]
             crate::proto::rpc::proto_payload::Message::BlockCar(proto_block_car) => {
-                // TODO: Implement BlockCAR handling
-                debug!("Received BlockCAR - not yet implemented");
+                // Forward to LaneStaging for CAR aggregation and tip cut formation
+                debug!(
+                    "Received BlockCAR for block n={} from lane {}",
+                    proto_block_car.n, proto_block_car.lane_id
+                );
+
+                self.car_tx
+                    .send((proto_block_car, sender))
+                    .await
+                    .expect("Failed to send BlockCAR to LaneStaging");
+
                 return Ok(RespType::NoResp);
             }
 
@@ -268,6 +300,30 @@ impl ServerContextType for PinnedConsensusServerContext {
             #[cfg(not(feature = "dag"))]
             crate::proto::rpc::proto_payload::Message::TipCut(_proto_tip_cut) => {
                 warn!("Received TipCut in leader mode - ignoring");
+                return Ok(RespType::NoResp);
+            }
+
+            #[cfg(feature = "dag")]
+            crate::proto::rpc::proto_payload::Message::ExecutionResults(
+                proto_execution_results,
+            ) => {
+                // Forward to client reply handler to match with local reply channels
+                debug!("Received ExecutionResults for block hash {:?}, forwarding to ClientReplyHandler", 
+                       hex::encode(&proto_execution_results.block_hash));
+
+                self.execution_results_tx
+                    .send(proto_execution_results)
+                    .await
+                    .expect("Failed to send execution results to ClientReplyHandler");
+
+                return Ok(RespType::NoResp);
+            }
+
+            #[cfg(not(feature = "dag"))]
+            crate::proto::rpc::proto_payload::Message::ExecutionResults(
+                _proto_execution_results,
+            ) => {
+                warn!("Received ExecutionResults in leader mode - ignoring");
                 return Ok(RespType::NoResp);
             }
 
@@ -546,8 +602,15 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             #[cfg(feature = "extra_2pc")]
             extra_2pc_phase_message_tx,
         );
-        let client_reply =
-            ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
+        let client_reply = ClientReplyHandler::new(
+            config.clone(),
+            client_reply_rx,
+            client_reply_command_rx,
+            #[cfg(feature = "dag")]
+            client.into(),
+            #[cfg(feature = "dag")]
+            execution_results_rx,
+        );
         let logserver = LogServer::new(
             config.clone(),
             logserver_client.into(),
@@ -681,6 +744,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
 
         // DAG lane staging channels
         let (dag_block_ack_rx, dag_block_ack_rx_receiver) = make_channel(_chan_depth);
+        let (dag_car_tx, dag_car_rx) = make_channel(_chan_depth);
         let (dag_lane_staging_tx, dag_lane_staging_rx) = make_channel(_chan_depth);
         let (dag_lane_staging_query_tx, dag_lane_staging_query_rx) = make_channel(_chan_depth);
 
@@ -694,11 +758,17 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         // DAG tip cut proposal channels
         let (dag_tip_cut_proposal_command_tx, dag_tip_cut_proposal_command_rx) =
             make_channel(_chan_depth);
+        // FIXME: Do we even need the dag_tip_cut_rx channel?
         let (dag_tip_cut_tx, dag_tip_cut_rx) = make_channel(_chan_depth);
+
+        // Note: dag_tip_cut_rx is for standalone TipCut RPC messages, but we use
+        // AppendEntries to send tip cuts (same as fork consensus). Dropping the receiver.
+        drop(dag_tip_cut_rx);
 
         // Shared components channels (used by both DAG and tip cut consensus)
         let (client_reply_tx, client_reply_rx) = make_channel(_chan_depth);
         let (client_reply_command_tx, client_reply_command_rx) = make_channel(_chan_depth);
+        let (execution_results_tx, execution_results_rx) = make_channel(_chan_depth);
         let (app_tx, app_rx) = make_channel(_chan_depth);
         let (unlogged_tx, unlogged_rx) = make_channel(_chan_depth);
 
@@ -750,7 +820,9 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             batch_proposer_tx.clone(),
             dag_block_rx,
             dag_block_ack_rx,
+            dag_car_tx,
             dag_tip_cut_tx,
+            execution_results_tx.clone(),
             vote_tx,
             view_change_tx,
             backfill_request_tx,
@@ -806,6 +878,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             dag_lane_staging_crypto,
             dag_lane_staging_rx,
             dag_block_ack_rx_receiver,
+            dag_car_rx,
             dag_lane_staging_query_rx,
             client_reply_command_tx.clone(),
             app_tx.clone(),
@@ -825,7 +898,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         // Create shared components that work differently in DAG mode
         // In DAG mode, block_broadcaster and fork_receiver handle tip cuts (via AppendEntries)
         // instead of traditional forks
-        let block_broadcaster_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let block_broadcaster_client =
+            Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let fork_receiver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let block_broadcaster_crypto = crypto.get_connector();
         let block_broadcaster_crypto2 = crypto.get_connector();
@@ -833,28 +907,18 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let fork_receiver_crypto = crypto.get_connector();
 
         let (tip_cut_fork_tx, tip_cut_fork_rx) = make_channel(_chan_depth);
-        let (tip_cut_fork_receiver_command_tx, tip_cut_fork_receiver_command_rx) = make_channel(_chan_depth);
+        let (tip_cut_fork_receiver_command_tx, tip_cut_fork_receiver_command_rx) =
+            make_channel(_chan_depth);
         let (tip_cut_other_block_tx, tip_cut_other_block_rx) = make_channel(_chan_depth);
-        let (tip_cut_block_broadcaster_rx_chan, tip_cut_block_broadcaster_rx) = make_channel(_chan_depth);
-
-        // Tip cut proposal channel - sends tip cuts for broadcast
-        let (dag_tip_cut_broadcast_tx, dag_tip_cut_broadcast_rx) = make_channel(_chan_depth);
+        let (tip_cut_block_broadcaster_rx_chan, tip_cut_block_broadcaster_rx) =
+            make_channel(_chan_depth);
 
         let dag_tip_cut_proposal = dag::tip_cut_proposal::TipCutProposal::new(
             config.clone(),
-            dag_tip_cut_proposal_client.into(),
             dag_lane_staging_query_tx,
+            tipcut_tx,
             dag_tip_cut_proposal_command_rx,
-            dag_tip_cut_broadcast_tx,
         );
-
-        // TODO: Tip cut broadcasting mechanism not yet implemented
-        // dag_tip_cut_broadcast_rx should be consumed by a component that:
-        // 1. Wraps tip cuts in blocks
-        // 2. Computes digests/signatures
-        // 3. Broadcasts via AppendEntries to all nodes
-        // For now, tip cuts won't be broadcast
-        drop(dag_tip_cut_broadcast_rx);
 
         let block_broadcaster = BlockBroadcaster::new(
             config.clone(),
@@ -913,8 +977,13 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             extra_2pc_phase_message_tx,
         );
 
-        let client_reply =
-            ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
+        let client_reply = ClientReplyHandler::new(
+            config.clone(),
+            client_reply_rx,
+            client_reply_command_rx,
+            #[cfg(feature = "dag")]
+            client.into(),
+        );
 
         let logserver = LogServer::new(
             config.clone(),
@@ -1069,7 +1138,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let dag_lane_staging = self.dag_lane_staging.clone();
         let dag_lane_logserver = self.dag_lane_logserver.clone();
         let dag_tip_cut_proposal = self.dag_tip_cut_proposal.clone();
-        
+
         // Shared components (behavior differs in DAG mode - handle tip cuts)
         let block_broadcaster = self.block_broadcaster.clone();
         let fork_receiver = self.fork_receiver.clone();

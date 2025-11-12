@@ -96,6 +96,12 @@ pub enum LaneLogServerQuery {
         u64,    /* last needed block.n */
         Sender<Vec<ProtoBlockHint>>,
     ),
+    /// Get a specific block from a lane
+    GetBlock(
+        String, /* lane_id (sender name) */
+        u64,    /* block.n */
+        Sender<Option<CachedBlock>>,
+    ),
 }
 
 pub enum LaneLogServerCommand {
@@ -581,6 +587,10 @@ impl LaneLogServer {
 
                 let res = sender.send(hints).await;
                 info!("Sent hints size {}, result = {:?}", len, res);
+            }
+            LaneLogServerQuery::GetBlock(lane_id, n, sender) => {
+                let block = self.get_block(&lane_id, n).await;
+                let _ = sender.send(block).await;
             }
         }
     }
