@@ -282,6 +282,7 @@ impl DagBlockSequencer {
             .await;
 
         // Store hash for next block's parent
+        // QUESTION: In DAG mode, should we be using the async take here?
         self.parent_hash_rx = FutureHash::Future(hash_rx);
 
         // Send hash to client reply handler

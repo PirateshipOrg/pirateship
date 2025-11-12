@@ -3,7 +3,7 @@ use std::{pin::Pin, sync::Arc, time::Duration};
 
 use crate::crypto::{default_hash, FutureHash};
 use crate::utils::channel::{Receiver, Sender};
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, Mutex};
 
@@ -548,54 +548,61 @@ impl BlockSequencer {
     }
 
     /// Handle a new tip cut in DAG mode.
-    /// Compute digest using crypto service and send to block_broadcaster.
+    /// Compute digest using crypto service with pipelining support.
+    /// This mirrors the prepare_block pipelining pattern for consistency.
     #[cfg(feature = "dag")]
-    async fn handle_new_tipcut(&mut self, mut tipcut: ProtoTipCut) {
-        use prost::Message;
-
+    async fn handle_new_tipcut(&mut self, tipcut: ProtoTipCut) {
         trace!("Sequencing tip cut with {} tips", tipcut.tips.len());
 
-        // Get parent hash
-        let parent = match &self.parent_hash_rx {
-            FutureHash::None => vec![0u8; 32], // Genesis
-            FutureHash::Immediate(h) => h.clone(),
-            FutureHash::Future(rx) => {
-                // This shouldn't happen in DAG mode, but handle it
-                warn!("Unexpected FutureHash::Future in DAG mode");
-                vec![0u8; 32]
+        // Take parent hash for pipelining (like handle_new_batch does)
+        let parent_hash_rx = self.parent_hash_rx.take();
+
+        // Use crypto service to prepare tip cut with pipelining
+        // The crypto worker will await the parent hash asynchronously,
+        // allowing this tip cut to start processing before the previous one completes
+        let (tipcut_rx, digest_rx, digest_rx2) = self
+            .crypto
+            .prepare_tipcut(tipcut, parent_hash_rx)
+            .await;
+
+        // Store future digest for next tip cut (enables pipelining)
+        self.parent_hash_rx = FutureHash::Future(digest_rx);
+
+        // Send tip cut to block_broadcaster via command
+        // The tipcut_rx will resolve when the crypto worker completes processing
+        let tipcut_future = tipcut_rx;
+        let digest_future = digest_rx2;
+
+        // Spawn a task to send the command once the tip cut is ready
+        let broadcaster_tx = self.block_broadcaster_command_tx.clone();
+        let view = self.view;
+        let view_is_stable = self.view_is_stable;
+        let config_num = self.config_num;
+
+        tokio::spawn(async move {
+            // Await the prepared tip cut
+            let tipcut = match tipcut_future.await {
+                Ok(tc) => tc,
+                Err(_) => {
+                    error!("Failed to receive prepared tip cut from crypto service");
+                    return;
+                }
+            };
+
+            // Send to broadcaster
+            let cmd = BlockBroadcasterCommand::BroadcastTipCut(
+                tipcut,
+                view,
+                view_is_stable,
+                config_num,
+            );
+
+            if let Err(e) = broadcaster_tx.send(cmd).await {
+                error!("Failed to send tip cut to block_broadcaster: {:?}", e);
             }
-        };
 
-        tipcut.parent = parent.clone();
-
-        // Serialize the tip cut content (parent + tips) for hashing
-        // We exclude the digest field itself from the hash computation
-        let mut hash_content = Vec::new();
-        hash_content.extend_from_slice(&tipcut.parent);
-        for tip in &tipcut.tips {
-            hash_content.extend_from_slice(&tip.encode_to_vec());
-        }
-
-        // Compute digest using crypto service
-        let digest = self.crypto.hash(&hash_content).await;
-
-        // Update tip cut with computed digest
-        tipcut.digest = digest.clone();
-        self.parent_hash_rx = FutureHash::Immediate(digest);
-
-        // Send to block_broadcaster via command
-        let cmd = BlockBroadcasterCommand::BroadcastTipCut(
-            tipcut,
-            self.view,
-            self.view_is_stable,
-            self.config_num,
-        );
-
-        self.block_broadcaster_command_tx
-            .send(cmd)
-            .await
-            .expect("Should be able to send to block_broadcaster");
-
-        trace!("Tip cut sequenced and sent to block_broadcaster");
+            trace!("Tip cut sequenced and sent to block_broadcaster");
+        });
     }
 }
+

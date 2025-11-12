@@ -32,6 +32,9 @@ use crate::{
     },
 };
 
+#[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoTipCut;
+
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
 
 type Sha = Sha512;
@@ -143,6 +146,16 @@ enum CryptoServiceCommand {
         oneshot::Sender<HashType>,
         bool, /* must_sign */
         FutureHash,
+    ),
+
+    // Prepare tip cut: compute digest with pipelining support
+    #[cfg(feature = "dag")]
+    PrepareTipCut(
+        ProtoTipCut,
+        oneshot::Sender<ProtoTipCut>, /* Tip cut with computed digest */
+        oneshot::Sender<HashType>,    /* Digest for response 1 */
+        oneshot::Sender<HashType>,    /* Digest for response 2 (for pipelining) */
+        FutureHash,                   /* Parent digest */
     ),
 
     // Takes the output of StorageService and converts it to CachedBlock.
@@ -345,6 +358,44 @@ impl CryptoService {
                     let _ = block_tx.send(CachedBlock::new(block, buf, hsh));
                     perf_event!();
                     perf_counter.deregister_entry(&perf_entry);
+                }
+                #[cfg(feature = "dag")]
+                CryptoServiceCommand::PrepareTipCut(
+                    mut tipcut,
+                    tipcut_tx,
+                    digest_tx,
+                    digest_tx2,
+                    parent_hash_rx,
+                ) => {
+                    use prost::Message;
+
+                    // Await parent hash (enables pipelining with previous tip cut)
+                    let parent = match parent_hash_rx {
+                        FutureHash::None => vec![0u8; 32], // Genesis
+                        FutureHash::Immediate(val) => val,
+                        FutureHash::Future(receiver) => receiver.await.unwrap(),
+                        FutureHash::FutureResult(receiver) => receiver.await.unwrap().unwrap(),
+                    };
+
+                    // Set parent in tip cut
+                    tipcut.parent = parent.clone();
+
+                    // Compute digest: hash(parent || tips)
+                    let mut hash_content = Vec::new();
+                    hash_content.extend_from_slice(&tipcut.parent);
+                    for tip in &tipcut.tips {
+                        hash_content.extend_from_slice(&tip.encode_to_vec());
+                    }
+
+                    let digest = hash(&hash_content);
+
+                    // Set digest in tip cut
+                    tipcut.digest = digest.clone();
+
+                    // Send results
+                    let _ = digest_tx.send(digest.clone());
+                    let _ = digest_tx2.send(digest);
+                    let _ = tipcut_tx.send(tipcut);
                 }
                 CryptoServiceCommand::CheckBlockSer(hsh, ser_rx, block_tx) => {
                     let res = ser_rx.await.unwrap();
@@ -669,6 +720,33 @@ impl CryptoServiceConnector {
         .await;
 
         (block_rx, hash_rx, hash_rx2)
+    }
+
+    /// Prepare tip cut with pipelining support
+    /// Similar to prepare_block, but for tip cuts in DAG mode
+    #[cfg(feature = "dag")]
+    pub async fn prepare_tipcut(
+        &mut self,
+        tipcut: ProtoTipCut,
+        parent_hash_rx: FutureHash,
+    ) -> (
+        oneshot::Receiver<ProtoTipCut>, // Tip cut with digest computed
+        oneshot::Receiver<HashType>,    // Digest (for storing as next parent)
+        oneshot::Receiver<HashType>,    // Digest (duplicate for other uses)
+    ) {
+        let (tipcut_tx, tipcut_rx) = oneshot::channel();
+        let (digest_tx, digest_rx) = oneshot::channel();
+        let (digest_tx2, digest_rx2) = oneshot::channel();
+        self.dispatch(CryptoServiceCommand::PrepareTipCut(
+            tipcut,
+            tipcut_tx,
+            digest_tx,
+            digest_tx2,
+            parent_hash_rx,
+        ))
+        .await;
+
+        (tipcut_rx, digest_rx, digest_rx2)
     }
 
     pub async fn check_block(
