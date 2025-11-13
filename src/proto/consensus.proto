@@ -108,6 +108,8 @@ message ProtoVote {
     uint64 n = 3;
     uint64 view = 4;
     uint64 config_num = 5;
+
+    bytes last_vote_hash = 6; // Only for PeerReview.
 }
 
 

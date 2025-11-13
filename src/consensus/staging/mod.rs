@@ -4,6 +4,8 @@ use futures::{future::BoxFuture, stream::FuturesOrdered, StreamExt as _};
 use log::{debug, error, info, trace, warn};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 
+#[cfg(feature = "witness_forwarding")]
+use crate::crypto::{HashType, default_hash};
 use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote}, rpc::{client::PinnedClient, SenderType}, utils::{channel::{Receiver, Sender}, timer::ResettableTimer, PerfCounter, StorageAck}};
 
 use super::{app::AppCommand, batch_proposal::BatchProposerCommand, block_broadcaster::BlockBroadcasterCommand, block_sequencer::BlockSequencerControlCommand, client_reply::ClientReplyCommand, extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, fork_receiver::{AppendEntriesStats, ForkReceiverCommand}, logserver::{self, LogServerCommand}, pacemaker::PacemakerCommand};
@@ -81,6 +83,9 @@ pub struct Staging {
 
     #[cfg(feature = "witness_forwarding")]
     witness_set_map: HashMap<String, Vec<String>>,
+
+    #[cfg(feature = "witness_forwarding")]
+    last_vote_hash: HashType,
 }
 
 impl Staging {
@@ -184,6 +189,9 @@ impl Staging {
 
             #[cfg(feature = "witness_forwarding")]
             witness_set_map,
+
+            #[cfg(feature = "witness_forwarding")]
+            last_vote_hash: default_hash(),
 
         };
 

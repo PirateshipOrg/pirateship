@@ -9,13 +9,12 @@ use tokio::{sync::oneshot, task::spawn_local};
 #[cfg(feature = "witness_forwarding")]
 use crate::crypto::HashType;
 use crate::{
-    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
+    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH, hash}, proto::{
         consensus::{
-            proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
-            ProtoSignatureArrayEntry, ProtoVote,
+            ProtoNameWithSignature, ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote, proto_block::Sig
         },
         rpc::ProtoPayload,
-    }, rpc::{client::PinnedClient, PinnedMessage, SenderType}, utils::StorageAck
+    }, rpc::{PinnedMessage, SenderType, client::PinnedClient}, utils::StorageAck
 };
 
 use super::{
@@ -227,7 +226,18 @@ impl Staging {
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
+
+            #[cfg(feature = "witness_forwarding")]
+            last_vote_hash: self.last_vote_hash.clone(),
+
+            #[cfg(not(feature = "witness_forwarding"))]
+            last_vote_hash: Vec::new(),
         };
+
+        #[cfg(feature = "witness_forwarding")]
+        {
+            self.last_vote_hash = hash(&vote.encode_to_vec());
+        }
 
         #[cfg(feature = "extra_2pc")]
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
@@ -320,7 +330,18 @@ impl Staging {
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
+
+            #[cfg(feature = "witness_forwarding")]
+            last_vote_hash: self.last_vote_hash.clone(),
+
+            #[cfg(not(feature = "witness_forwarding"))]
+            last_vote_hash: Vec::new(),
         };
+
+        #[cfg(feature = "witness_forwarding")]
+        {
+            self.last_vote_hash = hash(&vote.encode_to_vec());
+        }
 
         #[cfg(feature = "extra_2pc")]
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
