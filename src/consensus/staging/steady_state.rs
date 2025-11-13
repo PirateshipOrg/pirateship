@@ -6,14 +6,15 @@ use log::{debug, error, info, trace, warn};
 use prost::Message;
 use tokio::{sync::oneshot, task::spawn_local};
 
+#[cfg(feature = "witness_forwarding")]
+use crate::crypto::HashType;
 use crate::{
-    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH}, proto::{
+    consensus::{extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, logserver::LogServerCommand, pacemaker::PacemakerCommand}, crypto::{CachedBlock, DIGEST_LENGTH, hash}, proto::{
         consensus::{
-            proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
-            ProtoSignatureArrayEntry, ProtoVote,
+            ProtoNameWithSignature, ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote, proto_block::Sig
         },
         rpc::ProtoPayload,
-    }, rpc::{client::PinnedClient, PinnedMessage, SenderType}, utils::StorageAck
+    }, rpc::{PinnedMessage, SenderType, client::PinnedClient}, utils::StorageAck
 };
 
 use super::{
@@ -225,7 +226,18 @@ impl Staging {
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
+
+            #[cfg(feature = "witness_forwarding")]
+            last_vote_hash: self.last_vote_hash.clone(),
+
+            #[cfg(not(feature = "witness_forwarding"))]
+            last_vote_hash: Vec::new(),
         };
+
+        #[cfg(feature = "witness_forwarding")]
+        {
+            self.last_vote_hash = hash(&vote.encode_to_vec());
+        }
 
         #[cfg(feature = "extra_2pc")]
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
@@ -318,7 +330,18 @@ impl Staging {
             n: last_block.block.block.n,
             view: self.view,
             config_num: self.config_num,
+
+            #[cfg(feature = "witness_forwarding")]
+            last_vote_hash: self.last_vote_hash.clone(),
+
+            #[cfg(not(feature = "witness_forwarding"))]
+            last_vote_hash: Vec::new(),
         };
+
+        #[cfg(feature = "witness_forwarding")]
+        {
+            self.last_vote_hash = hash(&vote.encode_to_vec());
+        }
 
         #[cfg(feature = "extra_2pc")]
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.fork_digest.clone());
@@ -557,6 +580,45 @@ impl Staging {
         Ok(())
     }
 
+    #[cfg(feature = "witness_forwarding")]
+    async fn send_block_to_witness_set(&mut self, block: CachedBlock) {
+        use crate::{proto::consensus::{ProtoBlockWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
+
+        #[cfg(not(feature = "always_sign"))]
+        {
+            panic!("Misconfigured protocol!");
+        }
+
+        let leader = self.config.get().consensus_config.get_leader_for_view(self.view);
+        let witness_set = self.witness_set_map.get(&leader).unwrap();
+        let my_name = self.config.get().net_config.name.clone();
+        let sig = match &block.block.sig {
+            Some(Sig::ProposerSig(sig)) => sig.clone(),
+            _ => panic!("Block is not signed!"),
+        };
+        
+        let witness = ProtoWitness {
+            sender: leader,
+            receiver: my_name,
+            body: Some(Body::BlockWitness(ProtoBlockWitness {
+                block_hash: block.block_hash.clone(),
+                block_sig: sig,
+                parent_hash: block.block.parent.clone(),
+                n: block.block.n,
+                qc: block.block.qc.clone(),
+            })),
+        };
+
+        let payload = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::Witness(witness)),
+        };
+        let buf = payload.encode_to_vec();
+        let sz = buf.len();
+        let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
+        let mut profile = LatencyProfile::new();
+        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+    }
+
     /// This has a lot of similarities with process_block_as_leader.
     #[async_recursion]
     pub(super) async fn process_block_as_follower(
@@ -661,6 +723,10 @@ impl Staging {
                     .await;
             }
         }
+
+
+        #[cfg(feature = "witness_forwarding")]
+        self.send_block_to_witness_set(block.clone()).await;
 
         self.logserver_tx.send(LogServerCommand::NewBlock(block.clone())).await.unwrap();
         self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
@@ -776,8 +842,52 @@ impl Staging {
         self.process_vote(sender, vote).await
     }
 
+    #[cfg(feature = "witness_forwarding")]
+    async fn send_vote_to_witness_set(&mut self, sender: String, vote: ProtoVote, block_hash: HashType) {
+
+        #[cfg(not(feature = "always_sign"))]
+        {
+            panic!("Misconfigured protocol!");
+        }
+
+        use crate::{proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
+
+        let witness_set = self.witness_set_map.get(&sender).unwrap();
+        let my_name = self.config.get().net_config.name.clone();
+        // This only works when "alway_sign" is set.
+        let n = vote.n;
+        // Find the signature with the matching sequence number.
+        let sig = vote.sig_array.iter().find(|e| e.n == n).unwrap();
+        let vote_sig = sig.sig.clone();
+        let witness = ProtoWitness {
+            sender,
+            receiver: my_name.clone(),
+            body: Some(Body::VoteWitness(ProtoVoteWitness {
+                block_hash,
+                n,
+                vote_sig,
+            })),
+        };
+        let payload = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::Witness(witness)),
+        };
+        let buf = payload.encode_to_vec();
+        let sz = buf.len();
+        let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
+        let mut profile = LatencyProfile::new();
+        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+    }
+
+
     /// Precondition: The vote has been cryptographically verified to be from sender.
     async fn process_vote(&mut self, sender: String, mut vote: ProtoVote) -> Result<(), ()> {
+        #[cfg(feature = "witness_forwarding")]
+        {
+            let block = self.pending_blocks.iter().find(|e| e.block.block.n == vote.n).unwrap();
+            let block_hash = block.block.block_hash.clone();
+            self.send_vote_to_witness_set(sender.clone(), vote.clone(), block_hash).await;
+        }
+
         if !self.view_is_stable {
             info!("Processing vote on {} from {}", vote.n, sender);
         }
@@ -822,6 +932,8 @@ impl Staging {
         #[cfg(feature = "no_qc")]
         self.do_byzantine_commit(self.bci, self.ci).await;
         // This is needed to prevent a memory leak.
+
+
 
         Ok(())
     }

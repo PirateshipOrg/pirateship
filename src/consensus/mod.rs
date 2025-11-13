@@ -10,6 +10,9 @@ mod logserver;
 mod pacemaker;
 pub mod extra_2pc;
 
+#[cfg(feature = "witness_forwarding")]
+mod witness_receiver;
+
 // #[cfg(test)]
 // mod tests;
 
@@ -28,6 +31,11 @@ use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
+#[cfg(feature = "witness_forwarding")]
+use crate::proto::consensus::ProtoWitness;
+#[cfg(feature = "witness_forwarding")]
+use witness_receiver::WitnessReceiver;
+
 use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
@@ -41,6 +49,9 @@ pub struct ConsensusServerContext {
     vote_receiver_tx: Sender<VoteWithSender>,
     view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
     backfill_request_tx: Sender<ProtoBackfillNack>,
+
+    #[cfg(feature = "witness_forwarding")]
+    witness_receiver_tx: Sender<ProtoWitness>,
 }
 
 
@@ -56,12 +67,16 @@ impl PinnedConsensusServerContext {
         vote_receiver_tx: Sender<VoteWithSender>,
         view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
         backfill_request_tx: Sender<ProtoBackfillNack>,
+        #[cfg(feature = "witness_forwarding")]
+        witness_receiver_tx: Sender<ProtoWitness>,
     ) -> Self {
         Self(Arc::new(Box::pin(ConsensusServerContext {
             config, keystore, batch_proposal_tx,
             fork_receiver_tx, fork_receiver_command_tx,
             vote_receiver_tx, view_change_receiver_tx,
             backfill_request_tx,
+            #[cfg(feature = "witness_forwarding")]
+            witness_receiver_tx,
         })))
     }
 }
@@ -143,6 +158,14 @@ impl ServerContextType for PinnedConsensusServerContext {
                             .expect("Channel send error");
                         return Ok(RespType::NoResp);
             },
+            crate::proto::rpc::proto_payload::Message::Witness(proto_witness) => {
+                        #[cfg(feature = "witness_forwarding")]
+                        {
+                            self.witness_receiver_tx.send(proto_witness).await
+                                .expect("Channel send error");
+                        }
+                        return Ok(RespType::NoResp);
+            },
         }
 
 
@@ -171,6 +194,9 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     client_reply: Arc<Mutex<ClientReplyHandler>>,
     logserver: Arc<Mutex<LogServer>>,
     pacemaker: Arc<Mutex<Pacemaker>>,
+
+    #[cfg(feature = "witness_forwarding")]
+    witness_receiver: Arc<Mutex<WitnessReceiver>>,
 
     #[cfg(feature = "extra_2pc")]
     extra_2pc: Arc<Mutex<TwoPCHandler>>,
@@ -226,6 +252,9 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let pacemaker_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let fork_receiver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
 
+        #[cfg(feature = "witness_forwarding")]
+        let witness_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+
         #[cfg(feature = "extra_2pc")]
         let extra_2pc_client = Client::new_atomic(config.clone(), keystore.clone(), true, 50);
 
@@ -272,7 +301,13 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "extra_2pc")]
         let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
 
-        let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx, fork_receiver_command_tx.clone(), vote_tx, view_change_tx, backfill_request_tx);
+        #[cfg(feature = "witness_forwarding")]
+        let (witness_tx, witness_rx) = make_channel(_chan_depth);
+
+        let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx, fork_receiver_command_tx.clone(), vote_tx, view_change_tx, backfill_request_tx,
+            #[cfg(feature = "witness_forwarding")]
+            witness_tx,
+        );
         let batch_proposer = BatchProposer::new(config.clone(), batch_proposer_rx, block_maker_tx, client_reply_command_tx.clone(), unlogged_tx, batch_proposer_command_rx);
         let block_sequencer = BlockSequencer::new(config.clone(), control_command_rx, block_maker_rx, qc_rx, block_broadcaster_tx, client_reply_tx, block_maker_crypto);
         let block_broadcaster = BlockBroadcaster::new(config.clone(), client.into(), block_broadcaster_crypto2, block_broadcaster_rx, other_block_rx, broadcaster_control_command_rx, block_broadcaster_storage, staging_tx, fork_receiver_command_tx.clone(), app_tx.clone());
@@ -297,6 +332,10 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "extra_2pc")]
         let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
         
+        #[cfg(feature = "witness_forwarding")]
+        let witness_receiver = WitnessReceiver::new(config.clone(), witness_client.into(), witness_rx);
+
+
         let mut handles = JoinSet::new();
 
 
@@ -315,6 +354,9 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
 
             #[cfg(feature = "extra_2pc")]
             extra_2pc: Arc::new(Mutex::new(extra_2pc)),
+
+            #[cfg(feature = "witness_forwarding")]
+            witness_receiver: Arc::new(Mutex::new(witness_receiver)),
 
             crypto,
             storage: Arc::new(Mutex::new(storage)),
@@ -386,6 +428,14 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         handles.spawn(async move {
             Pacemaker::run(pacemaker).await;
         });
+
+        #[cfg(feature = "witness_forwarding")]
+        {
+            let witness_receiver = self.witness_receiver.clone();
+            handles.spawn(async move {
+                WitnessReceiver::run(witness_receiver).await;
+            });
+        }
 
         #[cfg(feature = "extra_2pc")]
         {

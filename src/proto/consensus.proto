@@ -108,4 +108,32 @@ message ProtoVote {
     uint64 n = 3;
     uint64 view = 4;
     uint64 config_num = 5;
+
+    bytes last_vote_hash = 6; // Only for PeerReview.
+}
+
+
+message ProtoBlockWitness {
+    bytes block_hash = 1;
+    bytes block_sig = 2;
+    bytes parent_hash = 3;
+    uint64 n = 4;
+    repeated ProtoQuorumCertificate qc = 5;
+}
+
+message ProtoVoteWitness {
+    bytes block_hash = 1;
+    bytes vote_sig = 2;
+    uint64 n = 3;
+}
+
+message ProtoWitness {
+    string sender = 1;
+    string receiver = 2;
+
+    oneof body {
+        ProtoBlockWitness block_witness = 3;
+        ProtoVoteWitness vote_witness = 4;
+    }
+
 }
