@@ -36,7 +36,10 @@ use crate::{
 
 #[cfg(feature = "dag")]
 use crate::{
-    consensus::dag::{lane_logserver, tip_cut_proposal},
+    consensus::dag::{
+        block_receiver::BlockReceiver, block_receiver::BlockReceiverCommand, lane_logserver,
+        tip_cut_proposal,
+    },
     proto::consensus::{
         ProtoAppendBlock, ProtoBlockAck, ProtoBlockCar, ProtoExecutionResults, ProtoTipCut,
     },
@@ -84,6 +87,8 @@ pub struct ConsensusServerContext {
     #[cfg(feature = "dag")]
     block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
     #[cfg(feature = "dag")]
+    block_receiver_command_tx: Sender<BlockReceiverCommand>,
+    #[cfg(feature = "dag")]
     block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
     #[cfg(feature = "dag")]
     car_tx: Sender<(ProtoBlockCar, SenderType)>,
@@ -107,6 +112,7 @@ impl PinnedConsensusServerContext {
         view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
         backfill_request_tx: Sender<ProtoBackfillNack>,
         #[cfg(feature = "dag")] block_receiver_tx: Sender<(ProtoAppendBlock, SenderType)>,
+        #[cfg(feature = "dag")] block_receiver_command_tx: Sender<BlockReceiverCommand>,
         #[cfg(feature = "dag")] block_ack_tx: Sender<(ProtoBlockAck, SenderType)>,
         #[cfg(feature = "dag")] car_tx: Sender<(ProtoBlockCar, SenderType)>,
         #[cfg(feature = "dag")] tipcut_proposal_tx: Sender<ProtoTipCut>,
@@ -123,6 +129,8 @@ impl PinnedConsensusServerContext {
             backfill_request_tx,
             #[cfg(feature = "dag")]
             block_receiver_tx,
+            #[cfg(feature = "dag")]
+            block_receiver_command_tx,
             #[cfg(feature = "dag")]
             block_ack_tx,
             #[cfg(feature = "dag")]
@@ -207,11 +215,20 @@ impl ServerContextType for PinnedConsensusServerContext {
             crate::proto::rpc::proto_payload::Message::AppendBlock(proto_append_block) => {
                 #[cfg(feature = "dag")]
                 {
-                    // TODO: Handle backfill response flag when extended for DAG
-                    self.block_receiver_tx
-                        .send((proto_append_block, sender))
-                        .await
-                        .expect("Channel send error");
+                    if proto_append_block.is_backfill_response {
+                        self.block_receiver_command_tx
+                            .send(BlockReceiverCommand::UseBackfillResponse(
+                                proto_append_block,
+                                sender,
+                            ))
+                            .await
+                            .expect("Channel send error");
+                    } else {
+                        self.block_receiver_tx
+                            .send((proto_append_block, sender))
+                            .await
+                            .expect("Channel send error");
+                    }
                 }
 
                 #[cfg(not(feature = "dag"))]
@@ -575,6 +592,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             backfill_request_tx,
             #[cfg(feature = "dag")]
             dag_block_receiver_tx.clone(),
+            #[cfg(feature = "dag")]
+            dag_block_receiver_command_tx.clone(),
             #[cfg(feature = "dag")]
             dag_block_ack_tx.clone(),
             #[cfg(feature = "dag")]
