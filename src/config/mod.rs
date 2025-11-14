@@ -113,7 +113,7 @@ impl ConsensusConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub logger_stats_report_ms: u64,
-    pub checkpoint_interval_ms: u64,
+    pub checkpoint_interval_blocks: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -221,7 +221,7 @@ impl ClientConfig {
             },
             app_config: AppConfig {
                 logger_stats_report_ms: 100,
-                checkpoint_interval_ms: 60000,
+                checkpoint_interval_blocks: 1000,
             },
             
             #[cfg(feature = "evil")]

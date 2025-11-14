@@ -115,7 +115,6 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
 
     client_reply_tx: Sender<ClientReplyCommand>,
 
-    checkpoint_timer: Arc<Pin<Box<ResettableTimer>>>,
     log_timer: Arc<Pin<Box<ResettableTimer>>>,
 
     perf_counter: RefCell<PerfCounter<u64>>,
@@ -123,6 +122,8 @@ pub struct Application<'a, E: AppEngine + Send + Sync + 'a> {
     gc_tx: Sender<u64>,
 
     phantom: PhantomData<&'a E>,
+
+    checkpoint_tx: Sender<(u64 /* bci */, E::State /* state */)>,
 }
 
 
@@ -131,11 +132,11 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         config: AtomicConfig,
         staging_rx: Receiver<AppCommand>, unlogged_rx: Receiver<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         client_reply_tx: Sender<ClientReplyCommand>, gc_tx: Sender<u64>,
+        checkpoint_tx: Sender<(u64 /* bci */, E::State /* state */)>,
 
         #[cfg(feature = "extra_2pc")]
         twopc_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
     ) -> Self {
-        let checkpoint_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.checkpoint_interval_ms));
         let log_timer = ResettableTimer::new(Duration::from_millis(config.get().app_config.logger_stats_report_ms));
         let engine = E::new(config.clone());
 
@@ -151,10 +152,10 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
             staging_rx,
             unlogged_rx,
             client_reply_tx,
-            checkpoint_timer,
             log_timer,
             perf_counter,
             gc_tx,
+            checkpoint_tx,
 
             #[cfg(feature = "extra_2pc")]
             twopc_tx,
@@ -167,7 +168,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         let mut application = application.lock().await;
 
         let log_timer_handle = application.log_timer.run().await;
-        let checkpoint_timer_handle = application.checkpoint_timer.run().await;
 
         let mut last_perf_logged_ci = 0;
         while let Ok(_) = application.worker().await {
@@ -178,7 +178,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         }
 
         log_timer_handle.abort();
-        checkpoint_timer_handle.abort();
     }
 
     async fn worker(&mut self) -> Result<(), ()> {
@@ -199,9 +198,6 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
 
                 self.handle_unlogged_request(req, reply_tx).await;
             },
-            _ = self.checkpoint_timer.wait() => {
-                self.checkpoint().await;
-            },
             _ = self.log_timer.wait() => {
                 self.log_stats().await;
             }
@@ -219,7 +215,8 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
         let state = self.engine.get_current_state();
         // TODO: Decide on checkpointing strategy
 
-        info!("Current state checkpoint: {}", state);
+        info!("Current state checkpoint: {} at bci {}", state, self.stats.bci);
+        self.checkpoint_tx.send((self.stats.bci, state)).await.unwrap();
 
         // It should be safe to garbage collect all bcied + executed blocks.
         // Since the application is single-threaded and self.bci is set inevitably during the execution,
@@ -322,29 +319,49 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                 }
             },
             AppCommand::ByzCommit(blocks) => {
-                let mut new_bci = self.stats.bci;
-                let (block_hashes, block_ns) = blocks.iter().map(|block| {
-                    if new_bci < block.block.n {
-                        new_bci = block.block.n;
+                let mut block_groups = Vec::new();
+                let mut current_group = Vec::new();
+                let checkpoint_interval_blocks = self.config.get().app_config.checkpoint_interval_blocks;
+                for block in blocks {
+                    let _bci = block.block.n;
+                    current_group.push(block);
+                    if _bci % checkpoint_interval_blocks == 0 {
+                        block_groups.push(current_group);
+                        current_group = Vec::new();
                     }
-                    (block.block_hash.clone(), block.block.n)
-                }).collect::<(Vec<_>, Vec<_>)>();
-                let results = self.engine.handle_byz_commit(blocks);
-                self.stats.total_byz_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
-                self.stats.bci = new_bci;
-
-                assert_eq!(block_hashes.len(), results.len());
-
-                let block_ns_cp = block_ns.clone();
-                let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoByzResponse>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
-                    block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoByzResponse>)
-                ).collect();
-                self.client_reply_tx.send(ClientReplyCommand::ByzCommitAck(result_map)).await.unwrap();
-                
-                for n in block_ns_cp {
-                    self.perf_deregister(n);
+                }
+                if !current_group.is_empty() {
+                    block_groups.push(current_group);
                 }
 
+                for blocks in block_groups {
+                    let mut new_bci = self.stats.bci;
+                    let (block_hashes, block_ns) = blocks.iter().map(|block| {
+                        if new_bci < block.block.n {
+                            new_bci = block.block.n;
+                        }
+                        (block.block_hash.clone(), block.block.n)
+                    }).collect::<(Vec<_>, Vec<_>)>();
+                    let results = self.engine.handle_byz_commit(blocks);
+                    self.stats.total_byz_committed_txs += results.iter().map(|e| e.len() as u64).sum::<u64>();
+                    self.stats.bci = new_bci;
+    
+                    assert_eq!(block_hashes.len(), results.len());
+    
+                    let block_ns_cp = block_ns.clone();
+                    let result_map = block_hashes.into_iter().zip( // (HashType, (u64, Vec<ProtoByzResponse>)) ---> HashMap<HashType, (u64, Vec<ProtoTransactionResult>)>
+                        block_ns.into_iter().zip(results.into_iter()) // (u64, Vec<ProtoByzResponse>)
+                    ).collect();
+                    self.client_reply_tx.send(ClientReplyCommand::ByzCommitAck(result_map)).await.unwrap();
+                    
+                    for n in block_ns_cp {
+                        self.perf_deregister(n);
+                    }
+
+                    if self.stats.bci % checkpoint_interval_blocks == 0 {
+                        self.checkpoint().await;
+                    }
+                }
             },
             AppCommand::Rollback(mut new_last_block) => {               
                 if new_last_block <= self.stats.bci {

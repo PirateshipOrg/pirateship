@@ -9,6 +9,7 @@ pub mod client_reply;
 mod logserver;
 mod pacemaker;
 pub mod extra_2pc;
+mod checkpoint;
 
 // #[cfg(test)]
 // mod tests;
@@ -28,7 +29,7 @@ use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
-use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
+use crate::{consensus::checkpoint::CheckpointHandler, proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange}}, rpc::{SenderType, client::Client}, utils::{RocksDBStorageEngine, StorageService, channel::{Receiver, Sender, make_channel}}};
 
 use crate::{config::{AtomicConfig, Config}, crypto::{AtomicKeyStore, CryptoService, KeyStore}, proto::rpc::ProtoPayload, rpc::{server::{MsgAckChan, RespType, Server, ServerContextType}, MessageRef}};
 
@@ -183,6 +184,8 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
 
     /// Use this to feed transactions from within the same process.
     pub batch_proposer_tx: Sender<TxWithAckChanTag>,
+
+    checkpoint_handler: Arc<Mutex<CheckpointHandler<E::State>>>,
 }
 
 impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
@@ -225,6 +228,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let logserver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let pacemaker_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let fork_receiver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let checkpoint_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
 
         #[cfg(feature = "extra_2pc")]
         let extra_2pc_client = Client::new_atomic(config.clone(), keystore.clone(), true, 50);
@@ -254,6 +258,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (backfill_request_tx, backfill_request_rx) = make_channel(_chan_depth);
         let (gc_tx, gc_rx) = make_channel(_chan_depth);
         let (logserver_query_tx, logserver_query_rx) = make_channel(_chan_depth);
+        let (checkpoint_tx, checkpoint_rx) = make_channel(_chan_depth);
 
         let block_maker_crypto = crypto.get_connector();
         let block_broadcaster_crypto = crypto.get_connector();
@@ -286,14 +291,17 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         );
         let fork_receiver = ForkReceiver::new(config.clone(), fork_receiver_crypto, fork_receiver_client.into(), fork_rx, fork_receiver_command_rx, other_block_tx, logserver_query_tx.clone());
         let app = Application::new(config.clone(), app_rx, unlogged_rx, client_reply_command_tx, gc_tx,
-            
+            checkpoint_tx,
+
             #[cfg(feature = "extra_2pc")]
             extra_2pc_phase_message_tx,
         );
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
         let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
         let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
-
+        let checkpoint_handler = CheckpointHandler::new(config.clone(), checkpoint_rx, storage.get_connector(crypto.get_connector()), checkpoint_client.into());
+        
+        
         #[cfg(feature = "extra_2pc")]
         let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
         
@@ -321,6 +329,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             __sink_handles: handles,
 
             app: Arc::new(Mutex::new(app)),
+            checkpoint_handler: Arc::new(Mutex::new(checkpoint_handler)),
 
             batch_proposer_tx,
         }
@@ -338,6 +347,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let fork_receiver = self.fork_receiver.clone();
         let logserver = self.logserver.clone();
         let pacemaker = self.pacemaker.clone();
+        let checkpoint_handler = self.checkpoint_handler.clone();
 
         let mut handles = JoinSet::new();
 
@@ -385,6 +395,10 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
 
         handles.spawn(async move {
             Pacemaker::run(pacemaker).await;
+        });
+
+        handles.spawn(async move {
+            CheckpointHandler::run(checkpoint_handler).await;
         });
 
         #[cfg(feature = "extra_2pc")]
