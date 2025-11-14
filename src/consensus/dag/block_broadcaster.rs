@@ -31,7 +31,7 @@ use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector},
     proto::{
-        consensus::{HalfSerializedBlock, ProtoAppendBlock},
+        consensus::{HalfSerializedBlock, ProtoAppendBlocks},
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType},
@@ -48,6 +48,9 @@ use super::{
 
 pub enum DagBlockBroadcasterCommand {
     UpdateCI(u64),
+    /// Provide a lane prefix to be batched with the next locally proposed block
+    /// Mirrors traditional broadcaster's NextAEForkPrefix behavior
+    NextAppendBlocksPrefix(Vec<oneshot::Receiver<Result<CachedBlock, Error>>>),
 }
 
 pub struct DagBlockBroadcaster {
@@ -55,6 +58,9 @@ pub struct DagBlockBroadcaster {
     crypto: CryptoServiceConnector,
 
     ci: u64,
+
+    // Accumulates a lane prefix to batch with the next proposed block
+    lane_prefix_buffer: Vec<CachedBlock>,
 
     // Input ports
     my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
@@ -115,6 +121,7 @@ impl DagBlockBroadcaster {
             config,
             crypto,
             ci: 0,
+            lane_prefix_buffer: Vec::new(),
             my_block_rx,
             other_block_rx,
             control_command_rx,
@@ -239,6 +246,12 @@ impl DagBlockBroadcaster {
     ) -> Result<(), Error> {
         match cmd {
             DagBlockBroadcasterCommand::UpdateCI(ci) => self.ci = ci,
+            DagBlockBroadcasterCommand::NextAppendBlocksPrefix(blocks) => {
+                for block_rx in blocks {
+                    let block = block_rx.await.unwrap().expect("Failed to get block");
+                    self.lane_prefix_buffer.push(block);
+                }
+            }
         }
 
         Ok(())
@@ -282,26 +295,37 @@ impl DagBlockBroadcaster {
         // Use own name as lane identifier
         let lane_id = self.config.get().net_config.name.clone();
 
-        // Store and forward internally
-        self.store_and_forward_internally(
-            &block,
-            AppendBlockStats {
-                view,
-                view_is_stable,
-                config_num,
-                sender: self.config.get().net_config.name.clone(),
-                ci: self.ci,
-                lane_id: lane_id.clone(),
-            },
-            true,
-        )
-        .await?;
+        // Build a batched lane: prefix buffer + new block (mirrors traditional fork batching)
+        let mut lane_batch: Vec<CachedBlock> = Vec::new();
+        for b in self.lane_prefix_buffer.drain(..) {
+            lane_batch.push(b);
+        }
+        lane_batch.push(block.clone());
 
-        // Broadcast to all other nodes
+        // Store and forward each block internally; mark only the last as final
+        let total = lane_batch.len();
+        for (idx, blk) in lane_batch.iter().enumerate() {
+            let is_last = idx + 1 == total;
+            self.store_and_forward_internally(
+                blk,
+                AppendBlockStats {
+                    view,
+                    view_is_stable: blk.block.view_is_stable,
+                    config_num,
+                    sender: self.config.get().net_config.name.clone(),
+                    ci: self.ci,
+                    lane_id: lane_id.clone(),
+                },
+                is_last,
+            )
+            .await?;
+        }
+
+        // Broadcast batched blocks to all other nodes in a single AppendBlocks message
         let names = self.get_everyone_except_me();
-        self.broadcast_single_block(
+        self.broadcast_blocks(
             names,
-            block.clone(),
+            lane_batch,
             view,
             view_is_stable,
             config_num,
@@ -360,10 +384,11 @@ impl DagBlockBroadcaster {
         Ok(())
     }
 
-    async fn broadcast_single_block(
+    /// Broadcast a batch of blocks as a single AppendBlocks message
+    async fn broadcast_blocks(
         &mut self,
         names: Vec<String>,
-        block: CachedBlock,
+        mut blocks: Vec<CachedBlock>,
         view: u64,
         view_is_stable: bool,
         config_num: u64,
@@ -374,14 +399,19 @@ impl DagBlockBroadcaster {
             None => (false, 0),
         };
 
-        let append_block = ProtoAppendBlock {
-            block: Some(HalfSerializedBlock {
-                n: block.block.n,
-                view: block.block.view,
-                view_is_stable: block.block.view_is_stable,
-                config_num: block.block.config_num,
-                serialized_body: block.block_ser.clone(),
-            }),
+        let serialized_blocks: Vec<HalfSerializedBlock> = blocks
+            .drain(..)
+            .map(|b| HalfSerializedBlock {
+                n: b.block.n,
+                view: b.block.view,
+                view_is_stable: b.block.view_is_stable,
+                config_num: b.block.config_num,
+                serialized_body: b.block_ser.clone(),
+            })
+            .collect();
+
+        let append_blocks = ProtoAppendBlocks {
+            serialized_blocks,
             commit_index: self.ci,
             view,
             view_is_stable,
@@ -390,8 +420,8 @@ impl DagBlockBroadcaster {
         };
 
         let rpc = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::AppendBlock(
-                append_block,
+            message: Some(crate::proto::rpc::proto_payload::Message::AppendBlocks(
+                append_blocks,
             )),
         };
         let data = rpc.encode_to_vec();
@@ -402,7 +432,10 @@ impl DagBlockBroadcaster {
 
         let sz = data.len();
         if !view_is_stable {
-            info!("AppendBlock size: {} Broadcasting to {:?}", sz, names);
+            info!(
+                "AppendBlocks batch size: {} Broadcasting to {:?}",
+                sz, names
+            );
         }
         let data = PinnedMessage::from(data, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
@@ -411,7 +444,7 @@ impl DagBlockBroadcaster {
             &names,
             &data,
             &mut profile,
-            self.get_byzantine_broadcast_threshold(),
+            self.get_car_broadcast_threshold(),
         )
         .await;
 
@@ -421,19 +454,22 @@ impl DagBlockBroadcaster {
         }
     }
 
-    fn get_byzantine_broadcast_threshold(&self) -> usize {
-        let n = self.config.get().consensus_config.node_list.len();
+    fn get_car_broadcast_threshold(&self) -> usize {
+        let config = self.config.get();
+        let node_list_len = config.consensus_config.node_list.len();
 
+        // If using platforms, we need u+1 nodes to accept the CAR.
         #[cfg(feature = "platforms")]
         {
-            let u = self.config.get().consensus_config.liveness_u as usize;
-            n - u
+            if node_list_len <= config.consensus_config.liveness_u as usize {
+                return 0;
+            }
+            let car_threshold = config.consensus_config.liveness_u as usize;
+            return car_threshold + 1;
         }
 
-        #[cfg(not(feature = "platforms"))]
-        {
-            let f = n / 3;
-            n - f
-        }
+        // Default: f+1
+        let f = node_list_len / 3;
+        return f + 1;
     }
 }

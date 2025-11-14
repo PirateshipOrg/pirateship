@@ -25,9 +25,10 @@ message ProtoPayload {
 
         //  Dag Dissemination Only
         proto.consensus.ProtoAppendBlocks append_blocks = 8;
-        proto.consensus.ProtoBlockAck block_ack = 9;
-        proto.consensus.ProtoBlockCAR block_CAR = 10;
-        proto.consensus.ProtoTipCut tip_cut = 11;
-        proto.consensus.ProtoExecutionResults execution_results = 12;  // For DAG proxy pattern
+        proto.consensus.ProtoAppendBlockLane append_block_lane = 9;
+        proto.consensus.ProtoBlockAck block_ack = 10;
+        proto.consensus.ProtoBlockCAR block_CAR = 11;
+        proto.consensus.ProtoTipCut tip_cut = 12;
+        proto.consensus.ProtoExecutionResults execution_results = 13;  // For DAG proxy pattern
    }
 }

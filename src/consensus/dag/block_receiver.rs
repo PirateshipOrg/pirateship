@@ -105,7 +105,7 @@ pub struct BlockReceiver {
     config_num: u64,
 
     // Message channels
-    block_rx: Receiver<(ProtoAppendBlock, SenderType /* Sender */)>,
+    block_rx: Receiver<(ProtoAppendBlocks, SenderType /* Sender */)>,
     command_rx: Receiver<BlockReceiverCommand>,
 
     dag_broadcaster_tx: Sender<SingleBlock>,
@@ -124,7 +124,7 @@ impl BlockReceiver {
         config: AtomicConfig,
         crypto: CryptoServiceConnector,
         client: PinnedClient,
-        block_rx: Receiver<(ProtoAppendBlock, SenderType)>,
+        block_rx: Receiver<(ProtoAppendBlocks, SenderType)>,
         command_rx: Receiver<BlockReceiverCommand>,
         dag_broadcaster_tx: Sender<SingleBlock>,
         lane_logserver_query_tx: Sender<LaneLogServerQuery>,
@@ -172,10 +172,10 @@ impl BlockReceiver {
         } else {
             tokio::select! {
                 block_sender = self.block_rx.recv() => {
-                    if let Some((block, SenderType::Auth(sender, _))) = block_sender {
-                        debug!("Received AppendBlock(n={}) from {}",
-                            block.block.as_ref().map_or(0, |b| b.n), sender);
-                        self.process_block(block, sender).await;
+                    if let Some((blocks, SenderType::Auth(sender, _))) = block_sender {
+                        debug!("Received AppendBlocks(n={}) from {}",
+                            blocks.serialized_blocks.last().unwrap().n, sender);
+                        self.process_blocks(blocks, sender).await;
                     }
                 },
                 cmd = self.command_rx.recv() => {
@@ -189,11 +189,11 @@ impl BlockReceiver {
         Ok(())
     }
 
-    async fn process_block(&mut self, block: ProtoAppendBlock, sender: String) {
-        if block.view < self.view || block.config_num < self.config_num {
+    async fn process_blocks(&mut self, blocks: ProtoAppendBlocks, sender: String) {
+        if blocks.view < self.view || blocks.config_num < self.config_num {
             warn!(
-                "Old view AppendBlock received: block view {} < my view {} or block config {} < my config {}",
-                block.view, self.view, block.config_num, self.config_num
+                "Old view AppendBlocks received: blocks view {} < my view {} or blocks config {} < my config {}",
+                blocks.view, self.view, blocks.config_num, self.config_num
             );
             return;
         }
@@ -205,107 +205,111 @@ impl BlockReceiver {
         // Check if this lane is waiting on NACK reply
         if let Some(stats) = self.lane_continuity.get(&lane_id) {
             if stats.waiting_on_nack_reply {
-                info!("Possible AppendBlock after NACK for lane {}", lane_id);
+                info!("Possible AppendBlocks after NACK for lane {}", lane_id);
             }
         }
 
-        // Check lane continuity
-        if self.ensure_lane_continuity(&lane_id, &block).await.is_err() {
-            // Send NACK for this lane
-            self.send_lane_nack(lane_id.clone(), sender, block).await;
-            info!("Returning after sending NACK for lane {}", lane_id);
-            return;
-        }
+        // Process each block in the chain
+        for half_serialized in blocks.serialized_blocks.iter() {
+            // Check lane continuity for this block
+            // QUESTION: DO we need to check continuity for each block in the chain? Or just the first?
+            if self
+                .ensure_lane_continuity_for_block(&lane_id, half_serialized)
+                .await
+                .is_err()
+            {
+                // Send NACK for this lane
+                self.send_lane_nack(lane_id.clone(), sender, blocks).await;
+                info!("Returning after sending NACK for lane {}", lane_id);
+                return;
+            }
 
-        // Mark that we're no longer waiting on NACK for this lane
-        if let Some(stats) = self.lane_continuity.get_mut(&lane_id) {
-            stats.waiting_on_nack_reply = false;
-        }
+            // Mark that we're no longer waiting on NACK for this lane
+            if let Some(stats) = self.lane_continuity.get_mut(&lane_id) {
+                stats.waiting_on_nack_reply = false;
+            }
 
-        let half_serialized = match block.block {
-            Some(b) => b,
-            None => return,
-        };
+            // Verify the block cryptographically
+            // The crypto service returns:
+            // - block_rx: oneshot::Receiver<CachedBlock> (the verified block)
+            // - hash_rx: oneshot::Receiver<Vec<u8>> (the block hash)
+            // - hash_rx2: oneshot::Receiver<Vec<u8>> (duplicate hash for convenience)
+            let (block_rx, hash_rx, _hash_rx2) = self
+                .crypto
+                .prepare_block(
+                    match deserialize_proto_block(&half_serialized.serialized_body) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            warn!("Failed to deserialize block body");
+                            return;
+                        }
+                    },
+                    true,             // Always sign in DAG mode
+                    FutureHash::None, // Parent hash is in the block already
+                )
+                .await;
 
-        // Verify the single block cryptographically
-        // The crypto service returns:
-        // - block_rx: oneshot::Receiver<CachedBlock> (the verified block)
-        // - hash_rx: oneshot::Receiver<Vec<u8>> (the block hash)
-        // - hash_rx2: oneshot::Receiver<Vec<u8>> (duplicate hash for convenience)
-        let (block_rx, hash_rx, _hash_rx2) = self
-            .crypto
-            .prepare_block(
-                match deserialize_proto_block(&half_serialized.serialized_body) {
-                    Ok(b) => b,
-                    Err(_) => {
-                        warn!("Failed to deserialize block body");
-                        return;
+            // Create stats for this block
+            let stats = AppendBlockStats {
+                view: blocks.view,
+                view_is_stable: blocks.view_is_stable,
+                config_num: blocks.config_num,
+                sender: sender.clone(),
+                ci: blocks.commit_index,
+                lane_id: lane_id.clone(),
+            };
+
+            // Wrap the block receiver to match the expected Result type
+            // The crypto service guarantees the block is valid at this point
+            let (result_tx, result_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                match block_rx.await {
+                    Ok(block) => {
+                        let _ = result_tx.send(Ok(block));
                     }
-                },
-                true,             // Always sign in DAG mode
-                FutureHash::None, // Parent hash is in the block already
-            )
-            .await;
-
-        // Create stats for this block
-        let stats = AppendBlockStats {
-            view: block.view,
-            view_is_stable: block.view_is_stable,
-            config_num: block.config_num,
-            sender,
-            ci: block.commit_index,
-            lane_id: lane_id.clone(),
-        };
-
-        // Wrap the block receiver to match the expected Result type
-        // The crypto service guarantees the block is valid at this point
-        let (result_tx, result_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            match block_rx.await {
-                Ok(block) => {
-                    let _ = result_tx.send(Ok(block));
+                    Err(_) => {
+                        let _ = result_tx.send(Err(Error::new(
+                            std::io::ErrorKind::Other,
+                            "Block verification cancelled",
+                        )));
+                    }
                 }
-                Err(_) => {
-                    let _ = result_tx.send(Err(Error::new(
-                        std::io::ErrorKind::Other,
-                        "Block verification cancelled",
-                    )));
+            });
+
+            // FIXME: Update broadcaster to send a lane instead of one block at a time
+            // Forward to broadcaster
+            let single_block = SingleBlock {
+                block_future: result_rx,
+                stats,
+            };
+
+            self.dag_broadcaster_tx.send(single_block).await.unwrap();
+
+            // Update lane continuity with the hash of this block
+            // Wrap hash receiver to match FutureResult type
+            let (hash_result_tx, hash_result_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                match hash_rx.await {
+                    Ok(hash) => {
+                        let _ = hash_result_tx.send(Ok(hash));
+                    }
+                    Err(_) => {
+                        let _ = hash_result_tx.send(Err(Error::new(
+                            std::io::ErrorKind::Other,
+                            "Hash calculation cancelled",
+                        )));
+                    }
                 }
-            }
-        });
+            });
 
-        // Forward to broadcaster
-        let single_block = SingleBlock {
-            block_future: result_rx,
-            stats,
-        };
+            let lane_stats = self
+                .lane_continuity
+                .entry(lane_id.clone())
+                .or_insert_with(LaneContinuityStats::new);
 
-        self.dag_broadcaster_tx.send(single_block).await.unwrap();
-
-        // Update lane continuity with the hash of this block
-        // Wrap hash receiver to match FutureResult type
-        let (hash_result_tx, hash_result_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            match hash_rx.await {
-                Ok(hash) => {
-                    let _ = hash_result_tx.send(Ok(hash));
-                }
-                Err(_) => {
-                    let _ = hash_result_tx.send(Err(Error::new(
-                        std::io::ErrorKind::Other,
-                        "Hash calculation cancelled",
-                    )));
-                }
-            }
-        });
-
-        let lane_stats = self
-            .lane_continuity
-            .entry(lane_id.clone())
-            .or_insert_with(LaneContinuityStats::new);
-
-        lane_stats.last_block_hash = FutureHash::FutureResult(hash_result_rx);
-        lane_stats.last_block_n = half_serialized.n;
+            lane_stats.last_block_hash = FutureHash::FutureResult(hash_result_rx);
+            lane_stats.last_block_n = half_serialized.n;
+        }
     }
 
     async fn handle_command(&mut self, cmd: BlockReceiverCommand) {
@@ -327,11 +331,11 @@ impl BlockReceiver {
                 let ab = match block_lane.ab {
                     Some(ab) => ab,
                     None => {
-                        warn!("Backfill response missing AppendBlock");
+                        warn!("Backfill response missing AppendBlocks");
                         return;
                     }
                 };
-                self.process_block(ab, lane_id).await;
+                self.process_blocks(ab, lane_id).await;
             }
         }
     }
@@ -342,19 +346,11 @@ impl BlockReceiver {
     /// 1. If parent hash matches last block we forwarded in this lane -> OK
     /// 2. If parent hash exists in lane's log server history -> OK
     /// 3. Otherwise -> NACK needed
-    async fn ensure_lane_continuity(
+    async fn ensure_lane_continuity_for_block(
         &mut self,
         lane_id: &String,
-        block: &ProtoAppendBlock,
+        half_serialized: &crate::proto::consensus::HalfSerializedBlock,
     ) -> Result<(), ()> {
-        let half_serialized = match &block.block {
-            Some(b) => b,
-            None => {
-                warn!("Block has no serialized body");
-                return Err(());
-            }
-        };
-
         if half_serialized.n == 1 {
             // First block in lane, no parent to check
             return Ok(());
@@ -419,8 +415,8 @@ impl BlockReceiver {
     }
 
     /// Send a NACK for a specific lane requesting backfill
-    async fn send_lane_nack(&mut self, lane_id: String, sender: String, block: ProtoAppendBlock) {
-        info!("NACKing AppendBlock to {} for lane {}", sender, lane_id);
+    async fn send_lane_nack(&mut self, lane_id: String, sender: String, blocks: ProtoAppendBlocks) {
+        info!("NACKing AppendBlocks to {} for lane {}", sender, lane_id);
 
         // Mark this lane as waiting on NACK reply
         let lane_stats = self
@@ -429,7 +425,10 @@ impl BlockReceiver {
             .or_insert_with(LaneContinuityStats::new);
         lane_stats.waiting_on_nack_reply = true;
 
-        let first_block_n = block.block.as_ref().map_or(block.commit_index, |b| b.n);
+        let first_block_n = blocks
+            .serialized_blocks
+            .first()
+            .map_or(blocks.commit_index, |b| b.n);
         let last_index_needed = if first_block_n > 100 {
             first_block_n - 100
         } else {
@@ -456,12 +455,12 @@ impl BlockReceiver {
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Abl(
                 crate::proto::consensus::ProtoAppendBlockLane {
                     name: lane_id.clone(),
-                    ab: Some(crate::proto::consensus::ProtoAppendBlock {
-                        block: block.block,
-                        commit_index: block.commit_index,
-                        view: block.view,
-                        view_is_stable: block.view_is_stable,
-                        config_num: block.config_num,
+                    ab: Some(crate::proto::consensus::ProtoAppendBlocks {
+                        serialized_blocks: blocks.serialized_blocks,
+                        commit_index: blocks.commit_index,
+                        view: blocks.view,
+                        view_is_stable: blocks.view_is_stable,
+                        config_num: blocks.config_num,
                         is_backfill_response: false,
                     }),
                 },

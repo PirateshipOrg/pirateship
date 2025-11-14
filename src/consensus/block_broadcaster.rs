@@ -251,7 +251,8 @@ impl BlockBroadcaster {
             }
             #[cfg(feature = "dag")]
             BlockBroadcasterCommand::BroadcastTipCut(tipcut, view, view_is_stable, config_num) => {
-                self.process_my_tipcut(tipcut, view, view_is_stable, config_num).await?;
+                self.process_my_tipcut(tipcut, view, view_is_stable, config_num)
+                    .await?;
             }
         }
 
@@ -388,25 +389,6 @@ impl BlockBroadcaster {
         return 2 * f;
     }
 
-    fn get_car_broadcast_threshold(&self) -> usize {
-        let config = self.config.get();
-        let node_list_len = config.consensus_config.node_list.len();
-
-        // If using platforms, we need u+1 nodes to accept the CAR.
-        #[cfg(feature = "platforms")]
-        {
-            if node_list_len <= config.consensus_config.liveness_u as usize {
-                return 0;
-            }
-            let car_threshold = config.consensus_config.liveness_u as usize;
-            return car_threshold + 1;
-        }
-
-        // Default: f+1
-        let f = node_list_len / 3;
-        return f + 1;
-    }
-
     async fn process_other_block(&mut self, mut blocks: MultipartFork) -> Result<(), Error> {
         let _blocks = blocks.await_all().await;
         // info!("Await all finished!");
@@ -524,8 +506,6 @@ impl BlockBroadcaster {
         Ok(())
     }
 
-    // TODO: Implement evil behavior for DAG mode
-    #[cfg(not(feature = "dag"))]
     async fn maybe_act_evil(
         &mut self,
         names: Vec<String>,
@@ -702,12 +682,10 @@ impl BlockBroadcaster {
         config_num: u64,
     ) {
         let tip_count = tipcut.tips.len();
-        
+
         // Wrap tip cut in AppendEntries message
         let append_entry = ProtoAppendEntries {
-            entry: Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(
-                tipcut,
-            )),
+            entry: Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(tipcut)),
             commit_index: self.ci,
             view,
             view_is_stable,

@@ -18,7 +18,7 @@ use crate::{
         checkpoint::{
             proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint, ProtoLaneBlockHints,
         },
-        consensus::{HalfSerializedBlock, ProtoAppendBlock},
+        consensus::{HalfSerializedBlock, ProtoAppendBlocks},
         rpc::{proto_payload::Message, ProtoPayload},
     },
     rpc::{client::PinnedClient, MessageRef},
@@ -349,17 +349,18 @@ impl LaneLogServer {
         };
 
         // The requesting node has a block at some index and needs earlier blocks
-        // Extract the block_n from the AppendBlock request
-        let requester_block_n = match &ab.block {
+        // Extract the block_n from the AppendBlocks request
+        let requester_block_n = match ab.serialized_blocks.last() {
             Some(block) => block.n,
-            None => ab.commit_index, // Fallback to commit_index if no block
+            None => ab.commit_index, // Fallback to commit_index if no blocks
+                                     // QUESTION: Is this correct? Should we default to 0 instead?
         };
 
         let first_n = last_index_needed;
         let last_n = requester_block_n;
 
         // Get the requested block from this lane
-        let requested_blocks = self.fill_lane(&lane_id, first_n, last_n, hints).await;
+        let requested_blocks = self.fill_lane(&lane_id, first_n, last_n, hints.hints).await;
 
         // Construct response as AppendBlockLane
         let payload = if !requested_blocks.is_empty() {
@@ -367,13 +368,14 @@ impl LaneLogServer {
                 message: Some(Message::AppendBlockLane(
                     crate::proto::consensus::ProtoAppendBlockLane {
                         name: lane_id,
-                        ab: ProtoAppendBlocks {
+                        ab: Some(ProtoAppendBlocks {
                             serialized_blocks: requested_blocks,
                             commit_index: ab.commit_index,
                             view: ab.view,
                             view_is_stable: ab.view_is_stable,
                             config_num: ab.config_num,
-                        },
+                            is_backfill_response: true,
+                        }),
                     },
                 )),
             }
@@ -416,8 +418,8 @@ impl LaneLogServer {
             .map(|hint| (hint.block_n, hint.digest))
             .collect::<HashMap<_, _>>();
 
-        let mut lane_queue = VecDequeue::with_capacity((last_n - first_n + 1) as usize);
-        for i in (first_n..=last_n) {
+        let mut lane_queue = VecDeque::with_capacity((last_n - first_n + 1) as usize);
+        for i in (first_n..=last_n).rev() {
             let block = match self.get_block(lane_id, i).await {
                 Some(block) => block,
                 None => {
@@ -442,6 +444,8 @@ impl LaneLogServer {
                 serialized_body: block.block_ser.clone(),
             });
         }
+
+        lane_queue.into_iter().collect()
     }
 
     /// Handle incoming queries:
@@ -481,13 +485,16 @@ impl LaneLogServer {
                 const JUMP_START: u64 = 1000;
                 const JUMP_MULTIPLIER: u64 = 10;
 
-                let mut block_hints = Vec::new();
+                let mut lane_hint = ProtoLaneBlockHints {
+                    name: proposer_sig.clone(),
+                    hints: Vec::new(),
+                };
 
                 let lane = match self.lanes.get(&proposer_sig) {
                     Some(lane) => lane,
                     None => {
                         warn!("Lane {:?} not found for GetHints", proposer_sig);
-                        let _ = sender.send(vec![]).await;
+                        let _ = sender.send(lane_hint).await;
                         return;
                     }
                 };
@@ -508,7 +515,7 @@ impl LaneLogServer {
                             break;
                         }
                     };
-                    block_hints.push(ProtoBlockHint {
+                    lane_hint.hints.push(ProtoBlockHint {
                         block_n: block.block.n,
                         digest: block.block_hash.clone(),
                     });
@@ -530,21 +537,15 @@ impl LaneLogServer {
                             panic!("Block {} not found in lane {:?}", last_n, proposer_sig);
                         }
                     };
-                    block_hints.push(ProtoBlockHint {
+                    lane_hint.hints.push(ProtoBlockHint {
                         block_n: block.block.n,
                         digest: block.block_hash.clone(),
                     });
                 }
 
-                // Wrap the block hints in ProtoLaneBlockHints
-                let lane_hints = vec![ProtoLaneBlockHints {
-                    name: proposer_sig.clone(),
-                    hints: block_hints,
-                }];
+                let len = lane_hint.hints.len();
 
-                let len = lane_hints.len();
-
-                let res = sender.send(lane_hints).await;
+                let res = sender.send(lane_hint).await;
                 info!("Sent lane hints size {}, result = {:?}", len, res);
             }
             LaneLogServerQuery::GetBlock(lane_id, n, sender) => {
