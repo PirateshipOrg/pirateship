@@ -20,9 +20,9 @@ use crate::{
 use super::batch_proposal::{MsgAckChanWithTag, RawBatch};
 
 #[cfg(feature = "dag")]
-use crate::proto::consensus::ProtoTipCut;
-#[cfg(feature = "dag")]
 use super::block_broadcaster::BlockBroadcasterCommand;
+#[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoTipCut;
 
 pub enum BlockSequencerControlCommand {
     NewUnstableView(u64 /* view num */, u64 /* config num */), // View changed to a new view, it is not stable, so don't propose new blocks.
@@ -40,7 +40,10 @@ pub struct BlockSequencer {
     config: AtomicConfig,
     control_command_rx: Receiver<BlockSequencerControlCommand>,
 
+    #[cfg(not(feature = "dag"))]
     batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
+    #[cfg(feature = "dag")]
+    tipcut_rx: Receiver<ProtoTipCut>,
 
     signature_timer: Arc<Pin<Box<ResettableTimer>>>,
 
@@ -67,21 +70,20 @@ pub struct BlockSequencer {
 
     // DAG mode fields
     #[cfg(feature = "dag")]
-    tipcut_rx: Receiver<ProtoTipCut>,
-    #[cfg(feature = "dag")]
     block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
 }
 
 impl BlockSequencer {
-    #[cfg(not(feature = "dag"))]
     pub fn new(
         config: AtomicConfig,
         control_command_rx: Receiver<BlockSequencerControlCommand>,
-        batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
+        #[cfg(not(feature = "dag"))] batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
+        #[cfg(feature = "dag")] tipcut_rx: Receiver<ProtoTipCut>,
         qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
         block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
+        #[cfg(feature = "dag")] block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
     ) -> Self {
         let signature_timer = ResettableTimer::new(Duration::from_millis(
             config.get().consensus_config.signature_max_delay_ms,
@@ -102,86 +104,28 @@ impl BlockSequencer {
         let mut ret = Self {
             config,
             control_command_rx,
+            #[cfg(not(feature = "dag"))]
             batch_rx,
-            signature_timer,
-            qc_rx,
-            current_qc_list: Vec::new(),
-            block_broadcaster_tx,
-            client_reply_tx,
-            crypto,
-            parent_hash_rx: FutureHash::None,
-            seq_num: 0,
-            view: 0,
-            config_num: 0,
-            view_is_stable: false,
-            force_sign_next_batch: false,
-            last_signed_seq_num: 0,
-            perf_counter_signed,
-            perf_counter_unsigned,
-            __last_qc_n_seen: 0,
-            __blocks_proposed_in_this_view: 0,
-        };
-
-        #[cfg(not(feature = "view_change"))]
-        {
-            ret.view_is_stable = true;
-            ret.view = 1;
-            ret.config_num = 1;
-        }
-
-        ret
-    }
-
-    #[cfg(feature = "dag")]
-    pub fn new(
-        config: AtomicConfig,
-        control_command_rx: Receiver<BlockSequencerControlCommand>,
-        batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
-        qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
-        block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
-        client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
-        crypto: CryptoServiceConnector,
-        tipcut_rx: Receiver<ProtoTipCut>,
-        block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
-    ) -> Self {
-        let signature_timer = ResettableTimer::new(Duration::from_millis(
-            config.get().consensus_config.signature_max_delay_ms,
-        ));
-
-        let event_order = vec![
-            "Add QCs",
-            "Create Block",
-            "Send to Client Reply",
-            "Send to Block Broadcaster",
-        ];
-
-        let perf_counter_signed =
-            RefCell::new(PerfCounter::new("BlockSequencerSigned", &event_order));
-        let perf_counter_unsigned =
-            RefCell::new(PerfCounter::new("BlockSequencerUnsigned", &event_order));
-
-        let mut ret = Self {
-            config,
-            control_command_rx,
-            batch_rx,
-            signature_timer,
-            qc_rx,
-            current_qc_list: Vec::new(),
-            block_broadcaster_tx,
-            client_reply_tx,
-            crypto,
-            parent_hash_rx: FutureHash::None,
-            seq_num: 0,
-            view: 0,
-            config_num: 0,
-            view_is_stable: false,
-            force_sign_next_batch: false,
-            last_signed_seq_num: 0,
-            perf_counter_signed,
-            perf_counter_unsigned,
-            __last_qc_n_seen: 0,
-            __blocks_proposed_in_this_view: 0,
+            #[cfg(feature = "dag")]
             tipcut_rx,
+            signature_timer,
+            qc_rx,
+            current_qc_list: Vec::new(),
+            block_broadcaster_tx,
+            client_reply_tx,
+            crypto,
+            parent_hash_rx: FutureHash::None,
+            seq_num: 0,
+            view: 0,
+            config_num: 0,
+            view_is_stable: false,
+            force_sign_next_batch: false,
+            last_signed_seq_num: 0,
+            perf_counter_signed,
+            perf_counter_unsigned,
+            __last_qc_n_seen: 0,
+            __blocks_proposed_in_this_view: 0,
+            #[cfg(feature = "dag")]
             block_broadcaster_command_tx,
         };
 
@@ -291,108 +235,108 @@ impl BlockSequencer {
         // Traditional mode: sequence batches into blocks
         #[cfg(not(feature = "dag"))]
         {
-        // The slow path needs 2-hop QCs to byz-commit.
-        // If we assume the head of the chain is crash committed immediately (best case),
-        // On average, need the 2-hop to happen within config.consensus_config.commit_index_gap_hard.
-        // Otherwise, this will cause a view change.
+            // The slow path needs 2-hop QCs to byz-commit.
+            // If we assume the head of the chain is crash committed immediately (best case),
+            // On average, need the 2-hop to happen within config.consensus_config.commit_index_gap_hard.
+            // Otherwise, this will cause a view change.
 
-        // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
-        // This limits the depth of pipeline (ie, max number of inflight blocks).
+            // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
+            // This limits the depth of pipeline (ie, max number of inflight blocks).
 
-        let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
-        let mut blocked_for_qc_pass = false;
+            let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
+            let mut blocked_for_qc_pass = false;
 
-        #[cfg(not(feature = "no_qc"))]
-        {
-            // Is there a QC I can get?
-            let mut qc_check_cond = self.qc_rx.len() > 0;
-            #[cfg(feature = "no_pipeline")]
+            #[cfg(not(feature = "no_qc"))]
             {
-                qc_check_cond = qc_check_cond && self.current_qc_list.len() == 0;
-            }
-            if qc_check_cond {
-                let mut qc_buf = Vec::new();
-                self.qc_rx.recv_many(&mut qc_buf, self.qc_rx.len()).await;
-                self.add_qcs(qc_buf).await;
-            }
-
-            // let config = &self.config.get().consensus_config;
-            // let hard_gap = config.commit_index_gap_hard;
-            // let soft_gap = config.commit_index_gap_soft;
-
-            // if !self.force_sign_next_batch && self.__blocks_proposed_in_this_view > soft_gap {
-            //     listen_for_new_batch = listen_for_new_batch
-            //     && (self.seq_num as i64 - self.__last_qc_n_seen as i64) < (hard_gap / 2) as i64;
-            //     // This is to prevent the locking happen when the leader is new.
-
-            //     blocked_for_qc_pass = true;
-            // }
-        }
-
-        let mut qc_buf = Vec::new();
-
-        if listen_for_new_batch {
-            tokio::select! {
-                biased;
-                _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                // Is there a QC I can get?
+                let mut qc_check_cond = self.qc_rx.len() > 0;
+                #[cfg(feature = "no_pipeline")]
+                {
+                    qc_check_cond = qc_check_cond && self.current_qc_list.len() == 0;
+                }
+                if qc_check_cond {
+                    let mut qc_buf = Vec::new();
+                    self.qc_rx.recv_many(&mut qc_buf, self.qc_rx.len()).await;
                     self.add_qcs(qc_buf).await;
                 }
-                _tick = self.signature_timer.wait() => {
-                    self.force_sign_next_batch = true;
-                },
-                _batch_and_client_reply = self.batch_rx.recv() => {
-                    if let Some(_) = _batch_and_client_reply {
-                        self.__blocks_proposed_in_this_view += 1;
-                        let (batch, client_reply) = _batch_and_client_reply.unwrap();
-                        self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
-                        self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
+
+                // let config = &self.config.get().consensus_config;
+                // let hard_gap = config.commit_index_gap_hard;
+                // let soft_gap = config.commit_index_gap_soft;
+
+                // if !self.force_sign_next_batch && self.__blocks_proposed_in_this_view > soft_gap {
+                //     listen_for_new_batch = listen_for_new_batch
+                //     && (self.seq_num as i64 - self.__last_qc_n_seen as i64) < (hard_gap / 2) as i64;
+                //     // This is to prevent the locking happen when the leader is new.
+
+                //     blocked_for_qc_pass = true;
+                // }
+            }
+
+            let mut qc_buf = Vec::new();
+
+            if listen_for_new_batch {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
                     }
-                },
-                _cmd = self.control_command_rx.recv() => {
-                    self.handle_control_command(_cmd).await;
-                },
-            }
-        } else if blocked_for_qc_pass {
-            tokio::select! {
-                biased;
-                _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                    self.add_qcs(qc_buf).await;
-                },
-                _tick = self.signature_timer.wait() => {
-                    self.force_sign_next_batch = true;
-                },
-                _cmd = self.control_command_rx.recv() => {
-                    self.handle_control_command(_cmd).await;
+                    _tick = self.signature_timer.wait() => {
+                        self.force_sign_next_batch = true;
+                    },
+                    _batch_and_client_reply = self.batch_rx.recv() => {
+                        if let Some(_) = _batch_and_client_reply {
+                            self.__blocks_proposed_in_this_view += 1;
+                            let (batch, client_reply) = _batch_and_client_reply.unwrap();
+                            self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
+                            self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
+                        }
+                    },
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
+                    },
                 }
-
-                // I am not listening to new batch because I am blocked for a new QC.
-                // There is no need to cancel requests here.
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                    self.add_qcs(qc_buf).await;
-                }
-                _cmd = self.control_command_rx.recv() => {
-                    self.handle_control_command(_cmd).await;
-                },
-                _batch_and_client_reply = self.batch_rx.recv() => {
-                    if let Some(_) = _batch_and_client_reply {
-                        let (_, client_reply) = _batch_and_client_reply.unwrap();
-                        let (tx, rx) = oneshot::channel();
-                        tx.send(vec![]).expect("Should be able to send hash");
-
-                        self.client_reply_tx
-                            .send((rx, client_reply))
-                            .await
-                            .expect("Should be able to send client_reply_tx");
+            } else if blocked_for_qc_pass {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
+                    },
+                    _tick = self.signature_timer.wait() => {
+                        self.force_sign_next_batch = true;
+                    },
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
                     }
-                },
-            }
-        }
 
-        Ok(())
+                    // I am not listening to new batch because I am blocked for a new QC.
+                    // There is no need to cancel requests here.
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
+                    }
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
+                    },
+                    _batch_and_client_reply = self.batch_rx.recv() => {
+                        if let Some(_) = _batch_and_client_reply {
+                            let (_, client_reply) = _batch_and_client_reply.unwrap();
+                            let (tx, rx) = oneshot::channel();
+                            tx.send(vec![]).expect("Should be able to send hash");
+
+                            self.client_reply_tx
+                                .send((rx, client_reply))
+                                .await
+                                .expect("Should be able to send client_reply_tx");
+                        }
+                    },
+                }
+            }
+
+            Ok(())
         } // end cfg(not(feature = "dag"))
     }
 
@@ -560,10 +504,8 @@ impl BlockSequencer {
         // Use crypto service to prepare tip cut with pipelining
         // The crypto worker will await the parent hash asynchronously,
         // allowing this tip cut to start processing before the previous one completes
-        let (tipcut_rx, digest_rx, digest_rx2) = self
-            .crypto
-            .prepare_tipcut(tipcut, parent_hash_rx)
-            .await;
+        let (tipcut_rx, digest_rx, digest_rx2) =
+            self.crypto.prepare_tipcut(tipcut, parent_hash_rx).await;
 
         // Store future digest for next tip cut (enables pipelining)
         self.parent_hash_rx = FutureHash::Future(digest_rx);
@@ -590,12 +532,8 @@ impl BlockSequencer {
             };
 
             // Send to broadcaster
-            let cmd = BlockBroadcasterCommand::BroadcastTipCut(
-                tipcut,
-                view,
-                view_is_stable,
-                config_num,
-            );
+            let cmd =
+                BlockBroadcasterCommand::BroadcastTipCut(tipcut, view, view_is_stable, config_num);
 
             if let Err(e) = broadcaster_tx.send(cmd).await {
                 error!("Failed to send tip cut to block_broadcaster: {:?}", e);
@@ -605,4 +543,3 @@ impl BlockSequencer {
         });
     }
 }
-
