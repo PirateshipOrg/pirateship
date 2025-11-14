@@ -36,3 +36,16 @@ message ProtoBackfillNack {
 
 
 }
+
+message ProtoCheckpointVote {
+    bytes digest = 1;
+    uint64 bci = 2;
+    string sender = 3;
+    bytes sig = 4;
+}
+
+message ProtoCheckpointCertificate {
+    bytes digest = 1;
+    uint64 bci = 2;
+    repeated proto.consensus.ProtoNameWithSignature sigs = 3;
+}

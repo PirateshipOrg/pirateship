@@ -299,7 +299,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
         let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
         let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
-        let checkpoint_handler = CheckpointHandler::new(config.clone(), checkpoint_rx, storage.get_connector(crypto.get_connector()), checkpoint_client.into());
+        let checkpoint_handler = CheckpointHandler::new(config.clone(), keystore.clone(), checkpoint_rx, storage.get_connector(crypto.get_connector()), checkpoint_client.into());
         
         
         #[cfg(feature = "extra_2pc")]
