@@ -43,10 +43,10 @@ pub type BatchProposerCommand = (
 pub struct BatchProposer {
     config: AtomicConfig,
 
-    batch_proposer_rx: Receiver<TxWithAckChanTag>,
-    block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
+    dag_batch_proposer_rx: Receiver<TxWithAckChanTag>,
+    dag_block_seq_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
 
-    reply_tx: Sender<ClientReplyCommand>,
+    client_reply_tx: Sender<ClientReplyCommand>,
     unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
 
     current_raw_batch: Option<RawBatch>, // So that I can take()
@@ -66,9 +66,9 @@ pub struct BatchProposer {
 impl BatchProposer {
     pub fn new(
         config: AtomicConfig,
-        batch_proposer_rx: Receiver<TxWithAckChanTag>,
-        block_maker_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
-        reply_tx: Sender<ClientReplyCommand>,
+        dag_batch_proposer_rx: Receiver<TxWithAckChanTag>,
+        dag_block_seq_tx: Sender<(RawBatch, Vec<MsgAckChanWithTag>)>,
+        client_reply_tx: Sender<ClientReplyCommand>,
         unlogged_tx: Sender<(ProtoTransaction, oneshot::Sender<ProtoTransactionResult>)>,
         cmd_rx: Receiver<BatchProposerCommand>,
     ) -> Self {
@@ -85,12 +85,12 @@ impl BatchProposer {
         #[allow(unused_mut)]
         let mut ret = Self {
             config,
-            batch_proposer_rx,
-            block_maker_tx,
+            dag_batch_proposer_rx,
+            dag_block_seq_tx,
             current_raw_batch: Some(RawBatch::with_capacity(max_batch_size)),
             batch_timer,
             current_reply_vec: Vec::with_capacity(max_batch_size),
-            reply_tx,
+            client_reply_tx,
             unlogged_tx,
             perf_counter,
             make_new_batches: false,
@@ -178,7 +178,7 @@ impl BatchProposer {
 
         tokio::select! {
             biased;
-            _new_tx = self.batch_proposer_rx.recv() => {
+            _new_tx = self.dag_batch_proposer_rx.recv() => {
                 new_tx = _new_tx;
             },
             _cmd = self.cmd_rx.recv() => {
@@ -258,7 +258,7 @@ impl BatchProposer {
             self.config.get().consensus_config.max_backlog_batch_size,
         ));
         let reply_chans = self.current_reply_vec.drain(..).collect();
-        let _ = self.block_maker_tx.send((batch, reply_chans)).await;
+        let _ = self.dag_block_seq_tx.send((batch, reply_chans)).await;
         self.perf_event_and_deregister_all("Propose batch");
         self.batch_timer.reset();
     }
@@ -284,12 +284,12 @@ impl BatchProposer {
 
             if !is_probe {
                 self.unlogged_tx.send((tx, res_tx)).await.unwrap();
-                self.reply_tx
+                self.client_reply_tx
                     .send(ClientReplyCommand::UnloggedRequestAck(res_rx, ack_chan))
                     .await
                     .unwrap();
             } else {
-                self.reply_tx
+                self.client_reply_tx
                     .send(ClientReplyCommand::ProbeRequestAck(block_n, ack_chan))
                     .await
                     .unwrap();

@@ -64,7 +64,7 @@ pub struct DagBlockBroadcaster {
     // Output ports
     storage: StorageServiceConnector,
     client: PinnedClient,
-    staging_tx: Sender<(
+    lane_staging_tx: Sender<(
         CachedBlock,
         oneshot::Receiver<StorageAck>,
         AppendBlockStats,
@@ -72,7 +72,7 @@ pub struct DagBlockBroadcaster {
     )>,
 
     // Command ports
-    receiver_command_tx: Sender<BlockReceiverCommand>,
+    block_receiver_command_tx: Sender<BlockReceiverCommand>,
     app_command_tx: Sender<AppCommand>,
 
     // Perf Counters
@@ -88,13 +88,13 @@ impl DagBlockBroadcaster {
         other_block_rx: Receiver<SingleBlock>,
         control_command_rx: Receiver<DagBlockBroadcasterCommand>,
         storage: StorageServiceConnector,
-        staging_tx: Sender<(
+        lane_staging_tx: Sender<(
             CachedBlock,
             oneshot::Receiver<StorageAck>,
             AppendBlockStats,
             bool,
         )>,
-        receiver_command_tx: Sender<BlockReceiverCommand>,
+        block_receiver_command_tx: Sender<BlockReceiverCommand>,
         app_command_tx: Sender<AppCommand>,
     ) -> Self {
         let my_block_event_order = vec![
@@ -120,8 +120,8 @@ impl DagBlockBroadcaster {
             control_command_rx,
             storage,
             client,
-            staging_tx,
-            receiver_command_tx,
+            lane_staging_tx,
+            block_receiver_command_tx,
             app_command_tx,
             my_block_perf_counter,
         }
@@ -259,7 +259,7 @@ impl DagBlockBroadcaster {
         // Forward to staging (which is actually LaneStaging in DAG mode)
         self.perf_add_event(perf_entry, "Forward block to logserver");
 
-        self.staging_tx
+        self.lane_staging_tx
             .send((block.clone(), storage_ack, block_stats, this_is_final_block))
             .await
             .unwrap();

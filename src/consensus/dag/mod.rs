@@ -1,3 +1,4 @@
+/// DAG Dissemination Layer
 pub mod batch_proposal;
 pub mod block_broadcaster;
 pub mod block_receiver;

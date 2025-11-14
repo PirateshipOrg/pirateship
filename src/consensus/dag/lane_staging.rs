@@ -115,7 +115,6 @@ pub struct LaneStaging {
 
     // Output channels
     client_reply_tx: Sender<ClientReplyCommand>,
-    app_tx: Sender<AppCommand>,
     lane_logserver_tx: Sender<LaneLogServerCommand>,
 }
 
@@ -134,7 +133,6 @@ impl LaneStaging {
         car_rx: Receiver<(ProtoBlockCar, SenderType)>,
         query_rx: Receiver<LaneStagingQuery>,
         client_reply_tx: Sender<ClientReplyCommand>,
-        app_tx: Sender<AppCommand>,
         lane_logserver_tx: Sender<LaneLogServerCommand>,
     ) -> Self {
         Self {
@@ -155,7 +153,6 @@ impl LaneStaging {
             car_rx,
             query_rx,
             client_reply_tx,
-            app_tx,
             lane_logserver_tx,
         }
     }
@@ -259,7 +256,10 @@ impl LaneStaging {
 
                 // Forward to LaneLogServer for persistence and querying
                 self.lane_logserver_tx
-                    .send(LaneLogServerCommand::NewBlock(lane_id.clone(), block.clone()))
+                    .send(LaneLogServerCommand::NewBlock(
+                        lane_id.clone(),
+                        block.clone(),
+                    ))
                     .await
                     .unwrap();
 
@@ -501,7 +501,7 @@ impl LaneStaging {
             n: seq_num,
             sig: acks,
             view,
-            origin_node: my_name,  // Track which node accepted the client requests
+            origin_node: my_name, // Track which node accepted the client requests
         };
 
         // Store the CAR

@@ -7,7 +7,7 @@
 /// 1. Leader periodically checks if a new tip cut should be proposed
 /// 2. Query lane_staging for the current tip cut (one CAR per lane)
 /// 3. Construct ProtoTipCut message with the tip cut information
-/// 4. Broadcast ProtoTipCut to all nodes
+/// 4. Send ProtoTipCut to BlockSequencer for sequencing and broadcasting
 /// 5. Nodes vote on the tip cut via tip_cut_voting component
 ///
 /// Leadership:
@@ -64,7 +64,7 @@ pub struct TipCutProposal {
     lane_staging_query_tx: Sender<LaneStagingQuery>,
 
     // Send tip cuts to BlockSequencer for wrapping and broadcasting
-    tipcut_tx: Sender<ProtoTipCut>,
+    consensus_sequencer_tx: Sender<ProtoTipCut>,
 
     // Command channel for view changes and leadership updates
     cmd_rx: Receiver<TipCutProposalCommand>,
@@ -74,7 +74,7 @@ impl TipCutProposal {
     pub fn new(
         config: AtomicConfig,
         lane_staging_query_tx: Sender<LaneStagingQuery>,
-        tipcut_tx: Sender<ProtoTipCut>,
+        consensus_sequencer_tx: Sender<ProtoTipCut>,
         cmd_rx: Receiver<TipCutProposalCommand>,
     ) -> Self {
         // Get initial configuration
@@ -114,7 +114,7 @@ impl TipCutProposal {
             current_leader,
             tip_cut_timer,
             lane_staging_query_tx,
-            tipcut_tx,
+            consensus_sequencer_tx,
             cmd_rx,
         }
     }
@@ -173,6 +173,10 @@ impl TipCutProposal {
 
         // Channel closed
         Err(())
+    }
+
+    fn i_am_leader(&self) -> bool {
+        self.config.get().net_config.name == self.current_leader
     }
 
     fn handle_command(&mut self, command: TipCutProposalCommand) {
@@ -255,7 +259,7 @@ impl TipCutProposal {
         // 1. Compute digest and parent
         // 2. Send to BlockBroadcaster
         // 3. BlockBroadcaster wraps in AppendEntries and broadcasts to all nodes
-        self.tipcut_tx
+        self.consensus_sequencer_tx
             .send(proto_tip_cut)
             .await
             .map_err(|e| {

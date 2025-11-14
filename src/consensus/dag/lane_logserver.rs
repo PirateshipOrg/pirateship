@@ -115,9 +115,9 @@ pub struct LaneLogServer {
     client: PinnedClient,
     bci: u64,
 
-    logserver_rx: Receiver<LaneLogServerCommand>,
+    lane_logserver_rx: Receiver<LaneLogServerCommand>,
     backfill_request_rx: Receiver<ProtoBackfillNack>,
-    gc_rx: Receiver<u64>,
+    lane_gc_rx: Receiver<u64>,
 
     query_rx: Receiver<LaneLogServerQuery>,
 
@@ -136,18 +136,18 @@ impl LaneLogServer {
     pub fn new(
         config: AtomicConfig,
         client: PinnedClient,
-        logserver_rx: Receiver<LaneLogServerCommand>,
+        lane_logserver_rx: Receiver<LaneLogServerCommand>,
         backfill_request_rx: Receiver<ProtoBackfillNack>,
-        gc_rx: Receiver<u64>,
+        lane_gc_rx: Receiver<u64>,
         query_rx: Receiver<LaneLogServerQuery>,
         storage: StorageServiceConnector,
     ) -> Self {
         LaneLogServer {
             config,
             client,
-            logserver_rx,
+            lane_logserver_rx,
             backfill_request_rx,
-            gc_rx,
+            lane_gc_rx,
             query_rx,
             storage,
             lanes: HashMap::new(),
@@ -168,7 +168,7 @@ impl LaneLogServer {
     async fn worker(&mut self) -> Result<(), ()> {
         tokio::select! {
             biased;
-            cmd = self.logserver_rx.recv() => {
+            cmd = self.lane_logserver_rx.recv() => {
                 match cmd {
                     Some(LaneLogServerCommand::NewBlock(lane_id, block)) => {
                         trace!("Received block {} for lane {}", block.block.n, lane_id);
@@ -189,7 +189,7 @@ impl LaneLogServer {
                 }
             },
 
-            gc_req = self.gc_rx.recv() => {
+            gc_req = self.lane_gc_rx.recv() => {
                 if let Some(gc_req) = gc_req {
                     // GC all lanes
                     for lane in self.lanes.values_mut() {

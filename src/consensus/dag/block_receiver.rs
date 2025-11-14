@@ -102,7 +102,7 @@ pub struct BlockReceiver {
     block_rx: Receiver<(ProtoAppendBlock, SenderType /* Sender */)>,
     command_rx: Receiver<BlockReceiverCommand>,
 
-    broadcaster_tx: Sender<SingleBlock>,
+    dag_broadcaster_tx: Sender<SingleBlock>,
 
     // Per-lane continuity tracking
     // Key: lane_id (sender name)
@@ -120,7 +120,7 @@ impl BlockReceiver {
         client: PinnedClient,
         block_rx: Receiver<(ProtoAppendBlock, SenderType)>,
         command_rx: Receiver<BlockReceiverCommand>,
-        broadcaster_tx: Sender<SingleBlock>,
+        dag_broadcaster_tx: Sender<SingleBlock>,
         lane_logserver_query_tx: Sender<LaneLogServerQuery>,
     ) -> Self {
         let ret = Self {
@@ -131,7 +131,7 @@ impl BlockReceiver {
             config_num: 0,
             block_rx,
             command_rx,
-            broadcaster_tx,
+            dag_broadcaster_tx,
             lane_continuity: HashMap::new(),
             lane_logserver_query_tx,
         };
@@ -277,7 +277,7 @@ impl BlockReceiver {
             stats,
         };
 
-        self.broadcaster_tx.send(single_block).await.unwrap();
+        self.dag_broadcaster_tx.send(single_block).await.unwrap();
 
         // Update lane continuity with the hash of this block
         // Wrap hash receiver to match FutureResult type
@@ -426,9 +426,11 @@ impl BlockReceiver {
 
         // Use AppendBlockLane origin for DAG mode backfill
         let nack = ProtoBackfillNack {
-            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
-                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints }
-            )),
+            hints: Some(
+                crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                    crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
+                ),
+            ),
             last_index_needed,
             reply_name: my_name,
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Abl(

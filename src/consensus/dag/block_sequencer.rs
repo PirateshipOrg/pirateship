@@ -60,7 +60,7 @@ pub struct DagBlockSequencer {
 
     signature_timer: Arc<Pin<Box<ResettableTimer>>>,
 
-    block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+    dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
     crypto: CryptoServiceConnector,
@@ -78,7 +78,7 @@ impl DagBlockSequencer {
         config: AtomicConfig,
         control_command_rx: Receiver<DagBlockSequencerCommand>,
         batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
-        block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+        dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
     ) -> Self {
@@ -102,7 +102,7 @@ impl DagBlockSequencer {
             control_command_rx,
             batch_rx,
             signature_timer,
-            block_broadcaster_tx,
+            dag_broadcaster_tx,
             client_reply_tx,
             crypto,
             parent_hash_rx: FutureHash::None,
@@ -293,11 +293,11 @@ impl DagBlockSequencer {
         self.perf_add_event(perf_entry_id, "Send to Client Reply", must_sign);
 
         // Send block to broadcaster for dissemination
-        self.block_broadcaster_tx
+        self.dag_broadcaster_tx
             .send((n, block_rx))
             .await
-            .expect("Should be able to send to block_broadcaster_tx");
-        self.perf_add_event(perf_entry_id, "Send to Block Broadcaster", must_sign);
+            .expect("Should be able to send to dag_broadcaster_tx");
+        self.perf_add_event(perf_entry_id, "Send to DAG Broadcaster", must_sign);
 
         self.perf_deregister(perf_entry_id);
         trace!("DAG Sequenced block {}", n);
