@@ -3,6 +3,7 @@ pub mod batch_proposal;
 mod block_broadcaster;
 mod block_sequencer;
 pub mod client_reply;
+#[cfg(feature = "dag")]
 mod dag;
 pub mod engines;
 pub mod extra_2pc;
