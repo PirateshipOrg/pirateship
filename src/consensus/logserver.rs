@@ -273,13 +273,13 @@ impl LogServer {
 
     async fn respond_backfill(&mut self, backfill_req: ProtoBackfillNack) -> Result<(), ()> {
         let sender = backfill_req.reply_name;
-        
+
         // Extract hints - traditional mode uses 'blocks', ignore DAG 'lanes'
         let hints = match backfill_req.hints {
             Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(wrapper)) => {
                 wrapper.hints
             }
-            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lanes(_)) => {
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lane(_)) => {
                 // DAG mode backfill - not handled by traditional logserver
                 warn!("Received DAG-style backfill request (lanes) in traditional mode - ignoring");
                 return Ok(());
@@ -289,7 +289,7 @@ impl LogServer {
                 return Ok(());
             }
         };
-        
+
         let existing_fork = match &backfill_req.origin {
             Some(Origin::Ae(ae)) => match &ae.entry {
                 Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
@@ -306,7 +306,7 @@ impl LogServer {
                     return Ok(());
                 }
             },
-            
+
             Some(Origin::Abl(_)) => {
                 // DAG mode backfill - not handled by traditional logserver
                 warn!("Received DAG-style backfill request (AppendBlockLane) in traditional mode - ignoring");
@@ -348,11 +348,13 @@ impl LogServer {
                     ..vc
                 })),
             },
-            
+
             Origin::Abl(_) => {
                 // This case should have been filtered out earlier
                 // If we reach here, there's a logic error
-                error!("DAG-style backfill request reached traditional logserver payload construction");
+                error!(
+                    "DAG-style backfill request reached traditional logserver payload construction"
+                );
                 return Ok(());
             }
         };

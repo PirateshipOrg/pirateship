@@ -34,11 +34,6 @@ message ProtoBlockHintsWrapper {
     repeated ProtoBlockHint hints = 1;
 }
 
-// Wrapper for repeated lane hints (for oneof compatibility)
-message ProtoLaneBlockHintsWrapper {
-    repeated ProtoLaneBlockHints lane_hints = 1;
-}
-
 message ProtoBackfillNack {
     oneof origin {
         proto.consensus.ProtoAppendEntries ae = 1;
@@ -48,7 +43,7 @@ message ProtoBackfillNack {
 
     oneof hints {
         ProtoBlockHintsWrapper blocks = 4;
-        ProtoLaneBlockHintsWrapper lanes = 5;
+        ProtoLaneBlockHints lane = 5;
     }
     uint64 last_index_needed = 6;
     string reply_name = 7;

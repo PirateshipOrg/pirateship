@@ -6,6 +6,8 @@
 /// - Maintains per-lane continuity tracking
 use std::{collections::HashMap, io::Error, sync::Arc};
 
+#[cfg(feature = "view_change")]
+use bincode::config;
 use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::{oneshot, Mutex};
@@ -13,7 +15,11 @@ use tokio::sync::{oneshot, Mutex};
 use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
-    proto::{checkpoint::ProtoBackfillNack, consensus::ProtoAppendBlock, rpc::ProtoPayload},
+    proto::{
+        checkpoint::ProtoBackfillNack,
+        consensus::{ProtoAppendBlockLane, ProtoAppendBlocks},
+        rpc::ProtoPayload,
+    },
     rpc::{client::PinnedClient, MessageRef, SenderType},
     utils::{
         channel::{make_channel, Receiver, Sender},
@@ -26,7 +32,7 @@ use super::lane_logserver::LaneLogServerQuery;
 /// Command messages for BlockReceiver control
 pub enum BlockReceiverCommand {
     /// Process a backfill response
-    UseBackfillResponse(ProtoAppendBlock, SenderType),
+    UseBackfillResponse(ProtoAppendBlockLane, SenderType),
 }
 
 /// Metadata associated with an AppendBlock message
@@ -123,26 +129,23 @@ impl BlockReceiver {
         dag_broadcaster_tx: Sender<SingleBlock>,
         lane_logserver_query_tx: Sender<LaneLogServerQuery>,
     ) -> Self {
-        let ret = Self {
+        #[cfg(feature = "view_change")]
+        let (view, config_num) = (0, 0);
+        #[cfg(not(feature = "view_change"))]
+        let (view, config_num) = (1, 1);
+
+        Self {
             config,
             crypto,
             client,
-            view: 0,
-            config_num: 0,
+            view: view,
+            config_num: config_num,
             block_rx,
             command_rx,
             dag_broadcaster_tx,
             lane_continuity: HashMap::new(),
             lane_logserver_query_tx,
-        };
-
-        #[cfg(not(feature = "view_change"))]
-        {
-            // TODO: Initialize view and config_num based on view_change feature
-            // For now, keeping initialization in struct construction
         }
-
-        ret
     }
 
     pub async fn run(block_receiver: Arc<Mutex<Self>>) {
@@ -307,9 +310,28 @@ impl BlockReceiver {
 
     async fn handle_command(&mut self, cmd: BlockReceiverCommand) {
         match cmd {
-            BlockReceiverCommand::UseBackfillResponse(block, sender) => {
-                let (name, _) = sender.to_name_and_sub_id();
-                self.process_block(block, name).await;
+            BlockReceiverCommand::UseBackfillResponse(block_lane, sender) => {
+                // For backfill responses, use the lane_id from the message if present
+                // This allows any node to respond with blocks from any lane
+                let lane_id = if !block_lane.name.is_empty() {
+                    block_lane.name.clone()
+                } else {
+                    // Fallback to sender name for backward compatibility
+                    let (name, _) = sender.to_name_and_sub_id();
+                    warn!(
+                        "Backfill response missing lane_id, falling back to sender: {}",
+                        name
+                    );
+                    name
+                };
+                let ab = match block_lane.ab {
+                    Some(ab) => ab,
+                    None => {
+                        warn!("Backfill response missing AppendBlock");
+                        return;
+                    }
+                };
+                self.process_block(ab, lane_id).await;
             }
         }
     }
@@ -424,13 +446,11 @@ impl BlockReceiver {
 
         let my_name = self.config.get().net_config.name.clone();
 
-        // Use AppendBlockLane origin for DAG mode backfill
+        // Use AppendBlockLane origin for DAG mode backfill with lane hints
         let nack = ProtoBackfillNack {
-            hints: Some(
-                crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
-                    crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
-                ),
-            ),
+            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lane(
+                hints,
+            )),
             last_index_needed,
             reply_name: my_name,
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Abl(

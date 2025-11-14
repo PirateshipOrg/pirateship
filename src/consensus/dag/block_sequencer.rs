@@ -273,7 +273,7 @@ impl DagBlockSequencer {
         };
 
         let parent_hash_rx = self.parent_hash_rx.take();
-        self.perf_add_event(perf_entry_id, "Create Block", must_sign);
+        self.perf_add_event(perf_entry_id, "Create DAG Block", must_sign);
 
         // Prepare block: compute hash, sign if needed, maintain parent chain
         let (block_rx, hash_rx, hash_rx2) = self
@@ -282,7 +282,6 @@ impl DagBlockSequencer {
             .await;
 
         // Store hash for next block's parent
-        // QUESTION: In DAG mode, should we be using the async take here?
         self.parent_hash_rx = FutureHash::Future(hash_rx);
 
         // Send hash to client reply handler

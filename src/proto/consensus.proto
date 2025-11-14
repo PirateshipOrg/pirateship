@@ -86,8 +86,9 @@ message ProtoFork {
 }
 
 // Append Block (eliminates forks from dissemination)
-message ProtoAppendBlock {
-    HalfSerializedBlock block = 1;
+// FIXME: support repeated blocks everywhere
+message ProtoAppendBlocks {
+    repeated HalfSerializedBlock serialized_blocks = 1;
     uint64 commit_index = 2;
     uint64 view = 3;
     bool view_is_stable = 4;
@@ -98,8 +99,7 @@ message ProtoAppendBlock {
 // Append Block with Lane for backfill requests
 message ProtoAppendBlockLane {
     string name = 1;            // Name identifies lane
-    ProtoAppendBlock ab = 2;    // AppendBlock request
-
+    ProtoAppendBlocks ab = 2;    // AppendBlock request
 }
 
 // Block Acknowledgement for constructing PoA

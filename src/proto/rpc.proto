@@ -24,7 +24,7 @@ message ProtoPayload {
         proto.checkpoint.ProtoBackfillNack backfill_nack = 7;
 
         //  Dag Dissemination Only
-        proto.consensus.ProtoAppendBlock append_block = 8;
+        proto.consensus.ProtoAppendBlocks append_blocks = 8;
         proto.consensus.ProtoBlockAck block_ack = 9;
         proto.consensus.ProtoBlockCAR block_CAR = 10;
         proto.consensus.ProtoTipCut tip_cut = 11;

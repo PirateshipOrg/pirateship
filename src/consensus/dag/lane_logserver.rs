@@ -2,9 +2,11 @@
 /// Maintains per-lane logs of blocks, handles backfill requests, and serves block queries.
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    hint,
     sync::Arc,
 };
 
+use futures::SinkExt;
 use log::{error, info, trace, warn};
 use prost::Message as _;
 use tokio::sync::Mutex;
@@ -13,7 +15,9 @@ use crate::{
     config::AtomicConfig,
     crypto::CachedBlock,
     proto::{
-        checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint},
+        checkpoint::{
+            proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint, ProtoLaneBlockHints,
+        },
         consensus::{HalfSerializedBlock, ProtoAppendBlock},
         rpc::{proto_payload::Message, ProtoPayload},
     },
@@ -86,19 +90,19 @@ impl LaneReadCache {
 
 pub enum LaneLogServerQuery {
     CheckHash(
-        String,  /* lane_id (sender name) */
+        String,  /* lane_id */
         u64,     /* block.n */
         Vec<u8>, /* block_hash */
         Sender<bool>,
     ),
     GetHints(
-        String, /* lane_id (sender name) */
-        u64,    /* last needed block.n */
-        Sender<Vec<ProtoBlockHint>>,
+        String,                      /* lane_id */
+        u64,                         /* last needed block.n */
+        Sender<ProtoLaneBlockHints>, /* lane_id, vec<BlockHints> */
     ),
     /// Get a specific block from a lane
     GetBlock(
-        String, /* lane_id (sender name) */
+        String, /* lane_id */
         u64,    /* block.n */
         Sender<Option<CachedBlock>>,
     ),
@@ -214,6 +218,7 @@ impl LaneLogServer {
         Ok(())
     }
 
+    /// Get block from lane at index n.
     async fn get_block(&mut self, lane_id: &String, n: u64) -> Option<CachedBlock> {
         let lane = self.lanes.get(lane_id)?;
         let last_n = lane.back()?.block.n;
@@ -233,6 +238,7 @@ impl LaneLogServer {
         Some(block)
     }
 
+    /// Get GC'ed block from lane at index n.
     async fn get_gced_block(&mut self, lane_id: &String, n: u64) -> Option<CachedBlock> {
         let lane = self.lanes.get(lane_id)?;
         let first_n = lane.front()?.block.n;
@@ -278,20 +284,20 @@ impl LaneLogServer {
         Some(ret)
     }
 
+    /// Respond to a lane backfill request
     async fn respond_backfill(&mut self, backfill_req: ProtoBackfillNack) -> Result<(), ()> {
         let sender = backfill_req.reply_name;
 
         // Extract hints from wrapper
-        let hints = match backfill_req.hints {
-            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(wrapper)) => {
-                wrapper.hints
-            }
-            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lanes(_)) => {
-                warn!("Lane hints not yet supported in DAG backfill");
+        let lane_hint = match backfill_req.hints {
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(_)) => {
+                warn!("Received block hints for DAG backfill, LaneLogserver requires Lane hints");
                 return Ok(());
             }
+            Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Lane(lane)) => lane,
             None => {
-                vec![]
+                warn!("Backfill request has no hints");
+                return Ok(());
             }
         };
 
@@ -299,21 +305,21 @@ impl LaneLogServer {
         match &backfill_req.origin {
             Some(Origin::Abl(abl)) => {
                 // AppendBlockLane is the proper DAG mode path
-                self.respond_backfill_abl(sender, abl, hints, backfill_req.last_index_needed)
+                self.respond_backfill_abl(sender, abl, lane_hint, backfill_req.last_index_needed)
                     .await
             }
 
             Some(Origin::Ae(ae)) => {
-                // Traditional AppendEntries backfill (for backward compatibility)
-                // QUESTION: In DAG mode, should we even support AE backfill?
-                self.respond_backfill_ae(sender, ae, hints, backfill_req.last_index_needed)
-                    .await
+                // LaneLogserver doesn't handle AE backfill
+                warn!(
+                    "Received AE backfill request in LaneLogserver (DAG only component) - ignoring"
+                );
+                return Ok(());
             }
 
             Some(Origin::Vc(_vc)) => {
                 // ViewChange backfill not supported in DAG mode
-                // QUESTION: Is this correct...?
-                warn!("ViewChange backfill not supported in DAG mode");
+                warn!("Malformed Request");
                 Ok(())
             }
 
@@ -329,11 +335,11 @@ impl LaneLogServer {
         &mut self,
         sender: String,
         abl: &crate::proto::consensus::ProtoAppendBlockLane,
-        hints: Vec<ProtoBlockHint>,
+        hints: ProtoLaneBlockHints,
         last_index_needed: u64,
     ) -> Result<(), ()> {
         // Extract lane_id and AppendBlock from the request
-        let lane_id = abl.name.clone();
+        let lane_id = hints.name.clone();
         let ab = match &abl.ab {
             Some(ab) => ab,
             None => {
@@ -353,25 +359,27 @@ impl LaneLogServer {
         let last_n = requester_block_n;
 
         // Get the requested block from this lane
-        let requested_block = self
-            .get_block_for_backfill(&lane_id, first_n, last_n, hints)
-            .await;
+        let requested_blocks = self.fill_lane(&lane_id, first_n, last_n, hints).await;
 
-        // Construct response as AppendBlock with backfill flag
-        let payload = if let Some(block) = requested_block {
+        // Construct response as AppendBlockLane
+        let payload = if !requested_blocks.is_empty() {
             ProtoPayload {
-                message: Some(Message::AppendBlock(ProtoAppendBlock {
-                    block: Some(block),
-                    commit_index: ab.commit_index,
-                    view: ab.view,
-                    view_is_stable: ab.view_is_stable,
-                    config_num: ab.config_num,
-                    is_backfill_response: true,
-                })),
+                message: Some(Message::AppendBlockLane(
+                    crate::proto::consensus::ProtoAppendBlockLane {
+                        name: lane_id,
+                        ab: ProtoAppendBlocks {
+                            serialized_blocks: requested_blocks,
+                            commit_index: ab.commit_index,
+                            view: ab.view,
+                            view_is_stable: ab.view_is_stable,
+                            config_num: ab.config_num,
+                        },
+                    },
+                )),
             }
         } else {
             warn!(
-                "Could not find requested block for backfill in lane {}",
+                "Could not find requested blocks for backfill in lane {}",
                 lane_id
             );
             return Ok(());
@@ -389,73 +397,18 @@ impl LaneLogServer {
         Ok(())
     }
 
-    /// Handle backfill for AppendEntries (backward compatibility)
-    async fn respond_backfill_ae(
-        &mut self,
-        sender: String,
-        ae: &crate::proto::consensus::ProtoAppendEntries,
-        hints: Vec<ProtoBlockHint>,
-        last_index_needed: u64,
-    ) -> Result<(), ()> {
-        let existing_fork = match &ae.entry {
-            Some(crate::proto::consensus::proto_append_entries::Entry::Fork(fork)) => fork,
-            _ => {
-                warn!("Malformed request - no fork in AppendEntries");
-                return Ok(());
-            }
-        };
-
-        // In DAG mode with AE origin, use the sender name as lane_id
-        let lane_id = sender.clone();
-
-        let last_n = existing_fork.serialized_blocks.last().unwrap().n;
-        let first_n = last_index_needed;
-
-        // Get the requested block from this lane
-        let requested_block = self
-            .get_block_for_backfill(&lane_id, first_n, last_n, hints)
-            .await;
-
-        let payload = if let Some(block) = requested_block {
-            ProtoPayload {
-                message: Some(Message::AppendBlock(ProtoAppendBlock {
-                    block: Some(block),
-                    commit_index: ae.commit_index,
-                    view: ae.view,
-                    view_is_stable: ae.view_is_stable,
-                    config_num: ae.config_num,
-                    is_backfill_response: true,
-                })),
-            }
-        } else {
-            warn!("Could not find requested block for backfill");
-            return Ok(());
-        };
-
-        // Send the payload to the sender
-        let buf = payload.encode_to_vec();
-        let _ = PinnedClient::send(
-            &self.client,
-            &sender,
-            MessageRef(&buf, buf.len(), &crate::rpc::SenderType::Anon),
-        )
-        .await;
-
-        Ok(())
-    }
-
-    /// Returns the most recent block from `first_n` to `last_n` for backfill in a specific lane.
-    /// In DAG mode, we send single blocks, not forks. We find the first block that doesn't match hints.
-    async fn get_block_for_backfill(
+    /// Get blocks from lane in range [first_n, last_n].
+    /// If we see a block that matches a hint, we stop and return the blocks up to that point.
+    async fn fill_lane(
         &mut self,
         lane_id: &String,
         first_n: u64,
         last_n: u64,
         mut hints: Vec<ProtoBlockHint>,
-    ) -> Option<HalfSerializedBlock> {
+    ) -> Vec<HalfSerializedBlock> {
         if last_n < first_n {
-            warn!("Invalid range: last_n ({}) < first_n ({})", last_n, first_n);
-            return None;
+            // QUESTION: Is panic correct here? logserver panics in this case...
+            panic!("Invalid range: last_n ({}) < first_n ({})", last_n, first_n);
         }
 
         let hint_map = hints
@@ -463,8 +416,8 @@ impl LaneLogServer {
             .map(|hint| (hint.block_n, hint.digest))
             .collect::<HashMap<_, _>>();
 
-        // Search backwards from last_n to first_n to find the first block that doesn't match hints
-        for i in (first_n..=last_n).rev() {
+        let mut lane_queue = VecDequeue::with_capacity((last_n - first_n + 1) as usize);
+        for i in (first_n..=last_n) {
             let block = match self.get_block(lane_id, i).await {
                 Some(block) => block,
                 None => {
@@ -476,13 +429,12 @@ impl LaneLogServer {
             let hint = hint_map.get(&i);
             if let Some(hint) = hint {
                 if hint.eq(&block.block_hash) {
-                    // This block matches, requester already has it, continue searching
-                    continue;
+                    // This block matches, requester already has it, skip
+                    break;
                 }
             }
 
-            // Found a block that doesn't match or no hint for it - this is what we need to send
-            return Some(HalfSerializedBlock {
+            lane_queue.push_back(HalfSerializedBlock {
                 n: block.block.n,
                 view: block.block.view,
                 view_is_stable: block.block.view_is_stable,
@@ -490,11 +442,12 @@ impl LaneLogServer {
                 serialized_body: block.block_ser.clone(),
             });
         }
-
-        // No suitable block found
-        None
     }
 
+    /// Handle incoming queries:
+    /// - CheckHash
+    /// - GetHints
+    /// - GetBlock
     async fn handle_query(&mut self, query: LaneLogServerQuery) {
         match query {
             LaneLogServerQuery::CheckHash(proposer_sig, n, hsh, sender) => {
@@ -528,13 +481,13 @@ impl LaneLogServer {
                 const JUMP_START: u64 = 1000;
                 const JUMP_MULTIPLIER: u64 = 10;
 
-                let mut hints = Vec::new();
+                let mut block_hints = Vec::new();
 
                 let lane = match self.lanes.get(&proposer_sig) {
                     Some(lane) => lane,
                     None => {
                         warn!("Lane {:?} not found for GetHints", proposer_sig);
-                        let _ = sender.send(hints).await;
+                        let _ = sender.send(vec![]).await;
                         return;
                     }
                 };
@@ -555,7 +508,7 @@ impl LaneLogServer {
                             break;
                         }
                     };
-                    hints.push(ProtoBlockHint {
+                    block_hints.push(ProtoBlockHint {
                         block_n: block.block.n,
                         digest: block.block_hash.clone(),
                     });
@@ -577,16 +530,22 @@ impl LaneLogServer {
                             panic!("Block {} not found in lane {:?}", last_n, proposer_sig);
                         }
                     };
-                    hints.push(ProtoBlockHint {
+                    block_hints.push(ProtoBlockHint {
                         block_n: block.block.n,
                         digest: block.block_hash.clone(),
                     });
                 }
 
-                let len = hints.len();
+                // Wrap the block hints in ProtoLaneBlockHints
+                let lane_hints = vec![ProtoLaneBlockHints {
+                    name: proposer_sig.clone(),
+                    hints: block_hints,
+                }];
 
-                let res = sender.send(hints).await;
-                info!("Sent hints size {}, result = {:?}", len, res);
+                let len = lane_hints.len();
+
+                let res = sender.send(lane_hints).await;
+                info!("Sent lane hints size {}, result = {:?}", len, res);
             }
             LaneLogServerQuery::GetBlock(lane_id, n, sender) => {
                 let block = self.get_block(&lane_id, n).await;
