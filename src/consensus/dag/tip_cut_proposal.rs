@@ -59,6 +59,9 @@ pub struct TipCutProposal {
 
     // Timer for periodic proposals
     tip_cut_timer: Arc<std::pin::Pin<Box<ResettableTimer>>>,
+    // Max Cars - if we have this many CARs, propose tip cut immediately (override timer)
+    // If max_cars is 0, this feature is disabled
+    tip_cut_max_cars: usize,
 
     // Query channel to LaneStaging
     lane_staging_query_tx: Sender<LaneStagingQuery>,
@@ -81,9 +84,9 @@ impl TipCutProposal {
         let config_snapshot = config.get();
 
         // Set up timer for periodic tip cut proposals
-        // Default to 100ms if not configured
-        let tip_cut_delay_ms = 100; // TODO: Add tip_cut_max_delay_ms to ConsensusConfig
+        let tip_cut_delay_ms = config_snapshot.dag_config.tip_cut_delay_ms;
         let tip_cut_timer = ResettableTimer::new(Duration::from_millis(tip_cut_delay_ms));
+        let tip_cut_max_cars = config_snapshot.dag_config.tip_cut_max_cars;
 
         // Determine initial leadership
         #[cfg(feature = "view_change")]
@@ -113,6 +116,7 @@ impl TipCutProposal {
             i_am_leader,
             current_leader,
             tip_cut_timer,
+            tip_cut_max_cars,
             lane_staging_query_tx,
             consensus_sequencer_tx,
             cmd_rx,
@@ -156,10 +160,25 @@ impl TipCutProposal {
             return Ok(());
         }
 
-        // Handle timer tick - propose tip cut if we're the leader
+        // If timer has ticked or enough cars have been seen to propose tip cut
+        // Check if I am the leader and propose a tip cut
         if timer_tick {
-            if self.i_am_leader && self.should_propose_tip_cut() {
-                if let Err(_) = self.propose_tip_cut().await {
+            // If timer ticked, propose tip cut based on timer
+            if self.i_am_leader {
+                if let Err(_) = self.propose_tip_cut(false).await {
+                    error!("Failed to propose tip cut");
+                }
+            } else {
+                trace!(
+                    "Skipping tip cut proposal: i_am_leader={}",
+                    self.i_am_leader
+                );
+            }
+            return Ok(());
+        } else if self.config.get().dag_config.tip_cut_max_cars > 0 {
+            // Otherwise, check if enough CARs have been seen to propose tip cut
+            if self.i_am_leader {
+                if let Err(_) = self.propose_tip_cut(true).await {
                     error!("Failed to propose tip cut");
                 }
             } else {
@@ -208,21 +227,8 @@ impl TipCutProposal {
         }
     }
 
-    /// Determine if a tip cut should be proposed.
-    ///
-    /// TODO: Implement more sophisticated logic:
-    /// - Timer-based: Propose every N milliseconds (current behavior)
-    /// - Threshold-based: Propose when enough new CARs are available
-    /// - Hybrid: Propose when timer expires AND threshold met
-    /// - Adaptive: Adjust timing based on network conditions
-    ///
-    /// For now, returns true (always propose on timer tick if leader).
-    fn should_propose_tip_cut(&self) -> bool {
-        true // For now, always propose when timer ticks
-    }
-
     /// Query lane_staging for current tip cut and broadcast it to all nodes.
-    async fn propose_tip_cut(&mut self) -> Result<(), ()> {
+    async fn propose_tip_cut(&mut self, use_threshold: bool) -> Result<(), ()> {
         // Query LaneStaging for the current tip cut
         let tip_cut = match self.query_tip_cut().await? {
             Some(tc) => tc,
@@ -235,6 +241,16 @@ impl TipCutProposal {
         // Check if tip cut is valid (has at least one CAR)
         if tip_cut.cars.is_empty() {
             debug!("Tip cut is empty, skipping proposal");
+            return Ok(());
+        }
+
+        // If using threshold-based proposal, check if enough CARs are present
+        if use_threshold && tip_cut.cars.len() < self.tip_cut_max_cars {
+            debug!(
+                "Not enough CARs for tip cut proposal: have {}, need {}",
+                tip_cut.cars.len(),
+                self.tip_cut_max_cars
+            );
             return Ok(());
         }
 

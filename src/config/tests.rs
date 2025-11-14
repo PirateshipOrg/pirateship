@@ -79,11 +79,19 @@ fn test_nodeconfig_serialize() {
         byzantine_start_block: 20000,
     };
 
+    let dag_config = crate::config::DAGConfig {
+        tip_cut_delay_ms: 500,
+        tip_cut_max_cars: 10,
+    };
+
     let config = Config {
         net_config,
         rpc_config,
         consensus_config,
         app_config,
+
+        #[cfg(feature = "dag")]
+        dag_config,
 
         #[cfg(feature = "evil")]
         evil_config,
@@ -235,11 +243,19 @@ async fn test_atomic_config_access() {
         byzantine_start_block: 20000,
     };
 
+    let dag_config = crate::config::DAGConfig {
+        tip_cut_delay_ms: 500,
+        tip_cut_max_cars: 10,
+    };
+
     let config = Config {
         net_config,
         rpc_config,
         consensus_config,
         app_config,
+
+        #[cfg(feature = "dag")]
+        dag_config,
 
         #[cfg(feature = "evil")]
         evil_config,

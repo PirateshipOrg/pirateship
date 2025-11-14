@@ -110,6 +110,12 @@ impl ConsensusConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DAGConfig {
+    pub tip_cut_delay_ms: u64,
+    pub tip_cut_max_cars: usize, // Maximum number of CARs in a tip cut (0 to disable)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub logger_stats_report_ms: u64,
     pub checkpoint_interval_ms: u64,
@@ -127,6 +133,9 @@ pub struct Config {
     pub rpc_config: RpcConfig,
     pub consensus_config: ConsensusConfig,
     pub app_config: AppConfig,
+
+    #[cfg(feature = "dag")]
+    pub dag_config: DAGConfig,
 
     #[cfg(feature = "evil")]
     pub evil_config: EvilConfig,
@@ -218,6 +227,12 @@ impl ClientConfig {
             app_config: AppConfig {
                 logger_stats_report_ms: 100,
                 checkpoint_interval_ms: 60000,
+            },
+
+            #[cfg(feature = "dag")]
+            dag_config: DAGConfig {
+                tip_cut_delay_ms: 500,
+                tip_cut_max_cars: 10,
             },
 
             #[cfg(feature = "evil")]
