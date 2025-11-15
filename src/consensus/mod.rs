@@ -726,6 +726,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             lane_staging_query_rx,
             client_reply_command_tx.clone(),
             lane_logserver_tx,
+            lane_logserver_query_tx.clone(),
         );
 
         // DAG Lane LogServer

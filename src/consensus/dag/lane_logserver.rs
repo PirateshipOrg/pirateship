@@ -2,11 +2,9 @@
 /// Maintains per-lane logs of blocks, handles backfill requests, and serves block queries.
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    hint,
     sync::Arc,
 };
 
-use futures::SinkExt;
 use log::{error, info, trace, warn};
 use prost::Message as _;
 use tokio::sync::Mutex;
@@ -18,7 +16,7 @@ use crate::{
         checkpoint::{
             proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint, ProtoLaneBlockHints,
         },
-        consensus::{HalfSerializedBlock, ProtoAppendBlocks},
+        consensus::{HalfSerializedBlock, ProtoAppendBlocks, ProtoBlockCar},
         rpc::{proto_payload::Message, ProtoPayload},
     },
     rpc::{client::PinnedClient, MessageRef},
@@ -88,12 +86,31 @@ impl LaneReadCache {
     }
 }
 
+pub enum CheckCarResult {
+    Success,   // Car exists and matches digest
+    Failure,   // Car exists but does not match digest
+    NotExists, // Car does not exist
+}
+
 pub enum LaneLogServerQuery {
     CheckHash(
         String,  /* lane_id */
         u64,     /* block.n */
         Vec<u8>, /* block_hash */
         Sender<bool>,
+    ),
+    /// Get the CAR (if any) for a lane at seq n
+    GetCar(
+        String,                        /* lane_id */
+        u64,                           /* car.n */
+        Sender<Option<ProtoBlockCar>>, /* returns the CAR if present */
+    ),
+    /// Check if a CAR exists for a lane at seq n with the given digest
+    CheckCar(
+        String,  /* lane_id */
+        u64,     /* car.n */
+        Vec<u8>, /* car digest */
+        Sender<CheckCarResult>,
     ),
     GetHints(
         String,                      /* lane_id */
@@ -110,18 +127,23 @@ pub enum LaneLogServerQuery {
 
 pub enum LaneLogServerCommand {
     NewBlock(String /* lane_id */, CachedBlock),
+    /// Insert a CAR for a given lane
+    NewCar(String /* lane_id */, ProtoBlockCar),
+    #[allow(dead_code)]
     Rollback(String /* lane_id (sender name) */, u64),
+    #[allow(dead_code)]
     UpdateBCI(u64),
 }
 
 pub struct LaneLogServer {
+    #[allow(dead_code)]
     config: AtomicConfig,
     client: PinnedClient,
     bci: u64,
 
     lane_logserver_rx: Receiver<LaneLogServerCommand>,
     backfill_request_rx: Receiver<ProtoBackfillNack>,
-    lane_gc_rx: Receiver<u64>,
+    lane_gc_rx: Receiver<(String, u64)>,
 
     query_rx: Receiver<LaneLogServerQuery>,
 
@@ -130,8 +152,14 @@ pub struct LaneLogServer {
     /// Map from lane_id (sender name) to their lane (chain of blocks)
     lanes: HashMap<String, VecDeque<CachedBlock>>,
 
+    /// Per-lane CAR log: map seq num to CAR for quick lookup
+    lane_cars: HashMap<String, BTreeMap<u64, ProtoBlockCar>>,
+
     /// Read cache per lane for GCed blocks.
     read_caches: HashMap<String, LaneReadCache>,
+
+    // Persist CARs to storage (simple key-value). Always true for now; could be config-driven.
+    persist_cars: bool,
 }
 
 const LOGSERVER_READ_CACHE_WSS: usize = 100;
@@ -142,7 +170,7 @@ impl LaneLogServer {
         client: PinnedClient,
         lane_logserver_rx: Receiver<LaneLogServerCommand>,
         backfill_request_rx: Receiver<ProtoBackfillNack>,
-        lane_gc_rx: Receiver<u64>,
+        lane_gc_rx: Receiver<(String, u64)>,
         query_rx: Receiver<LaneLogServerQuery>,
         storage: StorageServiceConnector,
     ) -> Self {
@@ -155,8 +183,10 @@ impl LaneLogServer {
             query_rx,
             storage,
             lanes: HashMap::new(),
+            lane_cars: HashMap::new(),
             read_caches: HashMap::new(),
             bci: 0,
+            persist_cars: true,
         }
     }
 
@@ -178,6 +208,10 @@ impl LaneLogServer {
                         trace!("Received block {} for lane {}", block.block.n, lane_id);
                         self.handle_new_block(lane_id, block).await;
                     },
+                    Some(LaneLogServerCommand::NewCar(lane_id, car)) => {
+                        trace!("Received CAR n={} for lane {}", car.n, lane_id);
+                        self.handle_new_car(lane_id, car).await;
+                    },
                     Some(LaneLogServerCommand::Rollback(lane_id, n)) => {
                         trace!("Rolling back lane {} to block {}", lane_id, n);
                         self.handle_rollback(lane_id, n).await;
@@ -194,10 +228,13 @@ impl LaneLogServer {
             },
 
             gc_req = self.lane_gc_rx.recv() => {
-                if let Some(gc_req) = gc_req {
-                    // GC all lanes
-                    for lane in self.lanes.values_mut() {
-                        lane.retain(|block| block.block.n > gc_req);
+                if let Some((lane_id, gc_n)) = gc_req {
+                    // GC only the specified lane up to sequence number gc_n
+                    if let Some(lane) = self.lanes.get_mut(&lane_id) {
+                        lane.retain(|block| block.block.n > gc_n);
+                    }
+                    if let Some(cars) = self.lane_cars.get_mut(&lane_id) {
+                        cars.retain(|k, _| *k > gc_n);
                     }
                 }
             },
@@ -236,6 +273,40 @@ impl LaneLogServer {
         let block = lane[block_idx].clone();
 
         Some(block)
+    }
+
+    /// Get CAR from lane at index n.
+    async fn get_car(&mut self, lane_id: &String, n: u64) -> Option<ProtoBlockCar> {
+        let cars = self.lane_cars.get(lane_id)?;
+        let last_n = *cars.keys().next_back()?;
+
+        if n == 0 || n > last_n {
+            return None;
+        }
+
+        let first_n = *cars.keys().next()?;
+        if n < first_n {
+            return self.get_gced_car(lane_id, n).await;
+        }
+
+        cars.get(&n).cloned()
+    }
+
+    /// Get GC'ed CAR from lane at index n.
+    /// Now that CARs are persisted, attempt to load from storage on cache miss.
+    async fn get_gced_car(&mut self, lane_id: &String, n: u64) -> Option<ProtoBlockCar> {
+        // If we have some CARs in memory for this lane, ensure the requested n is actually GC'ed.
+        if let Some(cars) = self.lane_cars.get(lane_id) {
+            if let Some((&first_n, _)) = cars.iter().next() {
+                // Not GC'ed; return whatever we have (likely None unless present)
+                if n >= first_n {
+                    return cars.get(&n).cloned();
+                }
+            }
+        }
+
+        // Attempt to load from persistent storage and warm the in-memory map.
+        self.load_car_from_storage(lane_id, n).await
     }
 
     /// Get GC'ed block from lane at index n.
@@ -309,7 +380,7 @@ impl LaneLogServer {
                     .await
             }
 
-            Some(Origin::Ae(ae)) => {
+            Some(Origin::Ae(_ae)) => {
                 // LaneLogserver doesn't handle AE backfill
                 warn!(
                     "Received AE backfill request in LaneLogserver (DAG only component) - ignoring"
@@ -548,6 +619,41 @@ impl LaneLogServer {
                 let res = sender.send(lane_hint).await;
                 info!("Sent lane hints size {}, result = {:?}", len, res);
             }
+            LaneLogServerQuery::CheckCar(lane_id, n, digest, sender) => {
+                if n == 0 {
+                    sender.send(CheckCarResult::NotExists).await.unwrap();
+                    return;
+                }
+                // Try memory first, else load from storage
+                if self
+                    .lane_cars
+                    .get(&lane_id)
+                    .and_then(|m| m.get(&n))
+                    .is_none()
+                {
+                    let _ = self.load_car_from_storage(&lane_id, n).await;
+                }
+                let result = self
+                    .lane_cars
+                    .get(&lane_id)
+                    .and_then(|m| m.get(&n))
+                    .map(|car| {
+                        if car.digest == digest {
+                            CheckCarResult::Success
+                        } else {
+                            CheckCarResult::Failure
+                        }
+                    })
+                    .unwrap_or(CheckCarResult::NotExists);
+                let _ = sender.send(result).await;
+            }
+            LaneLogServerQuery::GetCar(lane_id, n, sender) => {
+                let mut car_opt = self.get_car(&lane_id, n).await;
+                if car_opt.is_none() {
+                    car_opt = self.load_car_from_storage(&lane_id, n).await;
+                }
+                let _ = sender.send(car_opt).await;
+            }
             LaneLogServerQuery::GetBlock(lane_id, n, sender) => {
                 let block = self.get_block(&lane_id, n).await;
                 let _ = sender.send(block).await;
@@ -593,9 +699,68 @@ impl LaneLogServer {
             lane.retain(|block| block.block.n <= n);
         }
 
+        // Rollback CARs for this lane as well
+        if let Some(cars) = self.lane_cars.get_mut(&lane_id) {
+            cars.retain(|k, _| *k <= n);
+        }
+
         // Clean up read cache for this lane
         if let Some(cache) = self.read_caches.get_mut(&lane_id) {
             cache.cache.retain(|k, _| *k <= n);
+        }
+    }
+
+    /// Insert a CAR into a lane's CAR log
+    async fn handle_new_car(&mut self, lane_id: String, car: ProtoBlockCar) {
+        let car_map = self
+            .lane_cars
+            .entry(lane_id.clone())
+            .or_insert_with(BTreeMap::new);
+
+        // Insert/replace CAR at sequence number
+        car_map.insert(car.n, car.clone());
+
+        if self.persist_cars {
+            let key = Self::car_storage_key(&lane_id, car.n);
+            let ser = car.encode_to_vec();
+            let _ = self.storage.put_raw(key, ser).await; // fire-and-forget
+        }
+    }
+
+    fn car_storage_key(lane_id: &str, n: u64) -> String {
+        format!("lane:{}:car:{}", lane_id, n)
+    }
+
+    async fn load_car_from_storage(&mut self, lane_id: &String, n: u64) -> Option<ProtoBlockCar> {
+        if !self.persist_cars {
+            return None;
+        }
+        // Already cached?
+        if self
+            .lane_cars
+            .get(lane_id)
+            .and_then(|m| m.get(&n))
+            .is_some()
+        {
+            return self.lane_cars.get(lane_id).and_then(|m| m.get(&n)).cloned();
+        }
+        let key = Self::car_storage_key(lane_id, n);
+        let raw = match self.storage.get_raw(key).await {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        if raw.is_empty() {
+            return None;
+        }
+        match ProtoBlockCar::decode(raw.as_slice()) {
+            Ok(car) => {
+                self.lane_cars
+                    .entry(lane_id.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(n, car.clone());
+                Some(car)
+            }
+            Err(_) => None,
         }
     }
 }
