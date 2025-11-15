@@ -24,23 +24,21 @@
 /// - Uses lexicographic tiebreaking (lane name, then sequence number)
 /// - Ensures safety and consistency across nodes
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::Arc,
 };
 
-use log::{debug, error, info, trace, warn};
-use tokio::sync::{oneshot, Mutex};
+use log::{debug, error, info, warn};
+use tokio::sync::Mutex;
 
 use crate::{
     config::AtomicConfig,
-    crypto::{CachedBlock, HashType},
+    crypto::HashType,
     proto::consensus::ProtoBlockCar,
-    utils::channel::{Receiver, Sender},
+    utils::channel::{make_channel, Receiver, Sender},
 };
 
-use super::super::{
-    dag::lane_logserver::LaneLogServerQuery,
-};
+use super::super::dag::lane_logserver::LaneLogServerQuery;
 
 /// Represents a block (batch) in the DAG that needs to be sorted
 #[derive(Debug, Clone)]
@@ -216,7 +214,7 @@ impl TipCutSort {
 
         // Fetch CachedBlocks from lane logserver in sorted order
         let mut cached_blocks = Vec::with_capacity(sorted_blocks.len());
-        
+
         for (idx, block) in sorted_blocks.iter().enumerate() {
             debug!(
                 "Fetching block {}/{}: lane={}, seq_num={}, hash={:?}",
@@ -227,13 +225,10 @@ impl TipCutSort {
                 &block.block_hash[..8]
             );
 
-            // Query lane logserver for this block
-            let (response_tx, response_rx) = oneshot::channel();
-            let query = LaneLogServerQuery::GetBlock(
-                block.lane_id.clone(),
-                block.seq_num,
-                response_tx,
-            );
+            // Query lane logserver for this block (use project channels)
+            let (response_tx, response_rx) = make_channel(1);
+            let query =
+                LaneLogServerQuery::GetBlock(block.lane_id.clone(), block.seq_num, response_tx);
 
             if let Err(e) = self.lane_logserver_query_tx.send(query).await {
                 error!(
@@ -246,15 +241,15 @@ impl TipCutSort {
             }
 
             // Wait for response
-            match response_rx.await {
-                Ok(Some(cached_block)) => {
+            match response_rx.recv().await {
+                Some(Some(cached_block)) => {
                     debug!(
                         "Successfully fetched block {}:{}",
                         block.lane_id, block.seq_num
                     );
                     cached_blocks.push(cached_block);
                 }
-                Ok(None) => {
+                Some(None) => {
                     warn!(
                         "Block {}:{} not found in lane logserver",
                         block.lane_id, block.seq_num
@@ -263,10 +258,10 @@ impl TipCutSort {
                     self.last_committed_tip_cut = Some(tip_cut);
                     return;
                 }
-                Err(e) => {
+                None => {
                     error!(
-                        "Failed to receive GetBlock response for {}:{}: {:?}",
-                        block.lane_id, block.seq_num, e
+                        "LaneLogServer query channel closed for {}:{}",
+                        block.lane_id, block.seq_num
                     );
                     self.last_committed_tip_cut = Some(tip_cut);
                     return;
@@ -284,21 +279,18 @@ impl TipCutSort {
         // Each block in a lane inherits the origin_node from its lane's CAR
         #[cfg(feature = "dag")]
         let mut origin_map = std::collections::HashMap::new();
-        
+
         #[cfg(feature = "dag")]
         for cached_block in &cached_blocks {
             // Find which lane this block belongs to by checking the CAR digests
             // The block's hash should match a CAR's digest in the tip cut
-            for (lane_id, car) in &tip_cut.cars {
+            for (_lane_id, car) in &tip_cut.cars {
                 // Check if this block could belong to this lane's CAR
                 // In DAG mode, each lane has one CAR per tip cut, and the CAR
                 // covers blocks up to sequence number car.n
-                if cached_block.block_hash.as_ref() == car.digest.as_slice() {
+                if cached_block.block_hash.as_slice() == car.digest.as_slice() {
                     // This block is the one certified by this CAR
-                    origin_map.insert(
-                        cached_block.block_hash.clone(),
-                        car.origin_node.clone(),
-                    );
+                    origin_map.insert(cached_block.block_hash.clone(), car.origin_node.clone());
                     break;
                 }
             }
@@ -313,14 +305,16 @@ impl TipCutSort {
         // Call Staging directly to add sorted blocks and trigger Byzantine commit
         // This reuses all existing Byzantine commit logic from steady_state.rs
         let mut staging = self.staging.lock().await;
-        
+
         #[cfg(feature = "dag")]
-        staging.add_sorted_tipcut_blocks_with_origins(cached_blocks, origin_map).await;
-        
+        staging
+            .add_sorted_tipcut_blocks_with_origins(cached_blocks, origin_map)
+            .await;
+
         #[cfg(not(feature = "dag"))]
         staging.add_sorted_tipcut_blocks(cached_blocks).await;
-        
-        drop(staging);  // Release lock
+
+        drop(staging); // Release lock
 
         info!(
             "Added {} sorted blocks to Staging for tip cut {}",
