@@ -14,7 +14,7 @@
 /// 4. Collect BlockAcks from other nodes
 /// 5. Form CAR when liveness threshold reached
 /// 6. Broadcast CAR to all nodes
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 
 use ed25519_dalek::SIGNATURE_LENGTH;
 use log::{debug, error, info, trace, warn};
@@ -293,7 +293,10 @@ impl LaneStaging {
         Ok(())
     }
 
-    /// Send BlockAck message to all nodes after successfully storing a block.
+    /// Send BlockAck message after successfully storing a block.
+    ///
+    /// Fanout optimization: send only to the lane owner (origin node) rather than broadcasting
+    /// to all nodes. Only the lane owner collects acks and forms CARs.
     async fn send_block_ack(&mut self, block: &CachedBlock, lane_id: &String) -> Result<(), ()> {
         let config = self.config.get();
         let my_name = &config.net_config.name;
@@ -309,8 +312,18 @@ impl LaneStaging {
             sig: sig.to_vec(),
         };
 
+        // If we're the lane owner, no need to send an ack to ourselves.
+        if lane_id == my_name {
+            trace!(
+                "Lane owner {} stored its own block n={} — not sending BlockAck to self",
+                my_name,
+                block.block.n
+            );
+            return Ok(());
+        }
+
         debug!(
-            "Sending BlockAck for n={} in lane {} to all nodes",
+            "Sending BlockAck for n={} in lane {} to lane owner only",
             block.block.n, lane_id
         );
 
@@ -321,14 +334,20 @@ impl LaneStaging {
         let buf = payload.encode_to_vec();
         let sz = buf.len();
 
-        // Broadcast to all nodes (except self)
-        for node in &config.consensus_config.node_list {
-            if node == my_name {
-                continue; // Don't send to self
-            }
-
-            let _ = PinnedClient::send(&self.client, node, MessageRef(&buf, sz, &SenderType::Anon))
-                .await;
+        // Send only to the lane owner/origin node
+        if config.consensus_config.node_list.contains(lane_id) {
+            let _ = PinnedClient::send(
+                &self.client,
+                lane_id,
+                MessageRef(&buf, sz, &SenderType::Anon),
+            )
+            .await;
+        } else {
+            warn!(
+                "Lane id {} not found in node list; cannot send BlockAck for n={}",
+                lane_id,
+                block.block.n
+            );
         }
 
         Ok(())
@@ -427,7 +446,7 @@ impl LaneStaging {
             "Block n={} in lane now has {}/{} acks",
             block_ack.n,
             stored_block.acknowledgments.len(),
-            self.liveness_threshold()
+            self.car_threshold()
         );
 
         // Check if we've reached the threshold to form a CAR
@@ -456,7 +475,7 @@ impl LaneStaging {
             }
 
             // Check if we have enough acknowledgments
-            let threshold = self.liveness_threshold();
+            let threshold = self.car_threshold();
             let ack_count = stored_block.acknowledgments.len();
 
             if ack_count < threshold {
@@ -533,6 +552,7 @@ impl LaneStaging {
     }
 
     /// Broadcast a formed CAR to all nodes.
+    // HACK: Do a better broadcasting implementation later
     async fn broadcast_car(&mut self, car: ProtoBlockCar) -> Result<(), ()> {
         let config = self.config.get();
         let my_name = &config.net_config.name;
@@ -557,7 +577,7 @@ impl LaneStaging {
     }
 
     /// Process a CAR received from another node via RPC.
-    /// Validate the CAR and update the tip cut state if valid.
+    /// Validate the CAR (signatures, threshold, sender matches origin) and update tip cut.
     async fn process_remote_car(
         &mut self,
         car: ProtoBlockCar,
@@ -601,19 +621,63 @@ impl LaneStaging {
             return Ok(());
         }
 
-        // Verify signature threshold
-        let threshold = self.liveness_threshold();
-        if car.sig.len() < threshold {
+        // Verify signatures over digest with deduplicated signer names
+        let threshold = self.car_threshold();
+        let digest_hash: Vec<u8> = match car.digest.clone().try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                warn!("Malformed digest in CAR from {} - rejecting", sender_name);
+                return Ok(());
+            }
+        };
+
+        let mut unique_valid_signers: HashSet<String> = HashSet::new();
+        for signed in &car.sig {
+            // Ensure signer is a known node
+            if !self.config.get().consensus_config.node_list.contains(&signed.name) {
+                trace!(
+                    "Ignoring CAR signature from unknown signer {}",
+                    signed.name
+                );
+                continue;
+            }
+
+            // Skip duplicate signer names
+            if unique_valid_signers.contains(&signed.name) {
+                continue;
+            }
+
+            // Parse signature
+            let Ok(sig_bytes): Result<[u8; SIGNATURE_LENGTH], _> = signed.sig.clone().try_into() else {
+                trace!("Malformed signature for signer {} in CAR — skipping", signed.name);
+                continue;
+            };
+
+            // Verify signature against CAR digest
+            let verified = self
+                .crypto
+                .verify_nonblocking(digest_hash.clone(), signed.name.clone(), sig_bytes)
+                .await
+                .await
+                .unwrap_or(false);
+
+            if verified {
+                unique_valid_signers.insert(signed.name.clone());
+            } else {
+                trace!("Invalid CAR signature from {} — skipping", signed.name);
+            }
+        }
+
+        if unique_valid_signers.len() < threshold {
             warn!(
-                "Received CAR with insufficient signatures ({} < {}) - rejecting",
-                car.sig.len(),
+                "Rejecting CAR for lane {} seq {}: valid unique signatures {} below threshold {}",
+                lane_id,
+                car.n,
+                unique_valid_signers.len(),
                 threshold
             );
             return Ok(());
         }
-
-        // TODO: Verify signatures are valid (crypto verification)
-        // For now, we trust authenticated senders
 
         // TODO: Verify parent references match expected DAG structure
         // This would require querying LaneLogServer for parent blocks
@@ -635,9 +699,8 @@ impl LaneStaging {
         Ok(())
     }
 
-    /// Calculate the liveness threshold for acknowledgments and CARs.
-    /// Must match BlockReceiver's threshold calculation.
-    fn liveness_threshold(&self) -> usize {
+    /// Calculate the threshold of acknowledgments needed to form CARs.
+    fn car_threshold(&self) -> usize {
         #[cfg(feature = "platforms")]
         {
             let n = self.config.get().consensus_config.node_list.len();
