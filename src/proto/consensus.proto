@@ -162,6 +162,7 @@ message ProtoVote {
 // Leader sends this to origin nodes so they can respond to their local clients
 message ProtoExecutionResults {
     bytes block_hash = 1;                               // Hash of block that was executed
-    repeated proto.execution.ProtoTransactionResult results = 2;  // Execution results for each transaction
-    string origin_node = 3;                             // Target node that should receive these results
+    uint64 block_n = 2;                                 // Sequence number of executed block (for client receipts)
+    repeated proto.execution.ProtoTransactionResult results = 3;  // Execution results for each transaction
+    string origin_node = 4;                             // Target node that should receive these results
 }

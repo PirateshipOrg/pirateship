@@ -429,12 +429,17 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     })
                     .collect();
                 
-                // Send to ClientReplyHandler with origin info
+                // Convert Option<String> to required String (empty string if missing)
+                let result_map_with_origins = result_map_with_origins
+                    .into_iter()
+                    .map(|(hash, (n, results, origin_opt))| {
+                        (hash, (n, results, origin_opt.unwrap_or_default()))
+                    })
+                    .collect();
+
+                // Send to ClientReplyHandler with origin info (variant takes single argument)
                 self.client_reply_tx
-                    .send(ClientReplyCommand::CrashCommitAckWithOrigins(
-                        result_map_with_origins,
-                        my_name,
-                    ))
+                    .send(ClientReplyCommand::CrashCommitAckWithOrigins(result_map_with_origins))
                     .await
                     .unwrap();
                     
@@ -513,14 +518,17 @@ impl<'a, E: AppEngine + Send + Sync + 'a> Application<'a, E> {
                     })
                     .collect();
                 
-                // Send to ClientReplyHandler which will decide whether to:
-                // 1. Handle locally (if we are the origin node)
-                // 2. Forward via RPC (if origin node is different)
+                // Normalize Option<String> to String (empty if none)
+                let result_map_with_origins = result_map_with_origins
+                    .into_iter()
+                    .map(|(hash, (n, results, origin_opt))| {
+                        (hash, (n, results, origin_opt.unwrap_or_default()))
+                    })
+                    .collect();
+
+                // Send to ClientReplyHandler (single argument variant)
                 self.client_reply_tx
-                    .send(ClientReplyCommand::ByzCommitAckWithOrigins(
-                        result_map_with_origins,
-                        my_name,
-                    ))
+                    .send(ClientReplyCommand::ByzCommitAckWithOrigins(result_map_with_origins))
                     .await
                     .unwrap();
 
