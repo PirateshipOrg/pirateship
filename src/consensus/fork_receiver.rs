@@ -137,7 +137,7 @@ impl ForkReceiver {
     ) -> Self {
         #[cfg(feature = "view_change")]
         let (view, config_num) = (0, 0);
-        
+
         #[cfg(not(feature = "view_change"))]
         let (view, config_num) = (1, 1);
 
@@ -496,10 +496,7 @@ impl ForkReceiver {
         };
 
         // Create MultipartTipCut and send to broadcaster (staging)
-        let multipart_tipcut = MultipartTipCut {
-            tipcut,
-            ae_stats,
-        };
+        let multipart_tipcut = MultipartTipCut { tipcut, ae_stats };
 
         // Send to broadcaster for voting
         // Note: The broadcaster will forward this to staging for voting
@@ -537,9 +534,11 @@ impl ForkReceiver {
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Ae(
                 ae,
             )),
-            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
-                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
-            )),
+            hints: Some(
+                crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                    crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
+                ),
+            ),
         };
 
         let payload = ProtoPayload {

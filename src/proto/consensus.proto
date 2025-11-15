@@ -5,6 +5,7 @@ syntax = "proto3";
 
 package proto.consensus;
 import "execution.proto";
+import "client.proto";
 
 message ProtoNameWithSignature {
     string name = 1;
@@ -165,4 +166,13 @@ message ProtoExecutionResults {
     uint64 block_n = 2;                                 // Sequence number of executed block (for client receipts)
     repeated proto.execution.ProtoTransactionResult results = 3;  // Execution results for each transaction
     string origin_node = 4;                             // Target node that should receive these results
+}
+
+// Byzantine Responses forwarding for DAG Proxy Pattern
+// Leader sends this to origin nodes so they can attach byz responses to local receipts
+message ProtoByzResults {
+    bytes block_hash = 1;                               // Hash of block that was byz-committed
+    uint64 block_n = 2;                                 // Sequence number of block
+    repeated proto.client.ProtoByzResponse responses = 3; // Byz responses for each tx
+    string origin_node = 4;                             // Target node that should receive these responses
 }

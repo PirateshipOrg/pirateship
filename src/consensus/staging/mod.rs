@@ -11,6 +11,7 @@ use futures::{future::BoxFuture, stream::FuturesOrdered, StreamExt as _};
 use log::{debug, error, info, trace, warn};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 
+use crate::crypto::HashType;
 use crate::{
     config::AtomicConfig,
     crypto::{CachedBlock, CryptoServiceConnector},
@@ -400,7 +401,7 @@ impl Staging {
 
     /// Add topologically sorted blocks from a committed tip cut to pending_blocks
     /// and trigger Byzantine commit. This is the DAG mode execution path.
-    /// 
+    ///
     /// Called by TipCutSort after it has fetched and sorted blocks from a committed tip cut.
     #[cfg(feature = "dag")]
     pub async fn add_sorted_tipcut_blocks(&mut self, blocks: Vec<CachedBlock>) {
@@ -421,12 +422,12 @@ impl Staging {
                 block: block.clone(),
                 vote_sigs: HashMap::new(),
                 replication_set: HashSet::new(),
-                qc_is_proposed: true,  // Already consensus-committed via tip cut
+                qc_is_proposed: true, // Already consensus-committed via tip cut
                 fast_qc_is_proposed: false,
             };
-            
+
             self.pending_blocks.push_back(block_with_votes);
-            
+
             debug!(
                 "Added block {} to pending_blocks (total: {})",
                 block.block.n,
@@ -437,8 +438,8 @@ impl Staging {
         // Update BCI and trigger Byzantine commit
         // This reuses the existing steady_state Byzantine commit logic
         self.bci = new_bci;
-        self.ci = new_bci;  // In DAG mode, BCI == CI since tip cuts represent finality
-        
+        self.ci = new_bci; // In DAG mode, BCI == CI since tip cuts represent finality
+
         info!(
             "Updated BCI to {} after tip cut commit, triggering Byzantine commit",
             new_bci
@@ -499,16 +500,18 @@ impl Staging {
                 block: block.clone(),
                 vote_sigs: HashMap::new(),
                 replication_set: HashSet::new(),
-                qc_is_proposed: true,  // Already consensus-committed via tip cut
+                qc_is_proposed: true, // Already consensus-committed via tip cut
                 fast_qc_is_proposed: false,
             };
-            
+
             self.pending_blocks.push_back(block_with_votes);
-            
+
             debug!(
                 "Added block {} to pending_blocks (origin: {})",
                 block.block.n,
-                origin_map.get(&block.block_hash).unwrap_or(&"unknown".to_string())
+                origin_map
+                    .get(&block.block_hash)
+                    .unwrap_or(&"unknown".to_string())
             );
         }
 
@@ -548,7 +551,7 @@ impl Staging {
             .app_tx
             .send(AppCommand::ByzCommitWithOrigins(byz_blocks, origin_map))
             .await;
-            
+
         let _ = self
             .logserver_tx
             .send(LogServerCommand::UpdateBCI(self.bci))

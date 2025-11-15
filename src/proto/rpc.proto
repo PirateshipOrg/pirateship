@@ -29,6 +29,7 @@ message ProtoPayload {
         proto.consensus.ProtoBlockAck block_ack = 10;
         proto.consensus.ProtoBlockCAR block_CAR = 11;
         proto.consensus.ProtoTipCut tip_cut = 12;
-        proto.consensus.ProtoExecutionResults execution_results = 13;  // For DAG proxy pattern
+    proto.consensus.ProtoExecutionResults execution_results = 13;  // For DAG proxy pattern
+    proto.consensus.ProtoByzResults byz_results = 14;              // For DAG proxy pattern
    }
 }

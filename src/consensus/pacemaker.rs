@@ -289,9 +289,11 @@ impl Pacemaker {
             origin: Some(crate::proto::checkpoint::proto_backfill_nack::Origin::Vc(
                 vc,
             )),
-            hints: Some(crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
-                crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
-            )),
+            hints: Some(
+                crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(
+                    crate::proto::checkpoint::ProtoBlockHintsWrapper { hints },
+                ),
+            ),
         };
         info!("Nack: {:?}", nack);
         let payload = ProtoPayload {

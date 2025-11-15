@@ -14,7 +14,10 @@
 /// 4. Collect BlockAcks from other nodes
 /// 5. Form CAR when liveness threshold reached
 /// 6. Broadcast CAR to all nodes
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use ed25519_dalek::SIGNATURE_LENGTH;
 use log::{debug, error, info, trace, warn};
@@ -345,8 +348,7 @@ impl LaneStaging {
         } else {
             warn!(
                 "Lane id {} not found in node list; cannot send BlockAck for n={}",
-                lane_id,
-                block.block.n
+                lane_id, block.block.n
             );
         }
 
@@ -634,11 +636,14 @@ impl LaneStaging {
         let mut unique_valid_signers: HashSet<String> = HashSet::new();
         for signed in &car.sig {
             // Ensure signer is a known node
-            if !self.config.get().consensus_config.node_list.contains(&signed.name) {
-                trace!(
-                    "Ignoring CAR signature from unknown signer {}",
-                    signed.name
-                );
+            if !self
+                .config
+                .get()
+                .consensus_config
+                .node_list
+                .contains(&signed.name)
+            {
+                trace!("Ignoring CAR signature from unknown signer {}", signed.name);
                 continue;
             }
 
@@ -648,8 +653,12 @@ impl LaneStaging {
             }
 
             // Parse signature
-            let Ok(sig_bytes): Result<[u8; SIGNATURE_LENGTH], _> = signed.sig.clone().try_into() else {
-                trace!("Malformed signature for signer {} in CAR — skipping", signed.name);
+            let Ok(sig_bytes): Result<[u8; SIGNATURE_LENGTH], _> = signed.sig.clone().try_into()
+            else {
+                trace!(
+                    "Malformed signature for signer {} in CAR — skipping",
+                    signed.name
+                );
                 continue;
             };
 

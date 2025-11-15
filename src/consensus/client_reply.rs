@@ -16,17 +16,13 @@ use crate::{
     proto::{
         client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt, ProtoTryAgain},
         execution::ProtoTransactionResult,
-        rpc::ProtoPayload,
     },
     rpc::{server::LatencyProfile, PinnedMessage, SenderType},
-    utils::channel::{Receiver, Sender},
+    utils::channel::Receiver,
 };
 
 #[cfg(feature = "dag")]
-use crate::{
-    proto::{consensus::ProtoExecutionResults, rpc::proto_payload},
-    rpc::client::PinnedClient,
-};
+use crate::rpc::client::PinnedClient;
 
 use super::batch_proposal::MsgAckChanWithTag;
 
@@ -56,12 +52,6 @@ enum ReplyProcessorCommand {
         MsgAckChanWithTag,
         Vec<ProtoByzResponse>,
     ),
-    ByzCommit(
-        u64,                    /* block_n */
-        u64,                    /* tx_n */
-        ProtoTransactionResult, /* result */
-        MsgAckChanWithTag,
-    ),
     Unlogged(oneshot::Receiver<ProtoTransactionResult>, MsgAckChanWithTag),
     Probe(u64 /* block_n */, Vec<MsgAckChanWithTag>),
 }
@@ -75,6 +65,8 @@ pub struct ClientReplyHandler {
     client: PinnedClient,
     #[cfg(feature = "dag")]
     execution_results_rx: Receiver<crate::proto::consensus::ProtoExecutionResults>,
+    #[cfg(feature = "dag")]
+    byz_results_rx: Receiver<crate::proto::consensus::ProtoByzResults>,
 
     reply_map: HashMap<HashType, Vec<MsgAckChanWithTag>>,
     byz_reply_map: HashMap<HashType, Vec<(u64, SenderType)>>,
@@ -105,6 +97,7 @@ impl ClientReplyHandler {
         #[cfg(feature = "dag")] execution_results_rx: Receiver<
             crate::proto::consensus::ProtoExecutionResults,
         >,
+        #[cfg(feature = "dag")] byz_results_rx: Receiver<crate::proto::consensus::ProtoByzResults>,
     ) -> Self {
         let _chan_depth = config.get().rpc_config.channel_depth as usize;
         Self {
@@ -115,6 +108,8 @@ impl ClientReplyHandler {
             client,
             #[cfg(feature = "dag")]
             execution_results_rx,
+            #[cfg(feature = "dag")]
+            byz_results_rx,
             reply_map: HashMap::new(),
             byz_reply_map: HashMap::new(),
             crash_commit_reply_buf: HashMap::new(),
@@ -167,9 +162,7 @@ impl ClientReplyHandler {
 
                             let _ = reply_chan.send((reply_msg, latency_profile)).await;
                         }
-                        ReplyProcessorCommand::ByzCommit(_, _, result, sender) => {}
-
-                        ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, sender)) => {
+                        ReplyProcessorCommand::Unlogged(res_rx, (reply_chan, tag, _sender)) => {
                             let reply = res_rx.await.unwrap();
                             let reply = ProtoClientReply {
                                 reply: Some(
@@ -218,7 +211,7 @@ impl ClientReplyHandler {
                             let reply_msg =
                                 PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
 
-                            for (reply_chan, tag, sender) in reply_vec {
+                            for (reply_chan, _tag, _sender) in reply_vec {
                                 let latency_profile = LatencyProfile::new();
 
                                 let _ = reply_chan.send((reply_msg.clone(), latency_profile)).await;
@@ -237,57 +230,116 @@ impl ClientReplyHandler {
     }
 
     async fn worker(&mut self) -> Result<(), ()> {
-        tokio::select! {
-            batch = self.batch_rx.recv() => {
-                if batch.is_none() {
-                    return Ok(());
-                }
-
-                let (batch_hash_chan, mut reply_vec) = batch.unwrap();
-                let batch_hash = batch_hash_chan.await.unwrap();
-
-                if batch_hash.is_empty() || self.must_cancel {
-                    // This is called when !listen_on_new_batch
-                    // This must be cancelled.
-                    if reply_vec.len() > 0 {
-                        info!("Clearing out queued replies of size {}", reply_vec.len());
-                        let node_infos = NodeInfo {
-                            nodes: self.config.get().net_config.nodes.clone()
-                        };
-                        for (chan, tag, _) in reply_vec.drain(..) {
-                            let reply = Self::get_try_again_message(tag, &node_infos);
-                            let reply_ser = reply.encode_to_vec();
-                            let _sz = reply_ser.len();
-                            let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
-                            let _ = chan.send((reply_msg, LatencyProfile::new())).await;
-                        }
+        #[cfg(feature = "dag")]
+        {
+            tokio::select! {
+                batch = self.batch_rx.recv() => {
+                    if batch.is_none() {
+                        return Ok(());
                     }
-                    return Ok(());
-                }
 
-                self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
-                self.reply_map.insert(batch_hash.clone(), reply_vec);
+                    let (batch_hash_chan, mut reply_vec) = batch.unwrap();
+                    let batch_hash = batch_hash_chan.await.unwrap();
 
-                self.maybe_clear_reply_buf(batch_hash).await;
-            },
-            cmd = self.reply_command_rx.recv() => {
-                if cmd.is_none() {
-                    return Ok(());
-                }
+                    if batch_hash.is_empty() || self.must_cancel {
+                        // This is called when !listen_on_new_batch
+                        // This must be cancelled.
+                        if reply_vec.len() > 0 {
+                            info!("Clearing out queued replies of size {}", reply_vec.len());
+                            let node_infos = NodeInfo {
+                                nodes: self.config.get().net_config.nodes.clone()
+                            };
+                            for (chan, tag, _) in reply_vec.drain(..) {
+                                let reply = Self::get_try_again_message(tag, &node_infos);
+                                let reply_ser = reply.encode_to_vec();
+                                let _sz = reply_ser.len();
+                                let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                                let _ = chan.send((reply_msg, LatencyProfile::new())).await;
+                            }
+                        }
+                        return Ok(());
+                    }
 
-                let cmd = cmd.unwrap();
+                    self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
+                    self.reply_map.insert(batch_hash.clone(), reply_vec);
 
-                self.handle_reply_command(cmd).await;
-            },
-            // Execution results for DAG mode only
-            execution_results = self.execution_results_rx.recv() => {
-                if execution_results.is_none() {
-                    return Ok(());
-                }
+                    self.maybe_clear_reply_buf(batch_hash).await;
+                },
+                cmd = self.reply_command_rx.recv() => {
+                    if cmd.is_none() {
+                        return Ok(());
+                    }
 
-                let results = execution_results.unwrap();
-                self.handle_forwarded_results(results).await;
-            },
+                    let cmd = cmd.unwrap();
+
+                    self.handle_reply_command(cmd).await;
+                },
+                // Execution results for DAG mode only
+                execution_results = self.execution_results_rx.recv() => {
+                    if execution_results.is_none() {
+                        return Ok(());
+                    }
+
+                    let results = execution_results.unwrap();
+                    self.handle_forwarded_results(results).await;
+                },
+                // Byz results for DAG mode only
+                byz_results = self.byz_results_rx.recv() => {
+                    if byz_results.is_none() {
+                        return Ok(());
+                    }
+
+                    let byz = byz_results.unwrap();
+                    self.handle_forwarded_byz_results(byz).await;
+                },
+            }
+        }
+
+        #[cfg(not(feature = "dag"))]
+        {
+            tokio::select! {
+                batch = self.batch_rx.recv() => {
+                    if batch.is_none() {
+                        return Ok(());
+                    }
+
+                    let (batch_hash_chan, mut reply_vec) = batch.unwrap();
+                    let batch_hash = batch_hash_chan.await.unwrap();
+
+                    if batch_hash.is_empty() || self.must_cancel {
+                        // This is called when !listen_on_new_batch
+                        // This must be cancelled.
+                        if reply_vec.len() > 0 {
+                            info!("Clearing out queued replies of size {}", reply_vec.len());
+                            let node_infos = NodeInfo {
+                                nodes: self.config.get().net_config.nodes.clone()
+                            };
+                            for (chan, tag, _) in reply_vec.drain(..) {
+                                let reply = Self::get_try_again_message(tag, &node_infos);
+                                let reply_ser = reply.encode_to_vec();
+                                let _sz = reply_ser.len();
+                                let reply_msg = PinnedMessage::from(reply_ser, _sz, crate::rpc::SenderType::Anon);
+                                let _ = chan.send((reply_msg, LatencyProfile::new())).await;
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    self.byz_reply_map.insert(batch_hash.clone(), reply_vec.iter().map(|(_, client_tag, sender)| (*client_tag, sender.clone())).collect());
+                    self.reply_map.insert(batch_hash.clone(), reply_vec);
+
+                    self.maybe_clear_reply_buf(batch_hash).await;
+                },
+                cmd = self.reply_command_rx.recv() => {
+                    if cmd.is_none() {
+                        return Ok(());
+                    }
+
+                    let cmd = cmd.unwrap();
+
+                    self.handle_reply_command(cmd).await;
+                },
+            }
         }
 
         {
@@ -371,12 +423,12 @@ impl ClientReplyHandler {
     async fn do_byz_commit_reply(
         &mut self,
         reply_sender_vec: Vec<(u64, SenderType)>,
-        hash: HashType,
+        _hash: HashType,
         n: u64,
         reply_vec: Vec<ProtoByzResponse>,
     ) {
         assert_eq!(reply_sender_vec.len(), reply_vec.len());
-        for (tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec
+        for (_tx_n, ((client_tag, sender), mut reply)) in reply_sender_vec
             .into_iter()
             .zip(reply_vec.into_iter())
             .enumerate()
@@ -542,9 +594,6 @@ impl ClientReplyHandler {
             (u64, Vec<ProtoTransactionResult>, String),
         >,
     ) {
-        use crate::proto::consensus::ProtoExecutionResults;
-        use crate::proto::rpc::proto_payload;
-
         let my_name = self.config.get().net_config.name.clone();
 
         for (hash, (n, reply_vec, origin_node)) in crash_commit_ack_with_origins {
@@ -572,7 +621,7 @@ impl ClientReplyHandler {
         &mut self,
         byz_commit_ack_with_origins: HashMap<HashType, (u64, Vec<ProtoByzResponse>, String)>,
     ) {
-        use crate::proto::consensus::ProtoExecutionResults;
+        use crate::proto::consensus::ProtoByzResults;
         use crate::proto::rpc::proto_payload;
 
         let my_name = self.config.get().net_config.name.clone();
@@ -589,14 +638,32 @@ impl ClientReplyHandler {
                 }
             } else {
                 // Forward to origin node (convert ProtoByzResponse to ProtoTransactionResult)
-                // Byzantine responses cannot be trivially converted to execution results here
-                // Forwarding logic for byz commit with origin nodes is deferred (no-op for remote origin)
-                trace!(
-                    "ByzCommitAckWithOrigins forwarding skipped for block {} origin {} ({} responses)",
-                    n,
-                    origin_node,
-                    reply_vec.len()
-                );
+                // Forward byzantine responses to origin node to attach locally to receipts
+                let byz_results = ProtoByzResults {
+                    block_hash: hash.clone(),
+                    block_n: n,
+                    responses: reply_vec.clone(),
+                    origin_node: origin_node.clone(),
+                };
+                let payload = crate::proto::rpc::ProtoPayload {
+                    message: Some(proto_payload::Message::ByzResults(byz_results)),
+                };
+
+                let buf = payload.encode_to_vec();
+                let sz = buf.len();
+
+                if let Err(e) = PinnedClient::send(
+                    &self.client,
+                    &origin_node,
+                    crate::rpc::MessageRef(&buf, sz, &SenderType::Anon),
+                )
+                .await
+                {
+                    warn!(
+                        "Failed to forward byz responses to origin node {}: {:?}",
+                        origin_node, e
+                    );
+                }
             }
         }
     }
@@ -610,9 +677,6 @@ impl ClientReplyHandler {
         results: Vec<ProtoTransactionResult>,
         origin_node: String,
     ) {
-        use crate::proto::consensus::ProtoExecutionResults;
-        use crate::proto::rpc::proto_payload;
-
         debug!(
             "Forwarding execution results for block {} (hash={:?}) to origin node {}",
             block_n,
@@ -620,7 +684,7 @@ impl ClientReplyHandler {
             origin_node
         );
 
-        let execution_results = ProtoExecutionResults {
+        let execution_results = crate::proto::consensus::ProtoExecutionResults {
             block_hash,
             results,
             origin_node: origin_node.clone(),
@@ -628,7 +692,9 @@ impl ClientReplyHandler {
         };
 
         let payload = crate::proto::rpc::ProtoPayload {
-            message: Some(proto_payload::Message::ExecutionResults(execution_results)),
+            message: Some(crate::proto::rpc::proto_payload::Message::ExecutionResults(
+                execution_results,
+            )),
         };
 
         // Serialize once and keep buffer alive across await
@@ -678,5 +744,45 @@ impl ClientReplyHandler {
                 hex::encode(&results.block_hash)
             );
         }
+    }
+
+    /// Handle byzantine results forwarded from another node (DAG mode)
+    /// This is called when receiving ProtoByzResults via RPC
+    #[cfg(feature = "dag")]
+    async fn handle_forwarded_byz_results(
+        &mut self,
+        byz: crate::proto::consensus::ProtoByzResults,
+    ) {
+        debug!(
+            "Handling forwarded byz results for block {} (hash={:?}) count={}",
+            byz.block_n,
+            hex::encode(&byz.block_hash),
+            byz.responses.len()
+        );
+
+        let block_hash = byz.block_hash.clone();
+        let block_n = byz.block_n;
+        let responses = byz.responses.clone();
+
+        // If we already have byz_reply_map entry, apply immediately
+        if let Some(reply_sender_vec) = self.byz_reply_map.remove(&block_hash) {
+            self.do_byz_commit_reply(
+                reply_sender_vec,
+                block_hash.clone(),
+                block_n,
+                responses.clone(),
+            )
+            .await;
+        } else {
+            // Otherwise, buffer for later
+            self.byz_commit_reply_buf
+                .insert(block_hash.clone(), (block_n, responses.clone()));
+        }
+
+        // Update progress for probes
+        if block_n > self.acked_bci {
+            self.acked_bci = block_n;
+        }
+        self.maybe_clear_probe_buf().await;
     }
 }

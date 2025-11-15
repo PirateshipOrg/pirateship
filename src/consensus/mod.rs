@@ -23,7 +23,6 @@ use std::{
 };
 
 use crate::{
-    consensus::batch_proposal::{MsgAckChanWithTag, RawBatch},
     proto::{
         checkpoint::ProtoBackfillNack,
         consensus::{ProtoAppendEntries, ProtoViewChange},
@@ -37,25 +36,22 @@ use crate::{
 
 #[cfg(feature = "dag")]
 use crate::{
-    consensus::dag::{
-        block_receiver::BlockReceiver, block_receiver::BlockReceiverCommand, lane_logserver,
-        tip_cut_proposal,
-    },
+    consensus::dag::block_receiver::BlockReceiverCommand,
     proto::consensus::{
         ProtoAppendBlocks, ProtoBlockAck, ProtoBlockCar, ProtoExecutionResults, ProtoTipCut,
     },
 };
 use app::{AppEngine, Application};
-use batch_proposal::{BatchProposer, TxWithAckChanTag};
+use batch_proposal::TxWithAckChanTag;
 use block_broadcaster::BlockBroadcaster;
 use block_sequencer::BlockSequencer;
 use client_reply::ClientReplyHandler;
-use extra_2pc::TwoPCHandler;
+// use extra_2pc::TwoPCHandler;
 use fork_receiver::{ForkReceiver, ForkReceiverCommand};
 use log::{debug, info, warn};
 use logserver::LogServer;
-#[cfg(feature = "dag")]
-use lz4_flex::block;
+// #[cfg(feature = "dag")]
+// use lz4_flex::block;
 use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
@@ -67,7 +63,7 @@ use tokio::{
 use crate::{
     config::{AtomicConfig, Config},
     crypto::{AtomicKeyStore, CryptoService, KeyStore},
-    proto::rpc::ProtoPayload,
+    proto::{consensus::ProtoByzResults, rpc::ProtoPayload},
     rpc::{
         server::{MsgAckChan, RespType, Server, ServerContextType},
         MessageRef,
@@ -97,6 +93,8 @@ pub struct ConsensusServerContext {
     tipcut_proposal_tx: Sender<ProtoTipCut>,
     #[cfg(feature = "dag")]
     execution_results_tx: Sender<ProtoExecutionResults>,
+    #[cfg(feature = "dag")]
+    byz_results_tx: Sender<ProtoByzResults>,
 }
 
 #[derive(Clone)]
@@ -118,6 +116,7 @@ impl PinnedConsensusServerContext {
         #[cfg(feature = "dag")] car_tx: Sender<(ProtoBlockCar, SenderType)>,
         #[cfg(feature = "dag")] tipcut_proposal_tx: Sender<ProtoTipCut>,
         #[cfg(feature = "dag")] execution_results_tx: Sender<ProtoExecutionResults>,
+        #[cfg(feature = "dag")] byz_results_tx: Sender<ProtoByzResults>,
     ) -> Self {
         Self(Arc::new(Box::pin(ConsensusServerContext {
             config,
@@ -140,6 +139,8 @@ impl PinnedConsensusServerContext {
             tipcut_proposal_tx,
             #[cfg(feature = "dag")]
             execution_results_tx,
+            #[cfg(feature = "dag")]
+            byz_results_tx,
         })))
     }
 }
@@ -345,6 +346,25 @@ impl ServerContextType for PinnedConsensusServerContext {
                 }
                 return Ok(RespType::NoResp);
             }
+            // ByzResults messages are forwarded to ClientReplyHandler in DAG-mode, otherwise ignored
+            crate::proto::rpc::proto_payload::Message::ByzResults(proto_byz_results) => {
+                #[cfg(feature = "dag")]
+                {
+                    debug!(
+                        "Received ByzResults for block hash {:?}, forwarding to ClientReplyHandler",
+                        hex::encode(&proto_byz_results.block_hash)
+                    );
+                    self.byz_results_tx
+                        .send(proto_byz_results)
+                        .await
+                        .expect("Failed to send ByzResults to ClientReplyHandler");
+                }
+                #[cfg(not(feature = "dag"))]
+                {
+                    warn!("Received ByzResults in non-DAG mode - ignoring");
+                }
+                return Ok(RespType::NoResp);
+            }
             // Note: TipCut votes now use the regular Vote message (ProtoVote)
             // which supports voting for both Fork and TipCut via the digest field
             crate::proto::rpc::proto_payload::Message::Vote(proto_vote) => {
@@ -365,10 +385,11 @@ impl ServerContextType for PinnedConsensusServerContext {
 
                 return Ok(RespType::Resp);
             }
-            crate::proto::rpc::proto_payload::Message::BackfillRequest(proto_back_fill_request) => {
-            }
+            crate::proto::rpc::proto_payload::Message::BackfillRequest(
+                _proto_back_fill_request,
+            ) => {}
             crate::proto::rpc::proto_payload::Message::BackfillResponse(
-                proto_back_fill_response,
+                _proto_back_fill_response,
             ) => {}
             crate::proto::rpc::proto_payload::Message::BackfillNack(proto_backfill_nack) => {
                 self.backfill_request_tx
@@ -488,7 +509,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "dag")]
         let lane_staging_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         #[cfg(feature = "dag")]
-        let dag_tip_cut_proposal_client =
+        let _dag_tip_cut_proposal_client =
             Client::new_atomic(config.clone(), keystore.clone(), false, 0);
 
         #[cfg(feature = "extra_2pc")]
@@ -534,7 +555,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "dag")]
         let (dag_block_sequencer_tx, dag_block_sequencer_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (dag_block_sequencer_control_command_tx, dag_block_sequencer_control_command_rx) =
+        let (_dag_block_sequencer_control_command_tx, dag_block_sequencer_control_command_rx) =
             make_channel(_chan_depth);
         // DAG Block Receiver (dissemination - DAG)
         #[cfg(feature = "dag")]
@@ -543,14 +564,14 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (dag_block_receiver_command_tx, dag_block_receiver_command_rx) =
             make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (lane_backfill_request_tx, lane_backfill_request_rx) = make_channel(_chan_depth);
+        let (_lane_backfill_request_tx, lane_backfill_request_rx) = make_channel(_chan_depth);
         // DAG Block Broadcaster (dissemination - DAG)
         #[cfg(feature = "dag")]
         let (dag_block_broadcaster_tx, dag_block_broadcaster_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
         let (dag_other_block_tx, dag_other_block_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (dag_broadcaster_control_command_tx, dag_broadcaster_control_command_rx) =
+        let (_dag_broadcaster_control_command_tx, dag_broadcaster_control_command_rx) =
             make_channel(_chan_depth);
         // DAG Lane Staging (dissemination - DAG)
         #[cfg(feature = "dag")]
@@ -567,19 +588,21 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         #[cfg(feature = "dag")]
         let (lane_logserver_query_tx, lane_logserver_query_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (lane_gc_tx, lane_gc_rx) = make_channel(_chan_depth);
+        let (_lane_gc_tx, lane_gc_rx) = make_channel(_chan_depth);
         // DAG Tip Cut Proposal Handler (dissemination - DAG)
         #[cfg(feature = "dag")]
         let (tip_cut_proposal_tx, tip_cut_proposal_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (tip_cut_proposal_cmd_tx, tip_cut_proposal_cmd_rx) = make_channel(_chan_depth);
+        let (_tip_cut_proposal_cmd_tx, tip_cut_proposal_cmd_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
-        let (block_broadcaster_command_tx, block_broadcaster_command_rx) =
+        let (block_broadcaster_command_tx, _block_broadcaster_command_rx) =
             make_channel(_chan_depth);
 
-        // DAG Execution Results handler (consensus - DAG)
+        // DAG Execution Results and ByzResults handler (consensus - DAG)
         #[cfg(feature = "dag")]
         let (execution_results_tx, execution_results_rx) = make_channel(_chan_depth);
+        #[cfg(feature = "dag")]
+        let (byz_results_tx, byz_results_rx) = make_channel(_chan_depth);
 
         // Crypto and Storage connectors
         let block_maker_crypto = crypto.get_connector();
@@ -637,6 +660,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             tip_cut_proposal_tx.clone(),
             #[cfg(feature = "dag")]
             execution_results_tx.clone(),
+            #[cfg(feature = "dag")]
+            byz_results_tx.clone(),
         );
 
         // -- Instantiate DAG Dissemination Layer components first --
@@ -812,6 +837,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             client_reply.into(),
             #[cfg(feature = "dag")]
             execution_results_rx,
+            #[cfg(feature = "dag")]
+            byz_results_rx,
         );
         let logserver = LogServer::new(
             config.clone(),
@@ -843,7 +870,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             extra_2pc_staging_tx,
         );
 
-        let mut handles = JoinSet::new();
+        let handles = JoinSet::new();
 
         Self {
             config: config.clone(),
