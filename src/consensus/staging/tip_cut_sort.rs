@@ -175,7 +175,7 @@ impl TipCutSort {
         );
 
         // Extract blocks from this tip cut
-        let blocks = self.extract_blocks_from_tip_cut(&tip_cut);
+        let blocks = self.extract_blocks_from_tip_cut(&tip_cut).await;
 
         if blocks.is_empty() {
             debug!("No new blocks in tip cut {}", tip_cut.tip_cut_n);
@@ -328,7 +328,7 @@ impl TipCutSort {
 
     /// Extract blocks from a tip cut
     /// For each lane, extract blocks between previous tip cut and current tip cut
-    fn extract_blocks_from_tip_cut(&self, tip_cut: &CommittedTipCut) -> Vec<DagBlock> {
+    async fn extract_blocks_from_tip_cut(&self, tip_cut: &CommittedTipCut) -> Vec<DagBlock> {
         let mut blocks = Vec::new();
 
         // For each lane in the current tip cut
@@ -337,26 +337,53 @@ impl TipCutSort {
             let start_seq = self.get_last_seq_for_lane(lane_id);
             let end_seq = car.n;
 
+            if end_seq <= start_seq {
+                continue;
+            }
+
             // Extract blocks in range (start_seq, end_seq]
             for seq_num in (start_seq + 1)..=end_seq {
-                // TODO: Fetch block metadata from lane logserver
-                // For now, create placeholder blocks
-                // In real implementation, we need:
-                // - block_hash
-                // - parent_hash
-                // - view, config_num
-                // from the lane logserver
+                // Query lane logserver for this block's metadata
+                let (response_tx, response_rx) = make_channel(1);
+                let query = LaneLogServerQuery::GetBlock(lane_id.clone(), seq_num, response_tx);
+                if let Err(e) = self.lane_logserver_query_tx.send(query).await {
+                    error!(
+                        "Failed to send GetBlock query for {}:{}: {:?}",
+                        lane_id, seq_num, e
+                    );
+                    // On any failure to obtain block metadata, abort extraction (return empty)
+                    return Vec::new();
+                }
 
-                let block = DagBlock {
-                    lane_id: lane_id.clone(),
-                    seq_num,
-                    block_hash: vec![0; 32],  // Placeholder
-                    parent_hash: vec![0; 32], // Placeholder
-                    view: tip_cut.view,
-                    config_num: 0, // Placeholder
-                };
-
-                blocks.push(block);
+                match response_rx.recv().await {
+                    Some(Some(cached_block)) => {
+                        // Build DagBlock using real metadata
+                        let block = DagBlock {
+                            lane_id: lane_id.clone(),
+                            seq_num,
+                            block_hash: cached_block.block_hash.clone(),
+                            parent_hash: cached_block.block.parent.clone(),
+                            view: cached_block.block.view,
+                            config_num: cached_block.block.config_num,
+                        };
+                        blocks.push(block);
+                    }
+                    // HACK: Not sure if this is the correct way to handle this
+                    Some(None) => {
+                        warn!(
+                            "Block {}:{} not found in lane logserver during extraction",
+                            lane_id, seq_num
+                        );
+                        return Vec::new();
+                    }
+                    None => {
+                        error!(
+                            "LaneLogServer query channel closed for {}:{} during extraction",
+                            lane_id, seq_num
+                        );
+                        return Vec::new();
+                    }
+                }
             }
         }
 

@@ -126,8 +126,9 @@ message ProtoBlockCAR {
 // Will be wrapped in an AppendEntries for view info
 message ProtoTipCut {
     bytes digest = 1;       // Digest of tip cut to use in commit log
-    bytes parent = 2;       // Digest of parent
-    repeated ProtoBlockCAR tips = 3;  // Tip Cut of up to N CARs (which give digest, seq num, lane sig, etc.)
+    uint64 n = 2;           // Sequence number in TipCut chain
+    bytes parent = 3;       // Digest of parent TipCut
+    repeated ProtoBlockCAR tips = 4;  // Tip Cut of up to N CARs (which give digest, seq num, lane sig, etc.)
 }
 
 // AppendEntries

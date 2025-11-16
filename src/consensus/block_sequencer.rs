@@ -495,8 +495,16 @@ impl BlockSequencer {
     /// Compute digest using crypto service with pipelining support.
     /// This mirrors the prepare_block pipelining pattern for consistency.
     #[cfg(feature = "dag")]
-    async fn handle_new_tipcut(&mut self, tipcut: ProtoTipCut) {
-        trace!("Sequencing tip cut with {} tips", tipcut.tips.len());
+    async fn handle_new_tipcut(&mut self, mut tipcut: ProtoTipCut) {
+        // Assign sequence number within the tip cut chain
+        self.seq_num += 1;
+        tipcut.n = self.seq_num;
+
+        trace!(
+            "Sequencing tip cut #{} with {} tips",
+            tipcut.n,
+            tipcut.tips.len()
+        );
 
         // Take parent hash for pipelining (like handle_new_batch does)
         let parent_hash_rx = self.parent_hash_rx.take();

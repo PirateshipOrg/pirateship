@@ -42,7 +42,7 @@ use crate::{
     },
 };
 use app::{AppEngine, Application};
-use batch_proposal::TxWithAckChanTag;
+use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
 use block_sequencer::BlockSequencer;
 use client_reply::ClientReplyHandler;

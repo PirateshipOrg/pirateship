@@ -267,6 +267,7 @@ impl TipCutProposal {
         // Construct ProtoTipCut message
         let proto_tip_cut = ProtoTipCut {
             digest: vec![], // Will be computed by BlockSequencer
+            n: 0,           // Will be assigned by BlockSequencer as chain sequence
             parent: vec![], // Will be computed by BlockSequencer
             tips: cars,
         };
