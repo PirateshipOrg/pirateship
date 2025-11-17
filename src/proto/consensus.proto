@@ -86,49 +86,49 @@ message ProtoFork {
     repeated HalfSerializedBlock serialized_blocks = 1;
 }
 
-// Append Block (eliminates forks from dissemination)
-// FIXME: support repeated blocks everywhere
-message ProtoAppendBlocks {
-    repeated HalfSerializedBlock serialized_blocks = 1;
-    uint64 commit_index = 2;
-    uint64 view = 3;
-    bool view_is_stable = 4;
-    uint64 config_num = 6;
-    bool is_backfill_response = 7;
-}
-
-// Append Block with Lane for backfill requests
-message ProtoAppendBlockLane {
-    string name = 1;            // Name identifies lane
-    ProtoAppendBlocks ab = 2;    // AppendBlock request
-}
-
-// Block Acknowledgement for constructing PoA
-// QUESTION: DO we need a sig array here or just one?
-message ProtoBlockAck {
-    bytes digest = 1;       // Hash of block
-    uint64 n = 2;           // Sequence Number of block
-    bytes lane = 3;         // Proposer Signature to ID lane
-    bytes sig = 4;          // My Signature for voting
-}
-
-// PoA (CAR) for a block with a digest
-message ProtoBlockCAR {
-    bytes digest = 1;       // Hash of Block
-    // QUESTION: Do we need a parent link here too?
-    uint64 n = 2;           // Sequence Number
-    repeated ProtoNameWithSignature sig = 3; // signer node -> Signature mapping
-    uint64 view = 4;        // QUESTION: Do we actually need a view number here??
-    string origin_node = 5; // Node that originally accepted the client requests (for proxy pattern)
-}
-
 // Tip Cut proposal of up to N CARs
 // Will be wrapped in an AppendEntries for view info
 message ProtoTipCut {
-    bytes digest = 1;       // Digest of tip cut to use in commit log
+    repeated ProtoBlockCAR tips = 1;  // Tip Cut of up to N CARs (which give digest, seq num, lane sig, etc.)
     uint64 n = 2;           // Sequence number in TipCut chain
     bytes parent = 3;       // Digest of parent TipCut
-    repeated ProtoBlockCAR tips = 4;  // Tip Cut of up to N CARs (which give digest, seq num, lane sig, etc.)
+    uint64 view = 4;
+    repeated ProtoQuorumCertificate qc = 5;
+    repeated ProtoTipCutValidation tc_validation = 6;
+    bool view_is_stable = 7;
+    uint64 config_num = 8;
+
+    oneof sig {
+        DefferedSignature no_sig = 9;
+        bytes proposer_sig = 10;
+    }
+}
+
+message HalfSerializedTipCut {
+    uint64 n = 1;
+    uint64 view = 2;
+    bool view_is_stable = 3;
+    uint64 config_num = 4;
+    bytes serialized_body = 5;      // Format: signature || parent_hash || serialized body
+}
+
+ message ProtoTipCutFork {
+    repeated HalfSerializedTipCut serialized_tipcuts = 1;
+ }
+ 
+// View Change validation for tip cuts
+message ProtoTipCutValidation {
+    uint64 vc_view = 1;
+    uint64 vc_config_num = 2;
+
+    repeated bytes tc_hashes = 3;
+    uint64 tc_last_n = 4;
+    ProtoQuorumCertificate tc_last_qc = 5;
+    uint64 tc_last_view = 6;
+    uint64 tc_last_config_num = 7;
+
+    bytes vc_sig = 8;
+    string sender = 9;
 }
 
 // AppendEntries
@@ -136,7 +136,7 @@ message ProtoTipCut {
 message ProtoAppendEntries {
     oneof entry {
         ProtoFork fork = 1;
-        ProtoTipCut tipcut = 8;
+        ProtoTipCutFork tipcut_fork = 8;
     }
     uint64 commit_index = 2;
     uint64 view = 4;
@@ -176,4 +176,40 @@ message ProtoByzResults {
     uint64 block_n = 2;                                 // Sequence number of block
     repeated proto.client.ProtoByzResponse responses = 3; // Byz responses for each tx
     string origin_node = 4;                             // Target node that should receive these responses
+}
+
+// Append Block (eliminates forks from dissemination)
+// FIXME: support repeated blocks everywhere
+message ProtoAppendBlocks {
+    repeated HalfSerializedBlock serialized_blocks = 1;
+    uint64 commit_index = 2;
+    uint64 view = 3;
+    bool view_is_stable = 4;
+    uint64 config_num = 6;
+    bool is_backfill_response = 7;
+}
+
+// Append Block with Lane for backfill requests
+message ProtoAppendBlockLane {
+    string name = 1;            // Name identifies lane
+    ProtoAppendBlocks ab = 2;    // AppendBlock request
+}
+
+// Block Acknowledgement for constructing PoA
+// QUESTION: DO we need a sig array here or just one?
+message ProtoBlockAck {
+    bytes digest = 1;       // Hash of block
+    uint64 n = 2;           // Sequence Number of block
+    bytes lane = 3;         // Proposer Signature to ID lane
+    bytes sig = 4;          // My Signature for voting
+}
+
+// PoA (CAR) for a block with a digest
+message ProtoBlockCAR {
+    bytes digest = 1;       // Hash of Block
+    // QUESTION: Do we need a parent link here too?
+    uint64 n = 2;           // Sequence Number
+    repeated ProtoNameWithSignature sig = 3; // signer node -> Signature mapping
+    uint64 view = 4;        // QUESTION: Do we actually need a view number here??
+    string origin_node = 5; // Node that originally accepted the client requests (for proxy pattern)
 }

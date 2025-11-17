@@ -10,9 +10,13 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     config::AtomicConfig,
+    consensus::block_tipcut::BlockOrTipCut,
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
     proto::{
-        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork},
+        consensus::{
+            HalfSerializedBlock, HalfSerializedTipCut, ProtoAppendEntries, ProtoFork,
+            ProtoTipCutFork,
+        },
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, server::LatencyProfile, PinnedMessage, SenderType},
@@ -28,20 +32,21 @@ use crate::proto::execution::ProtoTransaction;
 use super::{
     app::AppCommand,
     fork_receiver::{AppendEntriesStats, BroadcasterMessage, ForkReceiverCommand, MultipartFork},
-    staging::{ForkProposal, StagingMessage},
+    staging::Proposal,
 };
 
 #[cfg(feature = "dag")]
-use crate::proto::consensus::ProtoTipCut;
+use crate::{crypto::CachedTipCut, proto::consensus::ProtoTipCut};
 
 #[cfg(feature = "dag")]
-use super::{fork_receiver::MultipartTipCut, staging::TipCutProposal};
+use super::fork_receiver::MultipartTipCut;
 
 pub enum BlockBroadcasterCommand {
     UpdateCI(u64),
-    NextAEForkPrefix(Vec<oneshot::Receiver<Result<CachedBlock, Error>>>),
-    #[cfg(feature = "dag")]
-    BroadcastTipCut(ProtoTipCut, u64, bool, u64), // (tipcut, view, view_is_stable, config_num)
+    NextAEForkPrefix(Vec<oneshot::Receiver<Result<BlockOrTipCut, Error>>>),
+    // NextAETipCutForkPrefix(Vec<oneshot::Receiver<Result<CachedTipCut, Error>>>),
+    // #[cfg(feature = "dag")]
+    // BroadcastTipCut(Vec<CachedTipCut>, u64, bool, u64), // (tipcut fork, view, view_is_stable, config_num)
 }
 
 pub struct BlockBroadcaster {
@@ -49,17 +54,17 @@ pub struct BlockBroadcaster {
     crypto: CryptoServiceConnector,
 
     ci: u64,
-    fork_prefix_buffer: Vec<CachedBlock>,
+    fork_prefix_buffer: Vec<BlockOrTipCut>,
 
     // Input ports
-    my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
+    my_block_rx: Receiver<(u64, oneshot::Receiver<BlockOrTipCut>)>,
     other_block_rx: Receiver<BroadcasterMessage>,
     control_command_rx: Receiver<BlockBroadcasterCommand>,
 
     // Output ports
     storage: StorageServiceConnector,
     client: PinnedClient,
-    staging_tx: Sender<StagingMessage>,
+    staging_tx: Sender<Proposal>,
 
     // Command ports
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
@@ -77,11 +82,11 @@ impl BlockBroadcaster {
         config: AtomicConfig,
         client: PinnedClient,
         crypto: CryptoServiceConnector,
-        my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
+        my_block_rx: Receiver<(u64, oneshot::Receiver<BlockOrTipCut>)>,
         other_block_rx: Receiver<BroadcasterMessage>,
         control_command_rx: Receiver<BlockBroadcasterCommand>,
         storage: StorageServiceConnector,
-        staging_tx: Sender<StagingMessage>,
+        staging_tx: Sender<Proposal>,
         fork_receiver_command_tx: Sender<ForkReceiverCommand>,
         app_command_tx: Sender<AppCommand>,
     ) -> Self {
@@ -185,7 +190,7 @@ impl BlockBroadcaster {
                     error!("Failed to get block {} {:?}", __n, block);
                     return Ok(());
                 }
-                self.process_my_block(block.unwrap()).await?;
+                self.process_my_entry(block.unwrap()).await?;
 
                 trace!("Processed block {}", __n);
             },
@@ -196,11 +201,12 @@ impl BlockBroadcaster {
                 }
                 match msg.unwrap() {
                     BroadcasterMessage::Fork(fork) => {
-                        self.process_other_block(fork).await?;
+                        #[cfg(not(feature = "dag"))]
+                        self.process_other_entry(fork).await?;
                     }
                     #[cfg(feature = "dag")]
                     BroadcasterMessage::TipCut(tipcut) => {
-                        self.process_other_tipcut(tipcut).await?;
+                        self.process_other_entry(tipcut).await?;
                     }
                 }
             },
@@ -249,11 +255,6 @@ impl BlockBroadcaster {
                     self.fork_prefix_buffer.push(block);
                 }
             }
-            #[cfg(feature = "dag")]
-            BlockBroadcasterCommand::BroadcastTipCut(tipcut, view, view_is_stable, config_num) => {
-                self.process_my_tipcut(tipcut, view, view_is_stable, config_num)
-                    .await?;
-            }
         }
 
         Ok(())
@@ -261,53 +262,55 @@ impl BlockBroadcaster {
 
     async fn store_and_forward_internally(
         &mut self,
-        block: &CachedBlock,
+        entry: &BlockOrTipCut,
         ae_stats: AppendEntriesStats,
         this_is_final_block: bool,
     ) -> Result<(), Error> {
-        let perf_entry = block.block.n;
+        let perf_entry = entry.n();
 
         // Store
-        let storage_ack = self.storage.put_block(block).await;
-        self.perf_add_event(perf_entry, "Store block");
+        let storage_ack = match entry {
+            BlockOrTipCut::Block(block) => self.storage.put_block(block).await,
+            #[cfg(feature = "dag")]
+            BlockOrTipCut::TipCut(tipcut) => self.storage.put_tipcut(tipcut).await,
+        };
+        self.perf_add_event(perf_entry, "Store block/tipcut");
         // info!("Stored {}", block.block.n);
 
         // Forward
-        self.perf_add_event(perf_entry, "Forward block to logserver");
+        self.perf_add_event(perf_entry, "Forward block/tipcut to logserver");
 
         // info!("Sending {}", block.block.n);
         self.staging_tx
-            .send(StagingMessage::Fork(ForkProposal {
-                block: block.clone(),
+            .send(Proposal {
+                entry: entry.clone(),
                 storage_ack,
                 ae_stats,
-                this_is_final_block,
-            }))
+                this_is_final: this_is_final_block,
+            })
             .await
             .unwrap();
+        #[cfg(not(feature = "dag"))]
         // info!("Sent {}", block.block.n);
-        self.perf_add_event(perf_entry, "Forward block to staging");
+        self.perf_add_event(perf_entry, "Forward block/tipcut to staging");
 
         Ok(())
     }
 
-    async fn process_my_block(&mut self, block: CachedBlock) -> Result<(), Error> {
-        debug!("Processing {}", block.block.n);
-        let perf_entry = block.block.n;
+    async fn process_my_entry(&mut self, entry: BlockOrTipCut) -> Result<(), Error> {
+        debug!("Processing {}", entry.n());
+        let perf_entry = entry.n();
 
-        let (view, view_is_stable, config_num) = (
-            block.block.view,
-            block.block.view_is_stable,
-            block.block.config_num,
-        );
+        let (view, view_is_stable, config_num) =
+            (entry.view(), entry.view_is_stable(), entry.config_num());
 
-        // Leader-based: Build fork from prefix buffer + new block
+        // Leader-based: Build fork from prefix buffer + new block/tipcut
         let mut ae_fork = Vec::new();
 
-        for block in self.fork_prefix_buffer.drain(..) {
-            ae_fork.push(block);
+        for e in self.fork_prefix_buffer.drain(..) {
+            ae_fork.push(e);
         }
-        ae_fork.push(block.clone());
+        ae_fork.push(entry.clone());
 
         if ae_fork.len() > 1 {
             trace!("AE: {:?}", ae_fork);
@@ -315,35 +318,37 @@ impl BlockBroadcaster {
 
         let _fork_size = ae_fork.len();
         let mut cnt = 0;
-        for block in &ae_fork {
+        for e in &ae_fork {
             cnt += 1;
-            let this_is_final_block = cnt == _fork_size;
+            let this_is_final = cnt == _fork_size;
             self.store_and_forward_internally(
-                &block,
+                &e,
                 AppendEntriesStats {
                     view,
-                    view_is_stable: block.block.view_is_stable,
+                    view_is_stable: e.view_is_stable(),
                     config_num,
                     sender: self.config.get().net_config.name.clone(),
                     ci: self.ci,
                 },
-                this_is_final_block,
+                this_is_final,
             )
             .await?;
         }
 
-        // Forward to app for stats.
-        self.app_command_tx
-            .send(AppCommand::NewRequestBatch(
-                block.block.n,
-                view,
-                view_is_stable,
-                true,
-                block.block.tx_list.len(),
-                block.block_hash.clone(),
-            ))
-            .await
-            .unwrap();
+        #[cfg(not(feature = "dag"))]
+        if let BlockOrTipCut::Block(b) = entry {
+            self.app_command_tx
+                .send(AppCommand::NewRequestBatch(
+                    b.n(),
+                    view,
+                    view_is_stable,
+                    true,
+                    b.tx_list.len(),
+                    b.block_hash.clone(),
+                ))
+                .await
+                .unwrap();
+        }
 
         // Forward to other nodes. Involves copies and serialization so done last.
         let names = self.get_everyone_except_me();
@@ -365,6 +370,81 @@ impl BlockBroadcaster {
 
         Ok(())
     }
+
+    // async fn process_my_block(&mut self, block: CachedBlock) -> Result<(), Error> {
+    //     debug!("Processing {}", block.block.n);
+    //     let perf_entry = block.block.n;
+
+    //     let (view, view_is_stable, config_num) = (
+    //         block.block.view,
+    //         block.block.view_is_stable,
+    //         block.block.config_num,
+    //     );
+
+    //     // Leader-based: Build fork from prefix buffer + new block
+    //     let mut ae_fork = Vec::new();
+
+    //     for block in self.fork_prefix_buffer.drain(..) {
+    //         ae_fork.push(block);
+    //     }
+    //     ae_fork.push(block.clone());
+
+    //     if ae_fork.len() > 1 {
+    //         trace!("AE: {:?}", ae_fork);
+    //     }
+
+    //     let _fork_size = ae_fork.len();
+    //     let mut cnt = 0;
+    //     for block in &ae_fork {
+    //         cnt += 1;
+    //         let this_is_final_block = cnt == _fork_size;
+    //         self.store_and_forward_internally(
+    //             &block,
+    //             AppendEntriesStats {
+    //                 view,
+    //                 view_is_stable: block.block.view_is_stable,
+    //                 config_num,
+    //                 sender: self.config.get().net_config.name.clone(),
+    //                 ci: self.ci,
+    //             },
+    //             this_is_final_block,
+    //         )
+    //         .await?;
+    //     }
+
+    //     // Forward to app for stats.
+    //     self.app_command_tx
+    //         .send(AppCommand::NewRequestBatch(
+    //             block.block.n,
+    //             view,
+    //             view_is_stable,
+    //             true,
+    //             block.block.tx_list.len(),
+    //             block.block_hash.clone(),
+    //         ))
+    //         .await
+    //         .unwrap();
+
+    //     // Forward to other nodes. Involves copies and serialization so done last.
+    //     let names = self.get_everyone_except_me();
+
+    //     #[cfg(feature = "evil")]
+    //     let names = self
+    //         .maybe_act_evil(names, &ae_fork, view, view_is_stable, config_num)
+    //         .await;
+
+    //     self.broadcast_ae_fork(
+    //         names,
+    //         ae_fork,
+    //         view,
+    //         view_is_stable,
+    //         config_num,
+    //         Some(perf_entry),
+    //     )
+    //     .await;
+
+    //     Ok(())
+    // }
 
     fn get_byzantine_broadcast_threshold(&self) -> usize {
         let config = self.config.get();
@@ -389,13 +469,17 @@ impl BlockBroadcaster {
         return 2 * f;
     }
 
-    async fn process_other_block(&mut self, mut blocks: MultipartFork) -> Result<(), Error> {
-        let _blocks = blocks.await_all().await;
+    async fn process_other_entry(
+        &mut self,
+        #[cfg(not(feature = "dag"))] mut entries: MultipartFork,
+        #[cfg(feature = "dag")] mut entries: MultipartTipCut,
+    ) -> Result<(), Error> {
+        let _entries = entries.await_all().await;
         // info!("Await all finished!");
-        let num_parts = blocks.remaining_parts;
+        let num_parts = entries.remaining_parts;
 
-        for block in &_blocks {
-            if let Err(e) = block {
+        for entry in &_entries {
+            if let Err(e) = entry {
                 error!(
                     "This multipart fork is corrupted, I have no use for the remaining parts. {:?}",
                     e
@@ -409,103 +493,107 @@ impl BlockBroadcaster {
             }
         }
 
-        let (view, view_is_stable) = (blocks.ae_stats.view, blocks.ae_stats.view_is_stable);
-        let _fork_size = _blocks.len();
+        let (view, view_is_stable) = (entries.ae_stats.view, entries.ae_stats.view_is_stable);
+        let _fork_size = _entries.len();
         let mut cnt = 0;
-        for block in _blocks {
+        for entry in _entries {
             cnt += 1;
-            let this_is_final_block = cnt == _fork_size;
+            let this_is_final = cnt == _fork_size;
 
-            let block = block.unwrap();
+            #[cfg(not(feature = "dag"))]
+            let entry = BlockOrTipCut::Block(entry.unwrap());
+            #[cfg(feature = "dag")]
+            let entry = BlockOrTipCut::TipCut(entry.unwrap());
+
             // info!("Processing {}", block.block.n);
-            self.store_and_forward_internally(&block, blocks.ae_stats.clone(), this_is_final_block)
+            self.store_and_forward_internally(&entry, entries.ae_stats.clone(), this_is_final)
                 .await?;
 
+            // FIXME: Update for tipcuts
             // Forward to app for stats.
-            self.app_command_tx
-                .send(AppCommand::NewRequestBatch(
-                    block.block.n,
-                    view,
-                    view_is_stable,
-                    false,
-                    block.block.tx_list.len(),
-                    block.block_hash.clone(),
-                ))
-                .await
-                .unwrap();
+            // self.app_command_tx
+            //     .send(AppCommand::NewRequestBatch(
+            //         block.block.n,
+            //         view,
+            //         view_is_stable,
+            //         false,
+            //         block.block.tx_list.len(),
+            //         block.block_hash.clone(),
+            //     ))
+            //     .await
+            // .unwrap();
         }
 
         Ok(())
     }
 
-    #[cfg(feature = "dag")]
-    async fn process_other_tipcut(&mut self, tipcut: MultipartTipCut) -> Result<(), Error> {
-        info!(
-            "Processing TipCut with {} CARs from {} for view {} (ci={})",
-            tipcut.tipcut.tips.len(),
-            tipcut.ae_stats.sender,
-            tipcut.ae_stats.view,
-            tipcut.ae_stats.ci
-        );
+    // #[cfg(feature = "dag")]
+    // async fn process_other_tipcut(&mut self, tipcut: MultipartTipCut) -> Result<(), Error> {
+    //     info!(
+    //         "Processing TipCut with {} CARs from {} for view {} (ci={})",
+    //         tipcut.tipcut.tipcut.tips.len(),
+    //         tipcut.ae_stats.sender,
+    //         tipcut.ae_stats.view,
+    //         tipcut.ae_stats.ci
+    //     );
 
-        // Forward tip cut to staging for consensus voting
-        // Staging will decide whether to vote for this tip cut
-        self.staging_tx
-            .send(StagingMessage::TipCut(TipCutProposal {
-                tipcut: tipcut.tipcut,
-                ae_stats: tipcut.ae_stats,
-            }))
-            .await
-            .unwrap();
+    //     // Forward tip cut to staging for consensus voting
+    //     // Staging will decide whether to vote for this tip cut
+    //     self.staging_tx
+    //         .send(StagingMessage::TipCut(TipCutProposal {
+    //             tipcut: tipcut.tipcut,
+    //             ae_stats: tipcut.ae_stats,
+    //         }))
+    //         .await
+    //         .unwrap();
 
-        debug!("Forwarded tip cut to staging for voting");
+    //     debug!("Forwarded tip cut to staging for voting");
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-    /// Process and broadcast our own tip cut proposal (DAG mode only)
-    /// This is called when the local node (as leader) proposes a tip cut for consensus
-    #[cfg(feature = "dag")]
-    async fn process_my_tipcut(
-        &mut self,
-        tipcut: ProtoTipCut,
-        view: u64,
-        view_is_stable: bool,
-        config_num: u64,
-    ) -> Result<(), Error> {
-        info!(
-            "Broadcasting my TipCut with {} CARs for view {} (ci={})",
-            tipcut.tips.len(),
-            view,
-            self.ci
-        );
+    // /// Process and broadcast our own tip cut proposal (DAG mode only)
+    // /// This is called when the local node (as leader) proposes a tip cut for consensus
+    // #[cfg(feature = "dag")]
+    // async fn process_my_tipcut(
+    //     &mut self,
+    //     tipcut_fork: Vec<CachedTipCut>,
+    //     view: u64,
+    //     view_is_stable: bool,
+    //     config_num: u64,
+    // ) -> Result<(), Error> {
+    //     let total = tipcut_fork.len();
+    //     info!(
+    //         "Broadcasting my TipCutFork with {} tip cuts for view {} (ci={})",
+    //         total, view, self.ci
+    //     );
 
-        // First, forward to staging for our own vote
-        // Note: No storage needed for tip cuts - they reference already-stored CARs
-        self.staging_tx
-            .send(StagingMessage::TipCut(TipCutProposal {
-                tipcut: tipcut.clone(),
-                ae_stats: AppendEntriesStats {
-                    view,
-                    view_is_stable,
-                    config_num,
-                    sender: self.config.get().net_config.name.clone(),
-                    ci: self.ci,
-                },
-            }))
-            .await
-            .unwrap();
+    //     // Forward each tip cut to staging (vote on last or all depending on staging policy)
+    //     for tc in tipcut_fork.iter() {
+    //         self.staging_tx
+    //             .send(StagingMessage::TipCut(TipCutProposal {
+    //                 tipcut: tc.clone(),
+    //                 ae_stats: AppendEntriesStats {
+    //                     view,
+    //                     view_is_stable,
+    //                     config_num,
+    //                     sender: self.config.get().net_config.name.clone(),
+    //                     ci: self.ci,
+    //                 },
+    //             }))
+    //             .await
+    //             .unwrap();
+    //     }
+    //     debug!("Forwarded my tip cut fork ({} cuts) to staging", total);
 
-        debug!("Forwarded my tip cut to staging for voting");
+    //     // Broadcast entire fork
+    //     let names = self.get_everyone_except_me();
+    //     self.broadcast_ae_tipcut(names, tipcut_fork, view, view_is_stable, config_num)
+    //         .await;
+    //     Ok(())
+    // }
 
-        // Then broadcast to other nodes
-        let names = self.get_everyone_except_me();
-        self.broadcast_ae_tipcut(names, tipcut, view, view_is_stable, config_num)
-            .await;
-
-        Ok(())
-    }
-
+    // FIXME: Update for tipcuts
     async fn maybe_act_evil(
         &mut self,
         names: Vec<String>,
@@ -604,7 +692,7 @@ impl BlockBroadcaster {
     async fn broadcast_ae_fork(
         &mut self,
         names: Vec<String>,
-        mut ae_fork: Vec<CachedBlock>,
+        mut ae_fork: Vec<BlockOrTipCut>,
         view: u64,
         view_is_stable: bool,
         config_num: u64,
@@ -615,17 +703,18 @@ impl BlockBroadcaster {
             None => (false, 0),
         };
 
+        #[cfg(not(feature = "dag"))]
         let append_entry = ProtoAppendEntries {
             entry: Some(crate::proto::consensus::proto_append_entries::Entry::Fork(
                 ProtoFork {
                     serialized_blocks: ae_fork
                         .drain(..)
                         .map(|block| HalfSerializedBlock {
-                            n: block.block.n,
-                            view: block.block.view,
-                            view_is_stable: block.block.view_is_stable,
-                            config_num: block.block.config_num,
-                            serialized_body: block.block_ser.clone(),
+                            n: block.n(),
+                            view: block.view(),
+                            view_is_stable: block.view_is_stable(),
+                            config_num: block.config_num(),
+                            serialized_body: block.ser(),
                         })
                         .collect(),
                 },
@@ -636,7 +725,29 @@ impl BlockBroadcaster {
             config_num,
             is_backfill_response: false,
         };
-        // let data = bincode::serialize(&append_entry).unwrap();
+        #[cfg(feature = "dag")]
+        let append_entry = ProtoAppendEntries {
+            entry: Some(
+                crate::proto::consensus::proto_append_entries::Entry::TipcutFork(ProtoTipCutFork {
+                    serialized_tipcuts: ae_fork
+                        .drain(..)
+                        .map(|tipcut| HalfSerializedTipCut {
+                            n: tipcut.n(),
+                            view: tipcut.view(),
+                            view_is_stable: tipcut.view_is_stable(),
+                            config_num: tipcut.config_num(),
+                            serialized_body: tipcut.ser(),
+                        })
+                        .collect(),
+                }),
+            ),
+            commit_index: self.ci,
+            view,
+            view_is_stable,
+            config_num,
+            is_backfill_response: false,
+        };
+
         // let data = bitcode::encode(&append_entry);
         let rpc = ProtoPayload {
             message: Some(crate::proto::rpc::proto_payload::Message::AppendEntries(
@@ -668,57 +779,5 @@ impl BlockBroadcaster {
             self.perf_add_event(perf_entry, "Forward block to other nodes");
             self.perf_deregister(perf_entry);
         }
-    }
-
-    /// Broadcast a tip cut wrapped in AppendEntries to all other nodes (DAG mode only)
-    /// Tip cuts are consensus proposals for committing a set of CARs
-    #[cfg(feature = "dag")]
-    async fn broadcast_ae_tipcut(
-        &mut self,
-        names: Vec<String>,
-        tipcut: ProtoTipCut,
-        view: u64,
-        view_is_stable: bool,
-        config_num: u64,
-    ) {
-        let tip_count = tipcut.tips.len();
-
-        // Wrap tip cut in AppendEntries message
-        let append_entry = ProtoAppendEntries {
-            entry: Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(tipcut)),
-            commit_index: self.ci,
-            view,
-            view_is_stable,
-            config_num,
-            is_backfill_response: false,
-        };
-
-        // Serialize to protobuf
-        let rpc = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::AppendEntries(
-                append_entry,
-            )),
-        };
-        let data = rpc.encode_to_vec();
-
-        let sz = data.len();
-        info!(
-            "Broadcasting TipCut with {} CARs (size: {} bytes) to {:?}",
-            tip_count, sz, names
-        );
-
-        // Broadcast to all nodes using the same threshold as blocks
-        let data = PinnedMessage::from(data, sz, SenderType::Anon);
-        let mut profile = LatencyProfile::new();
-        let _res = PinnedClient::broadcast(
-            &self.client,
-            &names,
-            &data,
-            &mut profile,
-            self.get_byzantine_broadcast_threshold(),
-        )
-        .await;
-
-        debug!("TipCut broadcast completed");
     }
 }

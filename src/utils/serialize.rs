@@ -106,6 +106,92 @@ pub fn deserialize_proto_block(bytes: &[u8]) -> Result<ProtoBlock, DecodeError> 
     Ok(block)
 }
 
+// ------------------ TipCut serialization (DAG) ------------------
+#[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoTipCut;
+
+#[cfg(feature = "dag")]
+pub fn serialize_proto_tipcut_nascent(tipcut: &ProtoTipCut) -> Result<Vec<u8>, Error> {
+    let mut bytes =
+        BytesMut::with_capacity(DIGEST_LENGTH + SIGNATURE_LENGTH + tipcut.encoded_len());
+    // Serialized format: signature || parent_hash || tipcut
+    bytes.extend_from_slice(&[0u8; SIGNATURE_LENGTH]);
+    bytes.extend_from_slice(&[0u8; DIGEST_LENGTH]);
+
+    if tipcut.parent.len() != 0
+        || (tipcut.sig != None
+            && tipcut.sig
+                != Some(crate::proto::consensus::proto_tip_cut::Sig::NoSig(
+                    DefferedSignature {},
+                )))
+    {
+        return Err(Error::new(ErrorKind::InvalidData, "Invalid new tipcut"));
+    }
+
+    tipcut.encode(&mut bytes).unwrap();
+    Ok(bytes.to_vec())
+}
+
+#[cfg(feature = "dag")]
+pub fn update_parent_hash_in_proto_tipcut_ser(buf: &mut Vec<u8>, parent_hash: &HashType) {
+    buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH].copy_from_slice(parent_hash);
+}
+
+#[cfg(feature = "dag")]
+pub fn update_signature_in_proto_tipcut_ser(buf: &mut Vec<u8>, signature: &[u8; SIGNATURE_LENGTH]) {
+    buf[..SIGNATURE_LENGTH].copy_from_slice(signature);
+}
+
+#[cfg(feature = "dag")]
+pub fn serialize_proto_tipcut_prefilled(mut tipcut: ProtoTipCut) -> Vec<u8> {
+    // Similar format as blocks: signature || parent_hash || encoded tipcut(body)
+    let mut bytes =
+        BytesMut::with_capacity(DIGEST_LENGTH + SIGNATURE_LENGTH + tipcut.encoded_len());
+
+    match &tipcut.sig {
+        Some(crate::proto::consensus::proto_tip_cut::Sig::ProposerSig(sig)) => {
+            bytes.extend_from_slice(sig);
+        }
+        Some(crate::proto::consensus::proto_tip_cut::Sig::NoSig(_)) => {
+            bytes.extend_from_slice(&[0u8; SIGNATURE_LENGTH]);
+        }
+        None => {
+            bytes.extend_from_slice(&[0u8; SIGNATURE_LENGTH]);
+        }
+    }
+
+    bytes.extend_from_slice(&tipcut.parent);
+
+    tipcut.parent.clear();
+    tipcut.sig = None;
+
+    tipcut.encode(&mut bytes).unwrap();
+    bytes.to_vec()
+}
+
+#[cfg(feature = "dag")]
+pub fn get_parent_hash_in_proto_tipcut_ser(buf: &Vec<u8>) -> Option<HashType> {
+    if buf.len() < DIGEST_LENGTH + SIGNATURE_LENGTH { return None; }
+    Some(buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH].to_vec())
+}
+
+#[cfg(feature = "dag")]
+pub fn deserialize_proto_tipcut(bytes: &[u8]) -> Result<ProtoTipCut, DecodeError> {
+    if bytes.len() < DIGEST_LENGTH + SIGNATURE_LENGTH {
+        return Err(DecodeError::new("Invalid tipcut length"));
+    }
+    let mut tipcut = ProtoTipCut::decode(&bytes[DIGEST_LENGTH + SIGNATURE_LENGTH..]).unwrap();
+    tipcut.parent = bytes[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH].to_vec();
+    let sig = &bytes[..SIGNATURE_LENGTH];
+    let sig_is_null = sig.iter().all(|&x| x == 0);
+    if sig_is_null {
+        tipcut.sig = Some(crate::proto::consensus::proto_tip_cut::Sig::NoSig(DefferedSignature{}));
+    } else {
+        tipcut.sig = Some(crate::proto::consensus::proto_tip_cut::Sig::ProposerSig(sig.to_vec()));
+    }
+    Ok(tipcut)
+}
+
 #[cfg(test)]
 mod test {
     use rand::{thread_rng, Rng};
@@ -124,12 +210,13 @@ mod test {
         let mut tx = Vec::with_capacity(1000);
         for _ in 0..1000 {
             let mut rng = thread_rng();
+            let payload: Vec<u8> = (0..512).map(|_| rng.gen::<u8>()).collect();
             tx.push(ProtoTransaction {
                 on_receive: None,
                 on_crash_commit: Some(ProtoTransactionPhase {
                     ops: vec![ProtoTransactionOp {
                         op_type: crate::proto::execution::ProtoTransactionOpType::Noop as i32,
-                        operands: vec![vec![rng.gen(); 512]],
+                        operands: vec![payload],
                     }],
                 }),
                 on_byzantine_commit: None,

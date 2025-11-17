@@ -33,6 +33,12 @@ use crate::{
 };
 
 #[cfg(feature = "dag")]
+use crate::utils::{
+    serialize_proto_tipcut_nascent, update_parent_hash_in_proto_tipcut_ser,
+    update_signature_in_proto_tipcut_ser,
+};
+
+#[cfg(feature = "dag")]
 use crate::proto::consensus::ProtoTipCut;
 
 use super::{hash, AtomicKeyStore, HashType, KeyStore};
@@ -68,6 +74,38 @@ impl CachedBlock {
 }
 
 // But no DerefMut, I don't want to allow mutation of the inner block.
+
+#[cfg(feature = "dag")]
+#[derive(Clone, Debug)]
+pub struct __CachedTipCut {
+    pub tipcut: ProtoTipCut,
+    pub tipcut_ser: Vec<u8>,
+    pub tipcut_hash: HashType,
+}
+
+#[cfg(feature = "dag")]
+#[derive(Clone, Debug)]
+pub struct CachedTipCut(pub Arc<Pin<Box<__CachedTipCut>>>);
+
+#[cfg(feature = "dag")]
+impl Deref for CachedTipCut {
+    type Target = __CachedTipCut;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(feature = "dag")]
+impl CachedTipCut {
+    pub fn new(tipcut: ProtoTipCut, tipcut_ser: Vec<u8>, tipcut_hash: HashType) -> Self {
+        Self(Arc::new(Box::pin(__CachedTipCut {
+            tipcut,
+            tipcut_ser,
+            tipcut_hash,
+        })))
+    }
+}
 
 pub enum FutureHash {
     None,
@@ -148,14 +186,15 @@ enum CryptoServiceCommand {
         FutureHash,
     ),
 
-    // Prepare tip cut: compute digest with pipelining support
+    // Prepare tip cut: identical flow to PrepareBlock but for tip cuts
     #[cfg(feature = "dag")]
     PrepareTipCut(
         ProtoTipCut,
-        oneshot::Sender<ProtoTipCut>, /* Tip cut with computed digest */
-        oneshot::Sender<HashType>,    /* Digest for response 1 */
-        oneshot::Sender<HashType>,    /* Digest for response 2 (for pipelining) */
-        FutureHash,                   /* Parent digest */
+        oneshot::Sender<CachedTipCut>,
+        oneshot::Sender<HashType>, /* hash/digest */
+        oneshot::Sender<HashType>, /* duplicate hash */
+        bool,                      /* must_sign */
+        FutureHash,                /* Parent digest */
     ),
 
     // Takes the output of StorageService and converts it to CachedBlock.
@@ -165,11 +204,27 @@ enum CryptoServiceCommand {
         oneshot::Sender<Result<CachedBlock, Error>>,
     ),
 
+    #[cfg(feature = "dag")]
+    CheckTipCutSer(
+        HashType,
+        oneshot::Receiver<Result<Vec<u8>, Error>>,
+        oneshot::Sender<Result<CachedTipCut, Error>>,
+    ),
+
     // Deserializes and verifies block serialization
     VerifyBlockSer(
         usize, /* min_qc_len */
         Vec<u8>,
         oneshot::Sender<Result<CachedBlock, Error>>,
+        oneshot::Sender<Result<HashType, Error>>,
+    ),
+
+    // Deserializes and verifies tip cut serialization (DAG)
+    #[cfg(feature = "dag")]
+    VerifyTipCutSer(
+        usize, /* min_qc_len */
+        Vec<u8>,
+        oneshot::Sender<Result<CachedTipCut, Error>>,
         oneshot::Sender<Result<HashType, Error>>,
     ),
 
@@ -286,7 +341,7 @@ impl CryptoService {
                     // let mut buf = bincode::serialize(&proto_block).unwrap();
                     // let mut buf = bitcode::encode(&proto_block);
                     // let mut buf = proto_block.encode_to_vec();
-                    let (perf_counter, event_order, mut event_num) = if must_sign {
+                    let (perf_counter, event_order, event_num) = if must_sign {
                         (
                             &mut signed_block_prepare_perf_counter,
                             &signed_block_prepare_event_order,
@@ -361,41 +416,112 @@ impl CryptoService {
                 }
                 #[cfg(feature = "dag")]
                 CryptoServiceCommand::PrepareTipCut(
-                    mut tipcut,
+                    mut proto_tipcut,
                     tipcut_tx,
-                    digest_tx,
-                    digest_tx2,
+                    hash_tx,
+                    hash_tx2,
+                    must_sign,
                     parent_hash_rx,
                 ) => {
-                    use prost::Message;
+                    // Mirror PrepareBlock flow but for ProtoTipCut
+                    let signed_tipcut_prepare_event_order = vec![
+                        "Serialize without parent hash",
+                        "Hash Partial",
+                        "Add parent hash",
+                        "Sign",
+                        "Add signature",
+                        "Send",
+                    ];
+                    let unsigned_tipcut_prepare_event_order = vec![
+                        "Serialize without parent hash",
+                        "Hash Partial",
+                        "Add parent hash",
+                        "Add signature",
+                        "Send",
+                    ];
 
-                    // Await parent hash (enables pipelining with previous tip cut)
+                    let mut signed_tipcut_prepare_perf_counter = PerfCounter::<u64>::new(
+                        &format!("CryptoWorker{}:PrepareTipCutSigned", worker_id),
+                        &signed_tipcut_prepare_event_order,
+                    );
+                    let mut unsigned_tipcut_prepare_perf_counter = PerfCounter::<u64>::new(
+                        &format!("CryptoWorker{}:PrepareTipCutUnsigned", worker_id),
+                        &unsigned_tipcut_prepare_event_order,
+                    );
+
+                    let (perf_counter, event_order, mut event_num) = if must_sign {
+                        (
+                            &mut signed_tipcut_prepare_perf_counter,
+                            &signed_tipcut_prepare_event_order,
+                            0,
+                        )
+                    } else {
+                        (
+                            &mut unsigned_tipcut_prepare_perf_counter,
+                            &unsigned_tipcut_prepare_event_order,
+                            0,
+                        )
+                    };
+
+                    let perf_entry = proto_tipcut.n;
+
+                    macro_rules! perf_event_tc {
+                        () => {
+                            perf_counter.new_event(&event_order[event_num], &perf_entry);
+                            event_num += 1;
+                        };
+                    }
+
+                    perf_counter.register_new_entry(perf_entry);
+
+                    // Clear signature and parent for nascent serialization
+                    proto_tipcut.sig = None;
+                    proto_tipcut.parent.clear();
+
+                    let mut buf = serialize_proto_tipcut_nascent(&proto_tipcut).unwrap();
+                    perf_event_tc!();
+
+                    let mut hasher = Sha::new();
+                    hasher.update(&buf[DIGEST_LENGTH + SIGNATURE_LENGTH..]);
+                    perf_event_tc!();
+
+                    // Memory fence to prevent reordering.
+                    fence(std::sync::atomic::Ordering::SeqCst);
+
                     let parent = match parent_hash_rx {
-                        FutureHash::None => vec![0u8; 32], // Genesis
+                        FutureHash::None => default_hash(),
                         FutureHash::Immediate(val) => val,
                         FutureHash::Future(receiver) => receiver.await.unwrap(),
                         FutureHash::FutureResult(receiver) => receiver.await.unwrap().unwrap(),
                     };
+                    update_parent_hash_in_proto_tipcut_ser(&mut buf, &parent);
+                    perf_event_tc!();
 
-                    // Set parent in tip cut
-                    tipcut.parent = parent.clone();
-
-                    // Compute digest: hash(parent || tips)
-                    let mut hash_content = Vec::new();
-                    hash_content.extend_from_slice(&tipcut.parent);
-                    for tip in &tipcut.tips {
-                        hash_content.extend_from_slice(&tip.encode_to_vec());
+                    let mut tipcut = proto_tipcut;
+                    tipcut.parent = parent;
+                    hasher.update(&buf[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH]);
+                    if must_sign {
+                        // Signature is on (parent_hash || tipcut) portion
+                        let partial_hsh = hash(&buf[SIGNATURE_LENGTH..]);
+                        let keystore = keystore.get();
+                        let sig = keystore.sign(&partial_hsh);
+                        tipcut.sig = Some(
+                            crate::proto::consensus::proto_tip_cut::Sig::ProposerSig(sig.to_vec()),
+                        );
+                        update_signature_in_proto_tipcut_ser(&mut buf, &sig);
+                        perf_event_tc!();
                     }
 
-                    let digest = hash(&hash_content);
+                    hasher.update(&buf[..SIGNATURE_LENGTH]);
+                    perf_event_tc!();
 
-                    // Set digest in tip cut
-                    tipcut.digest = digest.clone();
+                    let hsh = hasher.finalize().to_vec();
 
-                    // Send results
-                    let _ = digest_tx.send(digest.clone());
-                    let _ = digest_tx2.send(digest);
-                    let _ = tipcut_tx.send(tipcut);
+                    let _ = hash_tx.send(hsh.clone());
+                    let _ = hash_tx2.send(hsh.clone());
+                    let _ = tipcut_tx.send(CachedTipCut::new(tipcut, buf, hsh));
+                    perf_event_tc!();
+                    perf_counter.deregister_entry(&perf_entry);
                 }
                 CryptoServiceCommand::CheckBlockSer(hsh, ser_rx, block_tx) => {
                     let res = ser_rx.await.unwrap();
@@ -528,6 +654,121 @@ impl CryptoService {
                             hash_tx.send(Err(Error::new(ErrorKind::InvalidData, "Decode error")));
                         }
                     };
+                }
+                #[cfg(feature = "dag")]
+                CryptoServiceCommand::VerifyTipCutSer(
+                    _min_qc_len,
+                    tipcut_ser,
+                    tipcut_tx,
+                    hash_tx,
+                ) => {
+                    use crate::utils::deserialize_proto_tipcut;
+                    let hsh = {
+                        let mut hasher = Sha::new();
+                        hasher.update(&tipcut_ser[DIGEST_LENGTH + SIGNATURE_LENGTH..]);
+                        hasher.update(
+                            &tipcut_ser[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH],
+                        );
+                        hasher.update(&tipcut_ser[..SIGNATURE_LENGTH]);
+                        hasher.finalize().to_vec()
+                    };
+                    let tipcut = deserialize_proto_tipcut(tipcut_ser.as_ref());
+                    match tipcut {
+                        Ok(tc) => {
+                            // Signature + QC verification (if present)
+                            if let Some(crate::proto::consensus::proto_tip_cut::Sig::ProposerSig(
+                                sig,
+                            )) = &tc.sig
+                            {
+                                let partial_hsh = hash(&tipcut_ser[SIGNATURE_LENGTH..]);
+                                let keystore = keystore.get();
+                                let leader_for_view =
+                                    config.get().consensus_config.get_leader_for_view(tc.view);
+                                match sig.as_slice().try_into() {
+                                    Ok(_sig) => {
+                                        if !keystore.verify(&leader_for_view, &_sig, &partial_hsh) {
+                                            let _ = tipcut_tx.send(Err(Error::new(
+                                                ErrorKind::InvalidData,
+                                                "Invalid signature",
+                                            )));
+                                            let _ = hash_tx.send(Err(Error::new(
+                                                ErrorKind::InvalidData,
+                                                "Invalid signature",
+                                            )));
+                                            continue;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        let _ = tipcut_tx.send(Err(Error::new(
+                                            ErrorKind::InvalidData,
+                                            "Invalid signature",
+                                        )));
+                                        let _ = hash_tx.send(Err(Error::new(
+                                            ErrorKind::InvalidData,
+                                            "Invalid signature",
+                                        )));
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let _ =
+                                tipcut_tx.send(Ok(CachedTipCut::new(tc, tipcut_ser, hsh.clone())));
+                            let _ = hash_tx.send(Ok(hsh));
+                        }
+                        Err(_) => {
+                            let _ = tipcut_tx
+                                .send(Err(Error::new(ErrorKind::InvalidData, "Decode error")));
+                            let _ = hash_tx
+                                .send(Err(Error::new(ErrorKind::InvalidData, "Decode error")));
+                        }
+                    }
+                }
+                #[cfg(feature = "dag")]
+                CryptoServiceCommand::CheckTipCutSer(hsh, ser_rx, tx) => {
+                    match ser_rx.await {
+                        Ok(ret) => match ret {
+                            Ok(ser) => {
+                                // Re-hash and validate digest matches provided
+                                let calc_hsh = {
+                                    let mut hasher = Sha::new();
+                                    hasher.update(&ser[DIGEST_LENGTH + SIGNATURE_LENGTH..]);
+                                    hasher.update(
+                                        &ser[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH],
+                                    );
+                                    hasher.update(&ser[..SIGNATURE_LENGTH]);
+                                    hasher.finalize().to_vec()
+                                };
+                                if calc_hsh != hsh {
+                                    let _ = tx.send(Err(Error::new(
+                                        ErrorKind::InvalidData,
+                                        "Hash mismatch",
+                                    )));
+                                    continue;
+                                }
+                                use crate::utils::deserialize_proto_tipcut;
+                                match deserialize_proto_tipcut(&ser) {
+                                    Ok(tc) => {
+                                        let _ = tx.send(Ok(CachedTipCut::new(tc, ser, hsh)));
+                                    }
+                                    Err(_) => {
+                                        let _ = tx.send(Err(Error::new(
+                                            ErrorKind::InvalidData,
+                                            "Decode error",
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                let _ = tx
+                                    .send(Err(Error::new(ErrorKind::InvalidData, "Storage error")));
+                            }
+                        },
+                        Err(_) => {
+                            let _ =
+                                tx.send(Err(Error::new(ErrorKind::InvalidData, "Channel closed")));
+                        }
+                    }
                 }
 
                 CryptoServiceCommand::PrepareVC(mut vc, tx) => {
@@ -728,11 +969,12 @@ impl CryptoServiceConnector {
     pub async fn prepare_tipcut(
         &mut self,
         tipcut: ProtoTipCut,
+        must_sign: bool,
         parent_hash_rx: FutureHash,
     ) -> (
-        oneshot::Receiver<ProtoTipCut>, // Tip cut with digest computed
-        oneshot::Receiver<HashType>,    // Digest (for storing as next parent)
-        oneshot::Receiver<HashType>,    // Digest (duplicate for other uses)
+        oneshot::Receiver<CachedTipCut>, // Prepared tip cut with serialization and hash
+        oneshot::Receiver<HashType>,     // Hash (for storing as next parent)
+        oneshot::Receiver<HashType>,     // Hash (duplicate for other uses)
     ) {
         let (tipcut_tx, tipcut_rx) = oneshot::channel();
         let (digest_tx, digest_rx) = oneshot::channel();
@@ -742,6 +984,7 @@ impl CryptoServiceConnector {
             tipcut_tx,
             digest_tx,
             digest_tx2,
+            must_sign,
             parent_hash_rx,
         ))
         .await;
@@ -755,6 +998,15 @@ impl CryptoServiceConnector {
         ser_rx: oneshot::Receiver<Result<Vec<u8>, Error>>,
     ) -> Result<CachedBlock, Error> {
         dispatch_cmd!(self, CryptoServiceCommand::CheckBlockSer, hsh, ser_rx)
+    }
+
+    #[cfg(feature = "dag")]
+    pub async fn check_tipcut(
+        &mut self,
+        hsh: HashType,
+        ser_rx: oneshot::Receiver<Result<Vec<u8>, Error>>,
+    ) -> Result<CachedTipCut, Error> {
+        dispatch_cmd!(self, CryptoServiceCommand::CheckTipCutSer, hsh, ser_rx)
     }
 
     pub async fn prepare_fork(
@@ -785,6 +1037,43 @@ impl CryptoServiceConnector {
         (
             MultipartFork {
                 fork_future,
+                remaining_parts,
+                ae_stats,
+            },
+            hash_receivers,
+        )
+    }
+
+    #[cfg(feature = "dag")]
+    pub async fn prepare_tipcut_fork(
+        &mut self,
+        mut part: Vec<crate::proto::consensus::HalfSerializedTipCut>,
+        remaining_parts: usize,
+        ae_stats: AppendEntriesStats,
+        min_qc_len: usize,
+    ) -> (
+        crate::consensus::fork_receiver::MultipartTipCut,
+        Vec<oneshot::Receiver<Result<HashType, Error>>>,
+    ) {
+        use crate::consensus::fork_receiver::MultipartTipCut;
+        let mut fork_future = Vec::with_capacity(part.len());
+        let mut hash_receivers = Vec::new();
+        for e in part.drain(..) {
+            let (tx, rx) = oneshot::channel();
+            let (tx2, rx2) = oneshot::channel();
+            self.dispatch(CryptoServiceCommand::VerifyTipCutSer(
+                min_qc_len,
+                e.serialized_body,
+                tx,
+                tx2,
+            ))
+            .await;
+            fork_future.push(Some(rx));
+            hash_receivers.push(rx2);
+        }
+        (
+            MultipartTipCut {
+                tipcut_future: fork_future,
                 remaining_parts,
                 ae_stats,
             },

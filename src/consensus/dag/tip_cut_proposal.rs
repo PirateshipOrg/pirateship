@@ -22,7 +22,7 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     config::AtomicConfig,
-    proto::consensus::ProtoTipCut,
+    proto::consensus::{DefferedSignature, ProtoTipCut},
     utils::{
         channel::{Receiver, Sender},
         timer::ResettableTimer,
@@ -52,6 +52,7 @@ pub struct TipCutProposal {
     ci: u64,
     view: u64,
     view_is_stable: bool,
+    config_num: u64,
 
     // Leadership state
     i_am_leader: bool,
@@ -113,6 +114,7 @@ impl TipCutProposal {
             ci: 0,
             view,
             view_is_stable: false,
+            config_num: 0,
             i_am_leader,
             current_leader,
             tip_cut_timer,
@@ -266,10 +268,17 @@ impl TipCutProposal {
 
         // Construct ProtoTipCut message
         let proto_tip_cut = ProtoTipCut {
-            digest: vec![], // Will be computed by BlockSequencer
+            tips: cars,
             n: 0,           // Will be assigned by BlockSequencer as chain sequence
             parent: vec![], // Will be computed by BlockSequencer
-            tips: cars,
+            view: self.view,
+            qc: vec![],            // Will be computed by BlockSequencer
+            tc_validation: vec![], // Will be computed by BlockSequencer
+            view_is_stable: self.view_is_stable,
+            config_num: self.config_num,
+            sig: Some(crate::proto::consensus::proto_tip_cut::Sig::NoSig(
+                DefferedSignature {},
+            )),
         };
 
         // Send to BlockSequencer which will:

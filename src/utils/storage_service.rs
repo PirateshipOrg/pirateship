@@ -3,6 +3,8 @@ use std::io::Error;
 use tokio::sync::oneshot;
 
 use crate::crypto::{CachedBlock, CryptoServiceConnector, HashType};
+#[cfg(feature = "dag")]
+use crate::crypto::CachedTipCut;
 
 use super::{
     channel::{make_channel, Receiver, Sender},
@@ -98,6 +100,20 @@ impl StorageServiceConnector {
         rx
     }
 
+    #[cfg(feature = "dag")]
+    pub async fn put_tipcut(&self, tipcut: &CachedTipCut) -> oneshot::Receiver<StorageAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(StorageServiceCommand::Put(
+                tipcut.tipcut_hash.clone(),
+                tipcut.tipcut_ser.clone(),
+                tx,
+            ))
+            .await
+            .unwrap();
+        rx
+    }
+
     pub async fn put_raw(&self, key: String, val: Vec<u8>) -> oneshot::Receiver<StorageAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -116,5 +132,15 @@ impl StorageServiceConnector {
             .unwrap();
 
         rx.await.unwrap()
+    }
+
+    #[cfg(feature = "dag")]
+    pub async fn get_tipcut(&mut self, tipcut_hash: &HashType) -> Result<CachedTipCut, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(StorageServiceCommand::Get(tipcut_hash.clone(), tx))
+            .await
+            .unwrap();
+        self.crypto.check_tipcut(tipcut_hash.clone(), rx).await
     }
 }

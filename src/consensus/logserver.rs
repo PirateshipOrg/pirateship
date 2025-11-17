@@ -1,26 +1,28 @@
+#![allow(unused_imports)]
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
 };
 
 use log::{error, info, trace, warn};
+#[cfg(not(feature = "dag"))]
 use prost::Message as _;
 use tokio::sync::{oneshot, Mutex};
 
+#[cfg(feature = "dag")]
+use crate::crypto::CachedTipCut;
 use crate::{
     config::AtomicConfig,
     crypto::CachedBlock,
     proto::{
         checkpoint::{proto_backfill_nack::Origin, ProtoBackfillNack, ProtoBlockHint},
-        consensus::{
-            HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoTipCut, ProtoViewChange,
-        },
+        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoViewChange},
         rpc::{proto_payload::Message, ProtoPayload},
     },
-    rpc::{client::PinnedClient, MessageRef, PinnedMessage},
+    rpc::{client::PinnedClient, MessageRef},
     utils::{
         channel::{Receiver, Sender},
-        get_parent_hash_in_proto_block_ser, StorageServiceConnector,
+        StorageServiceConnector,
     },
 };
 
@@ -30,7 +32,10 @@ use crate::{
 /// Since reading GC blocks always forms the pattern of (read parent hash) -> (fetch block) -> (read parent hash) -> ...
 /// There is no need to adjust the position of the block in the cache.
 struct ReadCache {
+    #[cfg(not(feature = "dag"))]
     cache: BTreeMap<u64, CachedBlock>,
+    #[cfg(feature = "dag")]
+    cache: BTreeMap<u64, CachedTipCut>,
     working_set_size: usize,
 }
 
@@ -49,6 +54,7 @@ impl ReadCache {
     /// - Ok(block) if the block is in the cache.
     /// - Err(block) block with the least n higher than the requested block, if the block is not in the cache.
     /// - Err(None) if the cache is just empty.
+    #[cfg(not(feature = "dag"))]
     pub fn get(&mut self, n: u64) -> Result<CachedBlock, Option<CachedBlock>> {
         if self.cache.is_empty() {
             return Err(None);
@@ -68,6 +74,7 @@ impl ReadCache {
         Err(Some(next_block))
     }
 
+    #[cfg(not(feature = "dag"))]
     pub fn put(&mut self, block: CachedBlock) {
         if self.cache.len() >= self.working_set_size
             && block.block.n < *self.cache.first_entry().unwrap().key()
@@ -81,6 +88,40 @@ impl ReadCache {
 
         self.cache.insert(block.block.n, block);
     }
+
+    #[cfg(feature = "dag")]
+    pub fn get(&mut self, n: u64) -> Result<CachedTipCut, Option<CachedTipCut>> {
+        if self.cache.is_empty() {
+            return Err(None);
+        }
+
+        let tc = self.cache.get(&n).cloned();
+        if let Some(tc) = tc {
+            return Ok(tc);
+        }
+
+        let next_tc = match self.cache.range(n..).next() {
+            Some((_, tc)) => tc.clone(),
+            None => {
+                return Err(None);
+            }
+        };
+        Err(Some(next_tc))
+    }
+
+    #[cfg(feature = "dag")]
+    pub fn put(&mut self, tipcut: CachedTipCut) {
+        if self.cache.len() >= self.working_set_size
+            && tipcut.tipcut.n < *self.cache.first_entry().unwrap().key()
+        {
+            return;
+        }
+        if self.cache.len() >= self.working_set_size {
+            self.cache.first_entry().unwrap().remove();
+        }
+
+        self.cache.insert(tipcut.tipcut.n, tipcut);
+    }
 }
 
 pub enum LogServerQuery {
@@ -93,6 +134,8 @@ pub enum LogServerQuery {
         u64, /* last needed block.n */
         Sender<Vec<ProtoBlockHint>>,
     ),
+    // #[cfg(feature = "dag")]
+    // GetTipCutHash(u64 /* tipcut.n */, Sender<Option<Vec<u8>>>),
 }
 
 pub enum LogServerCommand {
@@ -100,9 +143,9 @@ pub enum LogServerCommand {
     Rollback(u64),
     UpdateBCI(u64),
     #[cfg(feature = "dag")]
-    NewTipCut(ProtoTipCut),
-    #[cfg(feature = "dag")]
-    GetLastTipCutDigest(oneshot::Sender<Option<Vec<u8>>>),
+    NewTipCut(CachedTipCut),
+    // #[cfg(feature = "dag")]
+    // GetLastTipCutDigest(oneshot::Sender<Option<Vec<u8>>>),
 }
 
 pub struct LogServer {
@@ -117,14 +160,13 @@ pub struct LogServer {
     query_rx: Receiver<LogServerQuery>,
 
     storage: StorageServiceConnector,
+    #[cfg(not(feature = "dag"))]
     log: VecDeque<CachedBlock>,
-
-    /// LFU read cache for GCed blocks.
-    read_cache: ReadCache,
-
-    /// DAG mode: chain of tip cuts instead of blocks
     #[cfg(feature = "dag")]
-    tipcut_log: VecDeque<ProtoTipCut>,
+    log: VecDeque<CachedTipCut>,
+
+    /// LFU read cache for GCed blocks or tip cuts (DAG).
+    read_cache: ReadCache,
 }
 
 const LOGSERVER_READ_CACHE_WSS: usize = 100;
@@ -150,8 +192,6 @@ impl LogServer {
             log: VecDeque::new(),
             read_cache: ReadCache::new(LOGSERVER_READ_CACHE_WSS),
             bci: 0,
-            #[cfg(feature = "dag")]
-            tipcut_log: VecDeque::new(),
         }
     }
 
@@ -183,14 +223,15 @@ impl LogServer {
                     },
                     #[cfg(feature = "dag")]
                     Some(LogServerCommand::NewTipCut(tipcut)) => {
-                        trace!("Received tip cut with {} CARs", tipcut.tips.len());
+                        trace!("Received tip cut with {} CARs", tipcut.tipcut.tips.len());
                         self.handle_new_tipcut(tipcut).await;
                     },
-                    #[cfg(feature = "dag")]
-                    Some(LogServerCommand::GetLastTipCutDigest(reply_tx)) => {
-                        let digest = self.tipcut_log.back().map(|tc| tc.digest.clone());
-                        let _ = reply_tx.send(digest);
-                    },
+                    // #[cfg(feature = "dag")]
+                    // Some(LogServerCommand::GetLastTipCutDigest(reply_tx)) => {
+                    //     // Use unified log deque (stores CachedTipCut in DAG mode)
+                    //     let digest = self.log.back().map(|tc| tc.tipcut_hash.clone());
+                    //     let _ = reply_tx.send(digest);
+                    // },
                     None => {
                         error!("LogServerCommand channel closed");
                         return Err(());
@@ -200,7 +241,14 @@ impl LogServer {
 
             gc_req = self.gc_rx.recv() => {
                 if let Some(gc_req) = gc_req {
+                    #[cfg(not(feature = "dag"))]
                     self.log.retain(|block| block.block.n > gc_req);
+                    #[cfg(feature = "dag")]
+                    {
+                        // Retain tip cuts with sequence greater than GC request
+                        self.log.retain(|tipcut| tipcut.tipcut.n > gc_req);
+                        // Optionally adjust read cache here (not strictly necessary on GC)
+                    }
                 }
             },
 
@@ -220,6 +268,7 @@ impl LogServer {
         Ok(())
     }
 
+    #[cfg(not(feature = "dag"))]
     async fn get_block(&mut self, n: u64) -> Option<CachedBlock> {
         let last_n = self.log.back()?.block.n;
         if n == 0 || n > last_n {
@@ -237,6 +286,7 @@ impl LogServer {
         Some(block)
     }
 
+    #[cfg(not(feature = "dag"))]
     async fn get_gced_block(&mut self, n: u64) -> Option<CachedBlock> {
         let first_n = self.log.front()?.block.n;
         if n >= first_n {
@@ -271,6 +321,7 @@ impl LogServer {
         Some(ret)
     }
 
+    #[cfg(not(feature = "dag"))]
     async fn respond_backfill(&mut self, backfill_req: ProtoBackfillNack) -> Result<(), ()> {
         let sender = backfill_req.reply_name;
 
@@ -372,8 +423,75 @@ impl LogServer {
         Ok(())
     }
 
+    #[cfg(feature = "dag")]
+    async fn respond_backfill(&mut self, _backfill_req: ProtoBackfillNack) -> Result<(), ()> {
+        // DAG backfill: interpret hints as tip cut sequence numbers
+        let Some(hints_wrapper) = _backfill_req.hints.as_ref() else {
+            return Ok(());
+        };
+        let sender = _backfill_req.reply_name.clone();
+        // Currently reuse Blocks hints (sequence + digest) for tip cuts until dedicated hint type exists
+        let hints: Vec<ProtoBlockHint> = match hints_wrapper {
+            crate::proto::checkpoint::proto_backfill_nack::Hints::Blocks(wrapper) => {
+                wrapper.hints.clone()
+            }
+            crate::proto::checkpoint::proto_backfill_nack::Hints::Lane(_) => {
+                // Lane hints not supported in tip cut mode yet
+                warn!("Lane hints unsupported for tip cut backfill");
+                return Ok(());
+            }
+        };
+
+        // Determine first requested n and last available
+        let first_n = _backfill_req.last_index_needed;
+        let last_n = self.log.back().map(|tc| tc.tipcut.n).unwrap_or(0);
+        if last_n == 0 || first_n > last_n {
+            return Ok(());
+        }
+
+        let fork = self.fill_tipcut_fork(first_n, last_n, hints).await;
+        // Derive view/config from origin AE or VC if present
+        let (view, view_is_stable, config_num, commit_index) = match _backfill_req.origin.as_ref() {
+            Some(Origin::Ae(ae)) => (ae.view, ae.view_is_stable, ae.config_num, ae.commit_index),
+            Some(Origin::Vc(vc)) => {
+                // View change doesn't carry commit index or stability flag directly
+                (vc.view, false, vc.config_num, 0)
+            }
+            Some(Origin::Abl(abl)) => {
+                if let Some(ab) = abl.ab.as_ref() {
+                    (ab.view, ab.view_is_stable, ab.config_num, ab.commit_index)
+                } else {
+                    (0, false, 0, 0)
+                }
+            }
+            None => (0, false, 0, 0),
+        };
+        let ae_msg = ProtoAppendEntries {
+            entry: Some(crate::proto::consensus::proto_append_entries::Entry::TipcutFork(fork)),
+            commit_index,
+            view,
+            view_is_stable,
+            config_num,
+            is_backfill_response: true,
+        };
+        let payload = ProtoPayload {
+            message: Some(Message::AppendEntries(ae_msg)),
+        };
+        #[cfg(not(feature = "dag"))]
+        use prost::Message as _;
+        let buf = <ProtoPayload as prost::Message>::encode_to_vec(&payload);
+        let _ = PinnedClient::send(
+            &self.client,
+            &sender,
+            MessageRef(&buf, buf.len(), &crate::rpc::SenderType::Anon),
+        )
+        .await;
+        Ok(())
+    }
+
     /// Returns a fork that contains blocks from `first_n` to `last_n` (both inclusive).
     /// During the process, if one of my blocks matches in hints, we stop.
+    #[cfg(not(feature = "dag"))]
     async fn fill_fork(
         &mut self,
         first_n: u64,
@@ -424,6 +542,7 @@ impl LogServer {
         }
     }
 
+    #[cfg(not(feature = "dag"))]
     async fn handle_query(&mut self, query: LogServerQuery) {
         match query {
             LogServerQuery::CheckHash(n, hsh, sender) => {
@@ -510,7 +629,35 @@ impl LogServer {
         }
     }
 
+    #[cfg(feature = "dag")]
+    async fn handle_query(&mut self, query: LogServerQuery) {
+        match query {
+            LogServerQuery::CheckHash(_, _, sender) => {
+                // Not supported in DAG mode (uses tip cut hashes instead)
+                let _ = sender.send(false).await;
+            }
+            LogServerQuery::GetHints(_, sender) => {
+                // Hints logic for DAG blocks not yet implemented
+                let _ = sender.send(Vec::new()).await;
+            } // LogServerQuery::GetTipCutHash(n, sender) => {
+              //     let h = self.log.back().map(|tc| tc.tipcut.n).unwrap_or(0);
+              //     if n == 0 || n > h {
+              //         let _ = sender.send(None).await;
+              //         return;
+              //     }
+              //     // Linear search (could be optimized to index math similar to get_tipcut)
+              //     let digest = self
+              //         .log
+              //         .iter()
+              //         .find(|tc| tc.tipcut.n == n)
+              //         .map(|tc| tc.tipcut_hash.clone());
+              //     let _ = sender.send(digest).await;
+              // }
+        }
+    }
+
     /// Invariant: Log is continuous, increasing seq num and maintains hash chain continuity
+    #[cfg(not(feature = "dag"))]
     async fn handle_new_block(&mut self, block: CachedBlock) {
         let last_n = self.log.back().map_or(0, |block| block.block.n);
         if block.block.n != last_n + 1 {
@@ -529,6 +676,12 @@ impl LogServer {
         self.log.push_back(block);
     }
 
+    #[cfg(feature = "dag")]
+    async fn handle_new_block(&mut self, _block: CachedBlock) {
+        warn!("Ignoring traditional block in DAG mode logserver");
+    }
+
+    #[cfg(not(feature = "dag"))]
     async fn handle_rollback(&mut self, mut n: u64) {
         if n <= self.bci {
             n = self.bci + 1;
@@ -541,33 +694,144 @@ impl LogServer {
     }
 
     #[cfg(feature = "dag")]
-    async fn handle_new_tipcut(&mut self, tipcut: ProtoTipCut) {
+    async fn handle_rollback(&mut self, mut n: u64) {
+        if n <= self.bci {
+            n = self.bci + 1;
+        }
+
+        // Retain tip cuts up to n (inclusive).
+        self.log.retain(|tipcut| tipcut.tipcut.n <= n);
+        // Clean up tip cut read cache
+        self.read_cache.cache.retain(|k, _| *k <= n);
+    }
+
+    #[cfg(feature = "dag")]
+    async fn handle_new_tipcut(&mut self, tipcut: CachedTipCut) {
         // In DAG mode, store tip cuts instead of blocks
         info!(
             "Storing tip cut with {} CARs (digest: {:?})",
-            tipcut.tips.len(),
-            hex::encode(&tipcut.digest[..8])
+            tipcut.tipcut.tips.len(),
+            hex::encode(&tipcut.tipcut_hash[..8])
         );
 
         // Verify parent relationship if not the first tip cut
-        if !self.tipcut_log.is_empty() {
-            let last_tipcut = self.tipcut_log.back().unwrap();
-            if tipcut.parent != last_tipcut.digest {
+        if !self.log.is_empty() {
+            let last_tipcut = self.log.back().unwrap();
+            if tipcut.tipcut.parent != last_tipcut.tipcut_hash {
                 error!(
                     "Tip cut parent mismatch: expected {:?}, got {:?}",
-                    hex::encode(&last_tipcut.digest[..8]),
-                    hex::encode(&tipcut.parent[..8])
+                    hex::encode(&last_tipcut.tipcut_hash[..8]),
+                    hex::encode(&tipcut.tipcut.parent[..8])
                 );
                 return;
             }
         } else {
             // First tip cut should have genesis parent (all zeros)
-            if !tipcut.parent.iter().all(|&b| b == 0) {
+            if !tipcut.tipcut.parent.iter().all(|&b| b == 0) {
                 error!("First tip cut should have genesis parent");
                 return;
             }
         }
 
-        self.tipcut_log.push_back(tipcut);
+        // Persist before pushing to in-memory log
+        let _ = self.storage.put_tipcut(&tipcut).await;
+        self.log.push_back(tipcut);
+    }
+
+    #[cfg(feature = "dag")]
+    async fn get_tipcut(&mut self, n: u64) -> Option<CachedTipCut> {
+        let last_n = self.log.back()?.tipcut.n;
+        if n == 0 || n > last_n {
+            return None;
+        }
+        let first_n = self.log.front()?.tipcut.n;
+        if n < first_n {
+            return self.get_gced_tipcut(n).await;
+        }
+        // sequential n assumed; perform binary search by index offset
+        let idx = (n - first_n) as usize;
+        if idx < self.log.len() {
+            Some(self.log[idx].clone())
+        } else {
+            None
+        }
+    }
+
+    #[cfg(feature = "dag")]
+    async fn get_gced_tipcut(&mut self, n: u64) -> Option<CachedTipCut> {
+        let first_n = self.log.front()?.tipcut.n;
+        if n >= first_n {
+            return None;
+        }
+
+        // Search in the read cache first.
+        let starting_point = match self.read_cache.get(n) {
+            Ok(tc) => {
+                return Some(tc);
+            }
+            Err(Some(tc)) => tc,
+            Err(None) => {
+                // fall back to first in-memory tip cut
+                self.log.front()?.clone()
+            }
+        };
+
+        // Fetch previous tip cuts from storage until we reach n
+        let mut ret = starting_point;
+        while ret.tipcut.n > n {
+            let parent_hash = &ret.tipcut.parent;
+            let tc = self.storage.get_tipcut(parent_hash).await.ok()?;
+            self.read_cache.put(tc.clone());
+            ret = tc;
+        }
+        Some(ret)
+    }
+
+    #[cfg(feature = "dag")]
+    async fn fill_tipcut_fork(
+        &mut self,
+        first_n: u64,
+        last_n: u64,
+        mut hints: Vec<ProtoBlockHint>,
+    ) -> crate::proto::consensus::ProtoTipCutFork {
+        use crate::proto::consensus::HalfSerializedTipCut;
+        if last_n < first_n {
+            return crate::proto::consensus::ProtoTipCutFork {
+                serialized_tipcuts: vec![],
+            };
+        }
+        // Map hints for early stop (block hints repurposed for tip cuts for now)
+        let hint_map = hints
+            .drain(..)
+            .map(|h| (h.block_n, h.digest))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut queue = VecDeque::new();
+        for i in (first_n..=last_n).rev() {
+            let tc = match self.get_tipcut(i).await {
+                Some(v) => v,
+                None => {
+                    warn!("TipCut {} not found", i);
+                    break;
+                }
+            };
+            if let Some(digest) = hint_map.get(&i) {
+                if digest.eq(&tc.tipcut_hash) {
+                    break;
+                }
+            }
+            queue.push_front(tc);
+        }
+        crate::proto::consensus::ProtoTipCutFork {
+            serialized_tipcuts: queue
+                .into_iter()
+                .map(|tc| HalfSerializedTipCut {
+                    n: tc.tipcut.n,
+                    view: tc.tipcut.view,
+                    view_is_stable: tc.tipcut.view_is_stable,
+                    config_num: tc.tipcut.config_num,
+                    serialized_body: tc.tipcut_ser.clone(),
+                })
+                .collect(),
+        }
     }
 }

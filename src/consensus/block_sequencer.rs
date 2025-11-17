@@ -1,18 +1,25 @@
+#[cfg(feature = "dag")]
+use core::hash;
 use std::cell::RefCell;
 use std::{pin::Pin, sync::Arc, time::Duration};
 
+#[cfg(feature = "dag")]
+use crate::consensus::block_broadcaster;
 use crate::crypto::{default_hash, FutureHash};
 use crate::utils::channel::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
+#[cfg(feature = "dag")]
+use lz4_flex::block;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::utils::PerfCounter;
 use crate::{
     config::AtomicConfig,
-    crypto::{CachedBlock, CryptoServiceConnector, HashType},
+    crypto::{CachedBlock, CachedTipCut, CryptoServiceConnector, HashType},
     proto::consensus::{
         DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate,
+        ProtoTipCutValidation,
     },
     utils::timer::ResettableTimer,
 };
@@ -27,10 +34,19 @@ use crate::proto::consensus::ProtoTipCut;
 pub enum BlockSequencerControlCommand {
     NewUnstableView(u64 /* view num */, u64 /* config num */), // View changed to a new view, it is not stable, so don't propose new blocks.
     ViewStabilised(u64 /* view num */, u64 /* config num */), // View is stable now, if I am the leader in this view, propose new blocks.
+    #[cfg(not(feature = "dag"))]
     NewViewMessage(
         u64, /* view num */
         u64, /* config num */
         Vec<ProtoForkValidation>,
+        HashType, /* new parent hash */
+        u64,      /* new seq num */
+    ), // Change view to unstable, use ProtoForkValidation to propose a new view message.
+    #[cfg(feature = "dag")]
+    NewViewMessage(
+        u64, /* view num */
+        u64, /* config num */
+        Vec<ProtoTipCutValidation>,
         HashType, /* new parent hash */
         u64,      /* new seq num */
     ), // Change view to unstable, use ProtoForkValidation to propose a new view message.
@@ -50,7 +66,10 @@ pub struct BlockSequencer {
     qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
     current_qc_list: Vec<ProtoQuorumCertificate>,
 
+    #[cfg(not(feature = "dag"))]
     block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
+    #[cfg(feature = "dag")]
+    block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedTipCut>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
     crypto: CryptoServiceConnector,
@@ -68,8 +87,6 @@ pub struct BlockSequencer {
     __last_qc_n_seen: u64,
     __blocks_proposed_in_this_view: u64,
 
-    // DAG mode fields
-    #[cfg(feature = "dag")]
     block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
 }
 
@@ -80,7 +97,14 @@ impl BlockSequencer {
         #[cfg(not(feature = "dag"))] batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
         #[cfg(feature = "dag")] tipcut_rx: Receiver<ProtoTipCut>,
         qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
-        block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+        #[cfg(not(feature = "dag"))] block_broadcaster_tx: Sender<(
+            u64,
+            oneshot::Receiver<CachedBlock>,
+        )>,
+        #[cfg(feature = "dag")] block_broadcaster_tx: Sender<(
+            u64,
+            oneshot::Receiver<CachedTipCut>,
+        )>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
         #[cfg(feature = "dag")] block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
@@ -216,24 +240,43 @@ impl BlockSequencer {
 
     async fn worker(&mut self, chan_depth: usize) -> Result<(), ()> {
         // DAG mode: sequence tip cuts for consensus layer
+        // Handle tip cuts similarly to batches: collect QCs, respect signature timer,
+        // pipeline parent digest, and forward to broadcaster.
         #[cfg(feature = "dag")]
-        {
-            tokio::select! {
-                biased;
-                _tipcut = self.tipcut_rx.recv() => {
-                    if let Some(tipcut) = _tipcut {
-                        self.handle_new_tipcut(tipcut).await;
-                    }
-                },
-                _cmd = self.control_command_rx.recv() => {
-                    self.handle_control_command(_cmd).await;
-                },
-            }
-            return Ok(());
-        }
+        // {
+        //     let mut qc_buf = Vec::new();
+
+        //     tokio::select! {
+        //         biased;
+        //         // Drain QCs eagerly (like traditional path)
+        //         _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+        //             if !qc_buf.is_empty() {
+        //                 self.add_qcs(qc_buf).await;
+        //             }
+        //         },
+        //         // Signature timer to bound QC attachment latency
+        //         _tick = self.signature_timer.wait() => {
+        //             self.force_sign_next_batch = true;
+        //         },
+        //         // Main input: incomplete tip cut from tip_cut_proposal
+        //         _tipcut = self.tipcut_rx.recv() => {
+        //             if let Some(tipcut) = _tipcut {
+        //                 self.__blocks_proposed_in_this_view += 1;
+        //                 // Projected seq num is used as entry id for perf (parity with blocks)
+        //                 self.perf_register(self.seq_num + 1);
+        //                 self.handle_new_tipcut(tipcut).await;
+        //             }
+        //         },
+        //         // Control commands (view changes etc.)
+        //         _cmd = self.control_command_rx.recv() => {
+        //             self.handle_control_command(_cmd).await;
+        //         },
+        //     }
+
+        //     return Ok(());
+        // }
 
         // Traditional mode: sequence batches into blocks
-        #[cfg(not(feature = "dag"))]
         {
             // The slow path needs 2-hop QCs to byz-commit.
             // If we assume the head of the chain is crash committed immediately (best case),
@@ -276,25 +319,51 @@ impl BlockSequencer {
             let mut qc_buf = Vec::new();
 
             if listen_for_new_batch {
-                tokio::select! {
-                    biased;
-                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                        self.add_qcs(qc_buf).await;
-                    }
-                    _tick = self.signature_timer.wait() => {
-                        self.force_sign_next_batch = true;
-                    },
-                    _batch_and_client_reply = self.batch_rx.recv() => {
-                        if let Some(_) = _batch_and_client_reply {
-                            self.__blocks_proposed_in_this_view += 1;
-                            let (batch, client_reply) = _batch_and_client_reply.unwrap();
-                            self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
-                            self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
+                #[cfg(not(feature = "dag"))]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                            self.add_qcs(qc_buf).await;
                         }
-                    },
-                    _cmd = self.control_command_rx.recv() => {
-                        self.handle_control_command(_cmd).await;
-                    },
+                        _tick = self.signature_timer.wait() => {
+                            self.force_sign_next_batch = true;
+                        },
+                        _batch_and_client_reply = self.batch_rx.recv() => {
+                            if let Some(_) = _batch_and_client_reply {
+                                self.__blocks_proposed_in_this_view += 1;
+                                let (batch, client_reply) = _batch_and_client_reply.unwrap();
+                                self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
+                                self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
+                            }
+                        },
+                        _cmd = self.control_command_rx.recv() => {
+                            self.handle_control_command(_cmd).await;
+                        },
+                    }
+                }
+                #[cfg(feature = "dag")]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                            self.add_qcs(qc_buf).await;
+                        }
+                        _tick = self.signature_timer.wait() => {
+                            self.force_sign_next_batch = true;
+                        },
+                        _tipcut = self.tipcut_rx.recv() => {
+                            if let Some(tipcut) = _tipcut {
+                                self.__blocks_proposed_in_this_view += 1;
+                                // Projected seq num is used as entry id for perf (parity with blocks)
+                                self.perf_register(self.seq_num + 1);
+                                self.handle_new_batch(tipcut, vec![], self.seq_num + 1).await;
+                            }
+                        },
+                        _cmd = self.control_command_rx.recv() => {
+                            self.handle_control_command(_cmd).await;
+                        },
+                    }
                 }
             } else if blocked_for_qc_pass {
                 tokio::select! {
@@ -313,26 +382,44 @@ impl BlockSequencer {
                     // There is no need to cancel requests here.
                 }
             } else {
-                tokio::select! {
-                    biased;
-                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                        self.add_qcs(qc_buf).await;
-                    }
-                    _cmd = self.control_command_rx.recv() => {
-                        self.handle_control_command(_cmd).await;
-                    },
-                    _batch_and_client_reply = self.batch_rx.recv() => {
-                        if let Some(_) = _batch_and_client_reply {
-                            let (_, client_reply) = _batch_and_client_reply.unwrap();
-                            let (tx, rx) = oneshot::channel();
-                            tx.send(vec![]).expect("Should be able to send hash");
-
-                            self.client_reply_tx
-                                .send((rx, client_reply))
-                                .await
-                                .expect("Should be able to send client_reply_tx");
+                #[cfg(not(feature = "dag"))]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                            self.add_qcs(qc_buf).await;
                         }
-                    },
+                        _cmd = self.control_command_rx.recv() => {
+                            self.handle_control_command(_cmd).await;
+                        },
+                        _batch_and_client_reply = self.batch_rx.recv() => {
+                            if let Some(_) = _batch_and_client_reply {
+                                let (_, client_reply) = _batch_and_client_reply.unwrap();
+                                let (tx, rx) = oneshot::channel();
+                                tx.send(vec![]).expect("Should be able to send hash");
+
+                                self.client_reply_tx
+                                    .send((rx, client_reply))
+                                    .await
+                                    .expect("Should be able to send client_reply_tx");
+                            }
+                        },
+                    }
+                }
+                #[cfg(feature = "dag")]
+                {
+                    tokio::select! {
+                        biased;
+                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                            self.add_qcs(qc_buf).await;
+                        }
+                        _cmd = self.control_command_rx.recv() => {
+                            self.handle_control_command(_cmd).await;
+                        },
+                        _tipcut = self.tipcut_rx.recv() => {
+                            trace!("Dropping tipcut because not leader or view not stable");
+                        },
+                    }
                 }
             }
 
@@ -342,9 +429,11 @@ impl BlockSequencer {
 
     async fn handle_new_batch(
         &mut self,
-        batch: RawBatch,
-        replies: Vec<MsgAckChanWithTag>,
-        fork_validation: Vec<ProtoForkValidation>,
+        #[cfg(not(feature = "dag"))] batch: RawBatch,
+        #[cfg(feature = "dag")] tipcut: ProtoTipCut,
+        #[cfg(not(feature = "dag"))] replies: Vec<MsgAckChanWithTag>,
+        #[cfg(not(feature = "dag"))] fork_validation: Vec<ProtoForkValidation>,
+        #[cfg(feature = "dag")] fork_validation: Vec<ProtoTipCutValidation>,
         perf_entry_id: u64,
     ) {
         self.seq_num += 1;
@@ -379,6 +468,7 @@ impl BlockSequencer {
 
         self.perf_add_event(perf_entry_id, "Add QCs", must_sign);
 
+        #[cfg(not(feature = "dag"))]
         let block = ProtoBlock {
             n,
             parent: Vec::new(),
@@ -396,20 +486,33 @@ impl BlockSequencer {
         let parent_hash_rx = self.parent_hash_rx.take();
         self.perf_add_event(perf_entry_id, "Create Block", must_sign);
 
+        #[cfg(not(feature = "dag"))]
         let (block_rx, hash_rx, hash_rx2) = self
             .crypto
             .prepare_block(block, must_sign, parent_hash_rx)
             .await;
+        #[cfg(feature = "dag")]
+        let (tipcut_rx, hash_rx, hash_rx2) = self
+            .crypto
+            .prepare_tipcut(tipcut, must_sign, parent_hash_rx)
+            .await;
         self.parent_hash_rx = FutureHash::Future(hash_rx);
 
+        #[cfg(not(feature = "dag"))]
         self.client_reply_tx
             .send((hash_rx2, replies))
             .await
             .expect("Should be able to send client_reply_tx");
         self.perf_add_event(perf_entry_id, "Send to Client Reply", must_sign);
 
+        #[cfg(not(feature = "dag"))]
         self.block_broadcaster_tx
             .send((n, block_rx))
+            .await
+            .expect("Should be able to send block_broadcaster_tx");
+        #[cfg(feature = "dag")]
+        self.block_broadcaster_tx
+            .send((n, tipcut_rx))
             .await
             .expect("Should be able to send block_broadcaster_tx");
         self.perf_add_event(perf_entry_id, "Send to Block Broadcaster", must_sign);
@@ -485,69 +588,10 @@ impl BlockSequencer {
                 self.parent_hash_rx = FutureHash::Immediate(new_parent_hash);
 
                 // Now the NEXT block (ie new_seq_num + 1) is going to be for NewView.
+                #[cfg(not(feature = "dag"))]
                 self.handle_new_batch(RawBatch::new(), vec![], fork_validation, 0)
                     .await;
             }
         }
-    }
-
-    /// Handle a new tip cut in DAG mode.
-    /// Compute digest using crypto service with pipelining support.
-    /// This mirrors the prepare_block pipelining pattern for consistency.
-    #[cfg(feature = "dag")]
-    async fn handle_new_tipcut(&mut self, mut tipcut: ProtoTipCut) {
-        // Assign sequence number within the tip cut chain
-        self.seq_num += 1;
-        tipcut.n = self.seq_num;
-
-        trace!(
-            "Sequencing tip cut #{} with {} tips",
-            tipcut.n,
-            tipcut.tips.len()
-        );
-
-        // Take parent hash for pipelining (like handle_new_batch does)
-        let parent_hash_rx = self.parent_hash_rx.take();
-
-        // Use crypto service to prepare tip cut with pipelining
-        // The crypto worker will await the parent hash asynchronously,
-        // allowing this tip cut to start processing before the previous one completes
-        let (tipcut_rx, digest_rx, digest_rx2) =
-            self.crypto.prepare_tipcut(tipcut, parent_hash_rx).await;
-
-        // Store future digest for next tip cut (enables pipelining)
-        self.parent_hash_rx = FutureHash::Future(digest_rx);
-
-        // Send tip cut to block_broadcaster via command
-        // The tipcut_rx will resolve when the crypto worker completes processing
-        let tipcut_future = tipcut_rx;
-        let digest_future = digest_rx2;
-
-        // Spawn a task to send the command once the tip cut is ready
-        let broadcaster_tx = self.block_broadcaster_command_tx.clone();
-        let view = self.view;
-        let view_is_stable = self.view_is_stable;
-        let config_num = self.config_num;
-
-        tokio::spawn(async move {
-            // Await the prepared tip cut
-            let tipcut = match tipcut_future.await {
-                Ok(tc) => tc,
-                Err(_) => {
-                    error!("Failed to receive prepared tip cut from crypto service");
-                    return;
-                }
-            };
-
-            // Send to broadcaster
-            let cmd =
-                BlockBroadcasterCommand::BroadcastTipCut(tipcut, view, view_is_stable, config_num);
-
-            if let Err(e) = broadcaster_tx.send(cmd).await {
-                error!("Failed to send tip cut to block_broadcaster: {:?}", e);
-            }
-
-            trace!("Tip cut sequenced and sent to block_broadcaster");
-        });
     }
 }

@@ -1,8 +1,15 @@
-use crate::{crypto::FutureHash, utils::channel::make_channel};
+use crate::{consensus::dag::tip_cut_proposal, crypto::FutureHash, utils::channel::make_channel};
+#[cfg(feature = "dag")]
+use crate::{crypto::CachedTipCut, proto::consensus::HalfSerializedTipCut};
 use std::{collections::VecDeque, io::Error, sync::Arc};
 
+use crate::crypto::DIGEST_LENGTH;
+use ed25519_dalek::SIGNATURE_LENGTH;
+use gluesql::core::chrono::naive::serde::ts_microseconds::serialize;
 use log::{debug, error, info, warn};
 use prost::Message;
+#[cfg(not(feature = "dag"))]
+use tokio::sync::broadcast;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::{
@@ -10,7 +17,7 @@ use crate::{
     crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType},
     proto::{
         checkpoint::ProtoBackfillNack,
-        consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoTipCut},
+        consensus::{HalfSerializedBlock, ProtoAppendEntries},
         rpc::ProtoPayload,
     },
     rpc::{client::PinnedClient, MessageRef, SenderType},
@@ -65,11 +72,23 @@ impl MultipartFork {
     }
 }
 
-/// TipCut proposal in DAG mode
+/// TipCut fork proposal in DAG mode (sequence of tip cuts analogous to blocks in a fork)
 #[cfg(feature = "dag")]
 pub struct MultipartTipCut {
-    pub tipcut: ProtoTipCut,
+    pub tipcut_future: Vec<Option<oneshot::Receiver<Result<CachedTipCut, Error>>>>,
+    pub remaining_parts: usize,
     pub ae_stats: AppendEntriesStats,
+}
+
+#[cfg(feature = "dag")]
+impl MultipartTipCut {
+    pub async fn await_all(&mut self) -> Vec<Result<CachedTipCut, Error>> {
+        let mut results = Vec::with_capacity(self.tipcut_future.len());
+        for fut in self.tipcut_future.iter_mut() {
+            results.push(fut.take().unwrap().await.unwrap());
+        }
+        results
+    }
 }
 
 /// Unified message type for both forks and tip cuts
@@ -112,7 +131,10 @@ pub struct ForkReceiver {
     command_rx: Receiver<ForkReceiverCommand>,
     broadcaster_tx: Sender<BroadcasterMessage>,
 
+    #[cfg(not(feature = "dag"))]
     multipart_buffer: VecDeque<(Vec<HalfSerializedBlock>, AppendEntriesStats)>,
+    #[cfg(feature = "dag")]
+    multipart_buffer: VecDeque<(Vec<HalfSerializedTipCut>, AppendEntriesStats)>,
 
     // Invariant <blocked_on_multipart>: multipart_buffer contains only parts from one AppendEntries.
     // If multipart_buffer is empty, blocked_on_multipart must be false.
@@ -183,12 +205,13 @@ impl ForkReceiver {
                         match &ae.entry {
                             Some(crate::proto::consensus::proto_append_entries::Entry::Fork(ref fork)) => {
                                 debug!("Received AppendEntries Fork({}) from {}", fork.serialized_blocks.last().unwrap().n, sender);
+                                #[cfg(not(feature = "dag"))]
                                 self.process_fork(ae, sender).await;
                             }
                             #[cfg(feature = "dag")]
-                            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(ref _tipcut)) => {
-                                debug!("Received AppendEntries TipCut from {}", sender);
-                                self.process_tipcut(ae, sender).await;
+                            Some(crate::proto::consensus::proto_append_entries::Entry::TipcutFork(ref _fork)) => {
+                                debug!("Received AppendEntries TipCutFork from {}", sender);
+                                self.process_fork(ae, sender).await;
                             }
                             #[cfg(not(feature = "dag"))]
                             Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(_)) => {
@@ -259,14 +282,31 @@ impl ForkReceiver {
         }
 
         let fork = match &mut ae.entry {
+            #[cfg(not(feature = "dag"))]
             Some(crate::proto::consensus::proto_append_entries::Entry::Fork(f)) => f,
+            #[cfg(feature = "dag")]
+            Some(crate::proto::consensus::proto_append_entries::Entry::TipcutFork(t)) => t,
             _ => return,
         };
 
         // if ae.view > self.view {
         // The first block of each view from self.view+1..=ae.view must have view_is_stable = false
         let mut test_view = self.view;
+        #[cfg(not(feature = "dag"))]
         for block in &fork.serialized_blocks {
+            if block.view > test_view {
+                if block.view_is_stable {
+                    self.send_nack(sender, ae).await;
+                    return;
+                } else {
+                    info!("Got New View message for view {}", block.view);
+                }
+
+                test_view = block.view;
+            }
+        }
+        #[cfg(feature = "dag")]
+        for block in &fork.serialized_tipcuts {
             if block.view > test_view {
                 if block.view_is_stable {
                     self.send_nack(sender, ae).await;
@@ -305,7 +345,28 @@ impl ForkReceiver {
         let mut curr_part = Some(Vec::new());
         let mut curr_config = self.config_num;
 
+        #[cfg(not(feature = "dag"))]
         for block in fork.serialized_blocks.drain(..) {
+            if block.config_num == curr_config {
+                curr_part.as_mut().unwrap().push(block);
+            } else {
+                curr_config = block.config_num;
+                // First block of the new config must have view_is_stable = false
+                if block.view_is_stable {
+                    warn!("Invalid block in AppendEntries: First block for config {} has view_is_stable = true", curr_config);
+
+                    return;
+                }
+                curr_part.as_mut().unwrap().push(block);
+                if let Some(part) = curr_part.take() {
+                    parts.push(part);
+                }
+
+                curr_part = Some(Vec::new());
+            }
+        }
+        #[cfg(feature = "dag")]
+        for block in fork.serialized_tipcuts.drain(..) {
             if block.config_num == curr_config {
                 curr_part.as_mut().unwrap().push(block);
             } else {
@@ -338,6 +399,7 @@ impl ForkReceiver {
 
         let first_part = parts.remove(0);
 
+        #[cfg(not(feature = "dag"))]
         let (multipart_fut, mut hash_receivers) = self
             .crypto
             .prepare_fork(
@@ -353,10 +415,29 @@ impl ForkReceiver {
                 self.byzantine_liveness_threshold(),
             )
             .await;
-        self.broadcaster_tx
-            .send(BroadcasterMessage::Fork(multipart_fut))
-            .await
-            .unwrap();
+        #[cfg(feature = "dag")]
+        let (multipart_fut, mut hash_receivers) = self
+            .crypto
+            .prepare_tipcut_fork(
+                first_part,
+                parts.len(),
+                AppendEntriesStats {
+                    view: ae.view,
+                    view_is_stable: ae.view_is_stable,
+                    config_num: ae.config_num,
+                    sender: sender.clone(),
+                    ci: ae.commit_index,
+                },
+                self.byzantine_liveness_threshold(),
+            )
+            .await;
+
+        #[cfg(not(feature = "dag"))]
+        let broadcaster_message = BroadcasterMessage::Fork(multipart_fut);
+        #[cfg(feature = "dag")]
+        let broadcaster_message = BroadcasterMessage::TipCut(multipart_fut);
+
+        self.broadcaster_tx.send(broadcaster_message).await.unwrap();
 
         self.continuity_stats.last_ae_block_hash =
             FutureHash::FutureResult(hash_receivers.pop().unwrap());
@@ -407,21 +488,42 @@ impl ForkReceiver {
                     };
 
                     if maybe_legit {
-                        let (multipart_fut, mut hash_receivers) = self
-                            .crypto
-                            .prepare_fork(
-                                part,
-                                self.multipart_buffer.len(),
-                                ae_stats,
-                                self.byzantine_liveness_threshold(),
-                            )
-                            .await;
-                        self.broadcaster_tx
-                            .send(BroadcasterMessage::Fork(multipart_fut))
-                            .await
-                            .unwrap();
-                        self.continuity_stats.last_ae_block_hash =
-                            FutureHash::FutureResult(hash_receivers.pop().unwrap());
+                        #[cfg(not(feature = "dag"))]
+                        {
+                            let (multipart_fut, mut hash_receivers) = self
+                                .crypto
+                                .prepare_fork(
+                                    part,
+                                    self.multipart_buffer.len(),
+                                    ae_stats,
+                                    self.byzantine_liveness_threshold(),
+                                )
+                                .await;
+                            self.broadcaster_tx
+                                .send(BroadcasterMessage::Fork(multipart_fut))
+                                .await
+                                .unwrap();
+                            self.continuity_stats.last_ae_block_hash =
+                                FutureHash::FutureResult(hash_receivers.pop().unwrap());
+                        }
+                        #[cfg(feature = "dag")]
+                        {
+                            let (multipart_fut, mut hash_receivers) = self
+                                .crypto
+                                .prepare_tipcut_fork(
+                                    part,
+                                    self.multipart_buffer.len(),
+                                    ae_stats,
+                                    self.byzantine_liveness_threshold(),
+                                )
+                                .await;
+                            self.broadcaster_tx
+                                .send(BroadcasterMessage::TipCut(multipart_fut))
+                                .await
+                                .unwrap();
+                            self.continuity_stats.last_ae_block_hash =
+                                FutureHash::FutureResult(hash_receivers.pop().unwrap());
+                        }
                     }
                 }
 
@@ -443,69 +545,6 @@ impl ForkReceiver {
                 let (name, _) = sender.to_name_and_sub_id();
                 self.process_fork(ae, name).await;
             }
-        }
-    }
-
-    #[cfg(feature = "dag")]
-    async fn process_tipcut(&mut self, ae: ProtoAppendEntries, sender: String) {
-        // Basic validation: view, config, leader checks
-        if ae.view < self.view || ae.config_num < self.config_num {
-            warn!(
-                "Old view TipCut received: ae view {} < my view {} or ae config num {} < my config num {}",
-                ae.view, self.view, ae.config_num, self.config_num
-            );
-            return;
-        }
-
-        if ae.config_num == self.config_num {
-            // Check if sender is the expected leader for this view
-            let leader = self.get_leader_for_view(ae.view);
-            if leader != sender {
-                warn!(
-                    "TipCut from non-leader: expected {}, got {}",
-                    leader, sender
-                );
-                return;
-            }
-        }
-
-        // Extract the tipcut from entry
-        let tipcut = match ae.entry {
-            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(tc)) => tc,
-            _ => {
-                warn!("process_tipcut called with non-tipcut entry");
-                return;
-            }
-        };
-
-        info!(
-            "Processing TipCut with {} CARs from {} for view {} (ci={})",
-            tipcut.tips.len(),
-            sender,
-            ae.view,
-            ae.commit_index
-        );
-
-        // Create stats for the tip cut
-        let ae_stats = AppendEntriesStats {
-            view: ae.view,
-            view_is_stable: ae.view_is_stable,
-            config_num: ae.config_num,
-            sender: sender.clone(),
-            ci: ae.commit_index,
-        };
-
-        // Create MultipartTipCut and send to broadcaster (staging)
-        let multipart_tipcut = MultipartTipCut { tipcut, ae_stats };
-
-        // Send to broadcaster for voting
-        // Note: The broadcaster will forward this to staging for voting
-        if let Err(e) = self
-            .broadcaster_tx
-            .send(BroadcasterMessage::TipCut(multipart_tipcut))
-            .await
-        {
-            error!("Failed to send tipcut to broadcaster: {:?}", e);
         }
     }
 
@@ -571,19 +610,34 @@ impl ForkReceiver {
     /// Assumption on Logserver: Eventually, the log server has all the log entries that staging has.
     async fn ensure_common_prefix(&mut self, ae: &ProtoAppendEntries) -> Result<(), ()> {
         let fork = match &ae.entry {
+            #[cfg(not(feature = "dag"))]
             Some(crate::proto::consensus::proto_append_entries::Entry::Fork(f)) => f,
+            #[cfg(feature = "dag")]
+            Some(crate::proto::consensus::proto_append_entries::Entry::TipcutFork(f)) => f,
             _ => {
                 warn!("Empty or non-fork AppendEntries received");
                 return Ok(());
             }
         };
+        #[cfg(not(feature = "dag"))]
         if fork.serialized_blocks.len() == 0 {
             warn!("Empty AppendEntries received");
             return Ok(());
         }
+        #[cfg(feature = "dag")]
+        if fork.serialized_tipcuts.len() == 0 {
+            warn!("Empty AppendEntries received");
+            return Ok(());
+        }
 
+        #[cfg(not(feature = "dag"))]
         let parent_hash = get_parent_hash_in_proto_block_ser(
             &fork.serialized_blocks.first().unwrap().serialized_body,
+        )
+        .unwrap();
+        #[cfg(feature = "dag")]
+        let parent_hash = get_parent_hash_in_proto_block_ser(
+            &fork.serialized_tipcuts.first().unwrap().serialized_body,
         )
         .unwrap();
 
@@ -620,7 +674,10 @@ impl ForkReceiver {
         }
 
         // Ask Logserver
+        #[cfg(not(feature = "dag"))]
         let parent_n = fork.serialized_blocks.first().unwrap().n - 1;
+        #[cfg(feature = "dag")]
+        let parent_n = fork.serialized_tipcuts.first().unwrap().n - 1;
         let _logserver_has_block =
             ask_logserver!(self, LogServerQuery::CheckHash, parent_n, parent_hash);
 
