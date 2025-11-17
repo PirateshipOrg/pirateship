@@ -119,11 +119,11 @@ hotstuff = ["round_robin_leader", "always_sign", "view_change", "no_pipeline", "
 pirateship = ["round_robin_leader", "dynamic_sign", "view_change"]
 
 # DAG Configurations
-# NOTE: Right now these enforce "always_sign" to get lane identifiers on blocks
-dag_pirateship = ["pirateship", "app_logger", "storage", "fast_path", "platforms", "dag", "always_sign"]
-dag_sraft = ["signed_raft", "app_logger", "storage", "fast_path", "platforms", "dag", "always_sign"]
+dag_pirateship = ["pirateship", "app_logger", "storage", "fast_path", "platforms", "dag"]
+dag_sraft = ["signed_raft", "app_logger", "storage", "fast_path", "platforms", "dag"]
 
 default = ["pirateship", "app_logger", "storage", "fast_path", "platforms"]
+# default = ["pirateship", "app_logger", "storage", "fast_path", "platforms", "dag", ]
 # default = ["jolteon", "app_logger", "storage"]
 # default = ["engraft", "app_kvs", "storage", "fast_path", "platforms"]
 
