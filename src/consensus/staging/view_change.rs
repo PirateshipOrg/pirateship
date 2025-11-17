@@ -6,6 +6,8 @@ use std::{
 use log::{error, info, trace, warn};
 use prost::Message as _;
 
+#[cfg(feature = "dag")]
+use crate::proto::consensus::HalfSerializedTipCut;
 use crate::{
     consensus::{
         block_broadcaster::BlockBroadcasterCommand, block_sequencer::BlockSequencerControlCommand,
@@ -16,7 +18,7 @@ use crate::{
     proto::{
         consensus::{
             HalfSerializedBlock, ProtoFork, ProtoForkValidation, ProtoQuorumCertificate,
-            ProtoViewChange,
+            ProtoTipCutFork, ProtoTipCutValidation, ProtoViewChange,
         },
         rpc::ProtoPayload,
     },
@@ -36,6 +38,11 @@ pub struct ForkStat {
     pub last_view: u64,
     pub last_config_num: u64,
 }
+
+#[cfg(not(feature = "dag"))]
+pub type ForkChoice = (ForkStat, Vec<ProtoForkValidation>);
+#[cfg(feature = "dag")]
+pub type ForkChoice = (ForkStat, Vec<ProtoTipCutValidation>);
 
 impl Staging {
     pub(super) async fn process_view_change_message(
@@ -168,14 +175,15 @@ impl Staging {
         }
 
         // Choose a fork to propose.
-        let (chosen_fork, fork_validation) = self.apply_fork_choice_rule(&mut forks).await;
+        // FIXME: support TC for choice
+        let (chosen_fork, validation) = self.apply_fork_choice_rule(&mut forks).await;
 
         let retain_n = self
             .check_byz_commit_invariant(&chosen_fork)
             .expect("Invariant <ByzCommit> violated");
 
-        // Clean up pending_blocks
-        self.pending_blocks.retain(|b| b.block.block.n <= retain_n);
+        // Clean up pending_votes
+        self.pending_votes.retain(|b| b.block_or_tc.n() <= retain_n);
         if self.ci > retain_n {
             self.ci = retain_n;
             // Signal rollback.
@@ -189,13 +197,13 @@ impl Staging {
         let new_last_n = chosen_fork.fork_last_n;
         let new_parent_hash = if chosen_fork.block_hashes.len() > 0 {
             chosen_fork.block_hashes[chosen_fork.block_hashes.len() - 1].clone()
-        } else if self.pending_blocks.len() > 0 {
-            self.pending_blocks.back().unwrap().block.block_hash.clone()
+        } else if self.pending_votes.len() > 0 {
+            self.pending_votes.back().unwrap().block_or_tc.digest()
         } else if self.curr_parent_for_pending.is_some() {
             self.curr_parent_for_pending
                 .as_ref()
                 .unwrap()
-                .block_hash
+                .digest()
                 .clone()
         } else {
             default_hash()
@@ -204,7 +212,7 @@ impl Staging {
             .send(BlockSequencerControlCommand::NewViewMessage(
                 self.view,
                 self.config_num,
-                fork_validation,
+                validation,
                 new_parent_hash,
                 new_last_n,
             ))
@@ -216,7 +224,7 @@ impl Staging {
     pub(super) async fn maybe_stabilize_view(&mut self, qc: &ProtoQuorumCertificate) {
         // The new view message must be the VERY LAST block in pending now.
         // The QC present here must on that last block.
-        let last_n = self.pending_blocks.back().as_ref().unwrap().block.block.n;
+        let last_n = self.pending_votes.back().as_ref().unwrap().block_or_tc.n();
         // if qc.n < last_n {
         //     info!("Fail 1");
         //     return;
@@ -264,49 +272,97 @@ impl Staging {
     }
 
     async fn create_my_vc_msg(&mut self) -> ProtoViewChange {
-        // We will send everything from pending_blocks and the curr parent.
+        // We will send everything from pending_votes and the curr parent.
         // ie self.bci onwards
         let mut my_fork = if self.curr_parent_for_pending.is_some() {
             let _parent = self.curr_parent_for_pending.as_ref().unwrap();
+
+            #[cfg(not(feature = "dag"))]
             let half_serialized_block = HalfSerializedBlock {
-                n: _parent.block.n,
-                view: _parent.block.view,
-                view_is_stable: _parent.block.view_is_stable,
-                config_num: _parent.block.config_num,
-                serialized_body: _parent.block_ser.clone(),
+                n: _parent.n(),
+                view: _parent.view(),
+                view_is_stable: _parent.view_is_stable(),
+                config_num: _parent.config_num(),
+                serialized_body: _parent.ser(),
             };
-            ProtoFork {
-                serialized_blocks: vec![half_serialized_block],
+            #[cfg(feature = "dag")]
+            let half_serialized_tipcut = HalfSerializedTipCut {
+                n: _parent.n(),
+                view: _parent.view(),
+                view_is_stable: _parent.view_is_stable(),
+                config_num: _parent.config_num(),
+                serialized_body: _parent.ser(),
+            };
+            #[cfg(not(feature = "dag"))]
+            {
+                ProtoFork {
+                    serialized_blocks: vec![half_serialized_block],
+                }
+            }
+            #[cfg(feature = "dag")]
+            {
+                ProtoTipCutFork {
+                    serialized_tipcuts: vec![half_serialized_tipcut],
+                }
             }
         } else {
-            ProtoFork {
-                serialized_blocks: Vec::new(),
+            #[cfg(not(feature = "dag"))]
+            {
+                ProtoFork {
+                    serialized_blocks: Vec::new(),
+                }
+            }
+            #[cfg(feature = "dag")]
+            {
+                ProtoTipCutFork {
+                    serialized_tipcuts: Vec::new(),
+                }
             }
         };
 
+        #[cfg(not(feature = "dag"))]
         my_fork
             .serialized_blocks
-            .extend(self.pending_blocks.iter().map(|b| HalfSerializedBlock {
-                n: b.block.block.n,
-                view: b.block.block.view,
-                view_is_stable: b.block.block.view_is_stable,
-                config_num: b.block.block.config_num,
-                serialized_body: b.block.block_ser.clone(),
+            .extend(self.pending_votes.iter().map(|b| HalfSerializedBlock {
+                n: b.block_or_tc.n(),
+                view: b.block_or_tc.view(),
+                view_is_stable: b.block_or_tc.view_is_stable(),
+                config_num: b.block_or_tc.config_num(),
+                serialized_body: b.block_or_tc.ser(),
             }));
-
+        #[cfg(feature = "dag")]
+        my_fork
+            .serialized_tipcuts
+            .extend(self.pending_votes.iter().map(|b| HalfSerializedTipCut {
+                n: b.block_or_tc.n(),
+                view: b.block_or_tc.view(),
+                view_is_stable: b.block_or_tc.view_is_stable(),
+                config_num: b.block_or_tc.config_num(),
+                serialized_body: b.block_or_tc.ser(),
+            }));
         // Fork sig will be the sig on the hash of the last block.
-        let fork_last_n = if self.pending_blocks.len() > 0 {
-            self.pending_blocks.back().unwrap().block.block.n
+        let fork_last_n = if self.pending_votes.len() > 0 {
+            self.pending_votes.back().unwrap().block_or_tc.n()
         } else if self.curr_parent_for_pending.is_some() {
-            self.curr_parent_for_pending.as_ref().unwrap().block.n
+            self.curr_parent_for_pending.as_ref().unwrap().n()
         } else {
             0
         };
 
+        let f_fork;
+        #[cfg(not(feature = "dag"))]
+        {
+            f_fork = crate::proto::consensus::proto_view_change::Fork::F(my_fork);
+        }
+        #[cfg(feature = "dag")]
+        {
+            f_fork = crate::proto::consensus::proto_view_change::Fork::Tc(my_fork);
+        }
+
         let vc = ProtoViewChange {
             view: self.view,
             config_num: self.config_num,
-            fork: Some(my_fork),
+            fork: Some(f_fork),
             fork_sig: vec![],
             fork_last_n,
             fork_last_qc: self.last_qc.clone(),
@@ -335,7 +391,7 @@ impl Staging {
     async fn apply_fork_choice_rule(
         &mut self,
         forks: &mut HashMap<SenderType, ProtoViewChange>,
-    ) -> (ForkStat, Vec<ProtoForkValidation>) {
+    ) -> ForkChoice {
         let mut fork_stats = self.vc_to_stats(forks).await;
 
         let fork_validation = self.stats_to_validation(&fork_stats, forks);
@@ -352,6 +408,7 @@ impl Staging {
         (chosen_fork_stat, fork_validation)
     }
 
+    #[cfg(not(feature = "dag"))]
     fn stats_to_validation(
         &self,
         fork_stats: &HashMap<SenderType, ForkStat>,
@@ -380,65 +437,160 @@ impl Staging {
             .collect()
     }
 
+    #[cfg(feature = "dag")]
+    fn stats_to_validation(
+        &self,
+        fork_stats: &HashMap<SenderType, ForkStat>,
+        vc: &HashMap<SenderType, ProtoViewChange>,
+    ) -> Vec<ProtoTipCutValidation> {
+        fork_stats
+            .iter()
+            .map(|(sender, stat)| {
+                let (vc_view, vc_config_num, vc_sig) = vc
+                    .get(sender)
+                    .map(|e| (e.view, e.config_num, e.fork_sig.clone()))
+                    .unwrap();
+                let (sender, _) = sender.to_name_and_sub_id();
+                ProtoTipCutValidation {
+                    vc_view,
+                    vc_config_num,
+                    tc_hashes: stat.block_hashes.clone(),
+                    tc_last_n: stat.fork_last_n,
+                    tc_last_qc: stat.last_qc.clone(),
+                    tc_last_view: stat.last_view,
+                    tc_last_config_num: stat.last_config_num,
+                    vc_sig,
+                    sender,
+                }
+            })
+            .collect()
+    }
+
     async fn send_blocks_to_broadcaster_and_get_stats(&mut self, vc: ProtoViewChange) -> ForkStat {
-        let fork = vc.fork.as_ref().unwrap();
-        let block_and_hash_futs = self
-            .crypto
-            .prepare_for_rebroadcast(
-                fork.serialized_blocks.clone(),
-                self.byzantine_liveness_threshold(),
-            )
-            .await;
+        match &vc.fork {
+            #[cfg(not(feature = "dag"))]
+            Some(crate::proto::consensus::proto_view_change::Fork::F(fork)) => {
+                let block_and_hash_futs = self
+                    .crypto
+                    .prepare_for_rebroadcast(
+                        fork.serialized_blocks.clone(),
+                        self.byzantine_liveness_threshold(),
+                    )
+                    .await;
 
-        let (block_futs, hash_futs) = block_and_hash_futs
-            .into_iter()
-            .collect::<(Vec<_>, Vec<_>)>();
+                let (block_futs, hash_futs) = block_and_hash_futs
+                    .into_iter()
+                    .collect::<(Vec<_>, Vec<_>)>();
 
-        self.block_broadcaster_command_tx
-            .send(BlockBroadcasterCommand::NextAEForkPrefix(block_futs))
-            .await
-            .unwrap();
+                self.block_broadcaster_command_tx
+                    .send(BlockBroadcasterCommand::NextAEForkPrefix(block_futs))
+                    .await
+                    .unwrap();
 
-        let mut block_hashes = Vec::new();
-        for hash_fut in hash_futs {
-            // Since Pacemaker is supposed to verify all these blocks before sending them here, unwrap is safe.
-            block_hashes.push(hash_fut.await.unwrap().unwrap());
-        }
+                let mut block_hashes = Vec::new();
+                for hash_fut in hash_futs {
+                    // Since Pacemaker is supposed to verify all these blocks before sending them here, unwrap is safe.
+                    block_hashes.push(hash_fut.await.unwrap().unwrap());
+                }
 
-        let (first_n, first_parent) = if fork.serialized_blocks.len() > 0 {
-            let first_block = &fork.serialized_blocks[0];
-            (
-                first_block.n,
-                get_parent_hash_in_proto_block_ser(&first_block.serialized_body).unwrap(),
-            )
-        } else {
-            (0, default_hash())
-        };
+                let (first_n, first_parent) = if fork.serialized_blocks.len() > 0 {
+                    let first_block = &fork.serialized_blocks[0];
+                    (
+                        first_block.n,
+                        get_parent_hash_in_proto_block_ser(&first_block.serialized_body).unwrap(),
+                    )
+                } else {
+                    (0, default_hash())
+                };
 
-        let (last_view, last_config_num, last_n) = fork
-            .serialized_blocks
-            .last()
-            .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
+                let (last_view, last_config_num, last_n) = fork
+                    .serialized_blocks
+                    .last()
+                    .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
 
-        ForkStat {
-            fork_last_n: last_n,
-            block_hashes,
-            first_n,
-            first_parent,
-            last_qc: vc.fork_last_qc.clone(),
-            last_view,
-            last_config_num,
+                ForkStat {
+                    fork_last_n: last_n,
+                    block_hashes,
+                    first_n,
+                    first_parent,
+                    last_qc: vc.fork_last_qc.clone(),
+                    last_view,
+                    last_config_num,
+                }
+            }
+            #[cfg(feature = "dag")]
+            Some(crate::proto::consensus::proto_view_change::Fork::Tc(fork)) => {
+                let block_and_hash_futs = self
+                    .crypto
+                    .prepare_for_rebroadcast(
+                        fork.serialized_tipcuts.clone(),
+                        self.byzantine_liveness_threshold(),
+                    )
+                    .await;
+
+                let (block_futs, hash_futs) = block_and_hash_futs
+                    .into_iter()
+                    .collect::<(Vec<_>, Vec<_>)>();
+
+                self.block_broadcaster_command_tx
+                    .send(BlockBroadcasterCommand::NextAEForkPrefix(block_futs))
+                    .await
+                    .unwrap();
+
+                let mut block_hashes = Vec::new();
+                for hash_fut in hash_futs {
+                    // Since Pacemaker is supposed to verify all these tipcuts before sending them here, unwrap is safe.
+                    block_hashes.push(hash_fut.await.unwrap().unwrap());
+                }
+
+                let (first_n, first_parent) = if fork.serialized_tipcuts.len() > 0 {
+                    let first_block = &fork.serialized_tipcuts[0];
+                    (
+                        first_block.n,
+                        get_parent_hash_in_proto_block_ser(&first_block.serialized_body).unwrap(),
+                    )
+                } else {
+                    (0, default_hash())
+                };
+
+                let (last_view, last_config_num, last_n) = fork
+                    .serialized_tipcuts
+                    .last()
+                    .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
+
+                ForkStat {
+                    fork_last_n: last_n,
+                    block_hashes,
+                    first_n,
+                    first_parent,
+                    last_qc: vc.fork_last_qc.clone(),
+                    last_view,
+                    last_config_num,
+                }
+            }
+            _ => {
+                warn!("No fork in VC");
+                ForkStat {
+                    fork_last_n: 0,
+                    block_hashes: Vec::new(),
+                    first_n: 0,
+                    first_parent: default_hash(),
+                    last_qc: None,
+                    last_view: 0,
+                    last_config_num: 0,
+                }
+            }
         }
     }
 
     /// Invariant <ByzCommit>:
-    /// Remember that pending_blocks.first() is the first block that's not byz committed.
+    /// Remember that pending_votes.first() is the first block that's not byz committed.
     /// So it's parent must be byz committed. Let's call it `curr_parent`.
     /// This leaves with 2 cases:
     /// - Chosen fork starts with some seq num n <= bci, then `curr_parent` must be part of the fork.
-    /// - Chosen fork starts with some seq num n > bci, then the parent of the first block must be either in pending_blocks or be `curr_parent`.
+    /// - Chosen fork starts with some seq num n > bci, then the parent of the first block must be either in pending_votes or be `curr_parent`.
     /// (To ensure this, the pacemaker must have Nacked until there was a fork history match).
-    /// On success, returns the max seq num to retain in pending_blocks.
+    /// On success, returns the max seq num to retain in pending_votes.
     fn check_byz_commit_invariant(&self, chosen_fork: &ForkStat) -> Result<u64, ()> {
         if self.bci == 0 {
             // Nothing to do here.
@@ -449,11 +601,11 @@ impl Staging {
         let curr_parent = self.curr_parent_for_pending.as_ref().unwrap();
 
         if chosen_fork.fork_last_n == 0 {
-            // Retain everything in pending_blocks.
+            // Retain everything in pending_votes.
             let last_n = self
-                .pending_blocks
+                .pending_votes
                 .back()
-                .map_or(self.bci, |b| b.block.block.n);
+                .map_or(self.bci, |b| b.block_or_tc.n());
             warn!("Case 0.1");
             return Ok(last_n);
         }
@@ -463,11 +615,11 @@ impl Staging {
             if !chosen_fork
                 .block_hashes
                 .iter()
-                .any(|h| h.eq(&curr_parent.block_hash))
+                .any(|h| h.eq(&curr_parent.digest()))
             {
                 return Err(());
             } else {
-                // Wipe everything from pending_blocks.
+                // Wipe everything from pending_votes.
                 warn!("Case 1");
                 return Ok(self.bci);
             }
@@ -475,10 +627,10 @@ impl Staging {
             let parent_hash = &chosen_fork.first_parent;
             // 2nd case
             if chosen_fork.first_n == self.bci + 1 {
-                if !curr_parent.block_hash.eq(parent_hash) {
+                if !curr_parent.digest().eq(parent_hash) {
                     return Err(());
                 } else {
-                    // Wipe everything from pending_blocks.
+                    // Wipe everything from pending_votes.
                     warn!("Case 2.1");
 
                     return Ok(self.bci);
@@ -486,12 +638,12 @@ impl Staging {
             } else {
                 // first_block.block.n > self.bci + 1
                 let find_n_in_pending = chosen_fork.first_n - 1;
-                if !self.pending_blocks.iter().any(|b| {
-                    b.block.block.n == find_n_in_pending && b.block.block_hash.eq(parent_hash)
+                if !self.pending_votes.iter().any(|b| {
+                    b.block_or_tc.n() == find_n_in_pending && b.block_or_tc.digest().eq(parent_hash)
                 }) {
                     return Err(());
                 } else {
-                    // Wipe everything from pending_blocks before first_block.block.n
+                    // Wipe everything from pending_votes before first_block.block.n
                     warn!("Case 2.2 {} {}", find_n_in_pending, self.bci);
 
                     return Ok(find_n_in_pending);

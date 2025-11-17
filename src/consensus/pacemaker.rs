@@ -218,11 +218,21 @@ impl Pacemaker {
 
         // Check if the provided fork points back to a hash we have in our log.
         let (fork_parent_n, fork_parent_hash) = match &vc.fork {
-            Some(fork) if fork.serialized_blocks.len() > 0 => {
+            Some(crate::proto::consensus::proto_view_change::Fork::F(fork))
+                if fork.serialized_blocks.len() > 0 =>
+            {
                 let first_block = &fork.serialized_blocks[0];
                 let parent_hash =
                     get_parent_hash_in_proto_block_ser(&first_block.serialized_body).unwrap();
                 (first_block.n - 1, parent_hash)
+            }
+            Some(crate::proto::consensus::proto_view_change::Fork::Tc(fork))
+                if fork.serialized_tipcuts.len() > 0 =>
+            {
+                let first_tc = &fork.serialized_tipcuts[0];
+                let parent_hash =
+                    get_parent_hash_in_proto_block_ser(&first_tc.serialized_body).unwrap();
+                (first_tc.n - 1, parent_hash)
             }
             _ => (0, Vec::new()),
         };

@@ -8,11 +8,12 @@ use tokio::{sync::oneshot, task::spawn_local};
 
 use crate::{
     consensus::{
+        dag::lane_staging,
         extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand},
         logserver::LogServerCommand,
         pacemaker::PacemakerCommand,
     },
-    crypto::{CachedBlock, DIGEST_LENGTH},
+    crypto::{CachedBlock, HashType, DIGEST_LENGTH},
     proto::{
         consensus::{
             proto_block::Sig, ProtoNameWithSignature, ProtoQuorumCertificate,
@@ -32,7 +33,7 @@ use super::{
         client_reply::ClientReplyCommand,
         fork_receiver::{AppendEntriesStats, ForkReceiverCommand},
     },
-    CachedBlockWithVotes, Staging,
+    BlockOrTipCut, CachedBlockWithVotes, CachedWithVotes, Staging,
 };
 
 impl Staging {
@@ -42,6 +43,7 @@ impl Staging {
         leader == config.net_config.name
     }
 
+    // TODO: Update perf stats to include tip cuts.
     fn perf_register_block(&self, block: &CachedBlock) {
         #[cfg(feature = "perf")]
         if let Some(Sig::ProposerSig(_)) = block.block.sig {
@@ -55,6 +57,7 @@ impl Staging {
         }
     }
 
+    // TODO: Update perf stats to include tip cuts.
     fn perf_deregister_block(&self, block: &CachedBlock) {
         #[cfg(feature = "perf")]
         if let Some(Sig::ProposerSig(_)) = block.block.sig {
@@ -68,6 +71,7 @@ impl Staging {
         }
     }
 
+    // TODO: Update perf stats to include tip cuts.
     #[cfg(feature = "perf")]
     fn perf_add_event(
         &self,
@@ -87,9 +91,11 @@ impl Staging {
         }
     }
 
+    // TODO: Update perf stats to include tip cuts.
     #[cfg(not(feature = "perf"))]
     fn perf_add_event(&self, _block: &CachedBlock, _event: &str) {}
 
+    // TODO: Update perf stats to include tip cuts.
     fn perf_add_event_from_perf_stats(&self, signed: bool, block_n: u64, event: &str) {
         #[cfg(feature = "perf")]
         if signed {
@@ -143,35 +149,36 @@ impl Staging {
     /// Either block.n === last block of pending_blocks + 1 and the hash link matches.
     /// Or block.n is in pending blocks, so it's hash must be present.
     /// Or block.n <= self.bci, so we can return false and safely ignore doing anything with this block.
-    fn check_continuity(&self, block: &CachedBlock) -> bool {
-        if self.pending_blocks.len() == 0 {
+    fn check_continuity(&self, btc: &BlockOrTipCut) -> bool {
+        let n = btc.n();
+        if self.pending_votes.len() == 0 {
             if self.curr_parent_for_pending.is_none() {
-                return block.block.n == 1;
+                return n == 1;
             } else {
-                let parent = &block.block.parent;
-                return parent.eq(&self.curr_parent_for_pending.as_ref().unwrap().block_hash)
-                    && block.block.n == self.curr_parent_for_pending.as_ref().unwrap().block.n + 1;
+                let parent = btc.parent();
+
+                return parent.eq(&self.curr_parent_for_pending.as_ref().unwrap().digest())
+                    && n == self.curr_parent_for_pending.as_ref().unwrap().n() + 1;
             }
         }
 
-        let last_block = self.pending_blocks.back().unwrap();
-        let first_block = self.pending_blocks.front().unwrap();
+        let last_entry = self.pending_votes.back().unwrap();
+        let first_entry = self.pending_votes.front().unwrap();
 
-        if block.block.n > last_block.block.block.n + 1 {
+        if n > last_entry.block_or_tc.n() + 1 {
             return false;
         }
-
-        if block.block.n < first_block.block.block.n {
+        if n < first_entry.block_or_tc.n() {
             return false;
         }
-
-        if block.block.n == last_block.block.block.n + 1 {
-            return block.block.parent.eq(&last_block.block.block_hash);
+        if n == last_entry.block_or_tc.n() + 1 {
+            let parent = btc.parent();
+            return parent.eq(&last_entry.block_or_tc.parent());
         }
 
-        self.pending_blocks
+        self.pending_votes
             .iter()
-            .any(|b| b.block.block.n == block.block.n && b.block.block_hash.eq(&block.block_hash))
+            .any(|b| b.block_or_tc.n() == n && b.block_or_tc.digest().eq(&btc.digest()))
     }
 
     pub(super) async fn handle_view_change_timer_tick(&mut self) -> Result<(), ()> {
@@ -215,13 +222,13 @@ impl Staging {
         Ok(())
     }
 
-    async fn vote_on_last_block_for_self(
+    async fn vote_on_last_btc_for_self(
         &mut self,
         storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
         let name = self.config.get().net_config.name.clone();
 
-        let last_block = match self.pending_blocks.back() {
+        let last_btc = match self.pending_votes.back() {
             Some(b) => b,
             None => return Err(()),
         };
@@ -233,12 +240,13 @@ impl Staging {
         }
         let _ = storage_ack.await.unwrap();
 
-        self.perf_add_event(&last_block.block, "Storage");
+        // FIXME: Handle tip cuts here.
+        // self.perf_add_event(&last_btc.block, "Storage");
 
         let mut vote = ProtoVote {
             sig_array: Vec::with_capacity(1),
-            digest: last_block.block.block_hash.clone(),
-            n: last_block.block.block.n,
+            digest: last_btc.block_or_tc.digest(),
+            n: last_btc.block_or_tc.n(),
             view: self.view,
             config_num: self.config_num,
         };
@@ -247,16 +255,17 @@ impl Staging {
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.digest.clone());
 
         // If this block is signed, need a signature for the vote.
-        if let Some(Sig::ProposerSig(_)) = last_block.block.block.sig {
-            let vote_sig = self.crypto.sign(&last_block.block.block_hash).await;
+        if let Some(_) = last_btc.block_or_tc.sig() {
+            let vote_sig = self.crypto.sign(&last_btc.block_or_tc.digest()).await;
 
             vote.sig_array.push(ProtoSignatureArrayEntry {
-                n: last_block.block.block.n,
+                n: last_btc.block_or_tc.n(),
                 sig: vote_sig.to_vec(),
             });
         }
 
-        self.perf_add_event(&last_block.block, "Vote to Self");
+        // FIXME: Handle tip cuts here.
+        // self.perf_add_event(&last_block.block, "Vote to Self");
 
         #[cfg(feature = "extra_2pc")]
         {
@@ -306,11 +315,11 @@ impl Staging {
         }
     }
 
-    async fn send_vote_on_last_block_to_leader(
+    async fn send_vote_on_last_btc_to_leader(
         &mut self,
         storage_ack: oneshot::Receiver<StorageAck>,
     ) -> Result<(), ()> {
-        let last_block = match self.pending_blocks.back() {
+        let last_btc = match self.pending_votes.back() {
             Some(b) => b,
             None => return Err(()),
         };
@@ -324,7 +333,7 @@ impl Staging {
 
         // I will resend all the signatures in pending_blocks that I have not received a QC for.
         // But only if the last block was signed.
-        let sig_array = if let Some(Sig::ProposerSig(_)) = last_block.block.block.sig {
+        let sig_array = if let Some(_) = last_btc.block_or_tc.sig() {
             self.pending_signatures
                 .iter()
                 .map(|(_, sig)| sig.clone())
@@ -335,8 +344,8 @@ impl Staging {
 
         let mut vote = ProtoVote {
             sig_array,
-            digest: last_block.block.block_hash.clone(),
-            n: last_block.block.block.n,
+            digest: last_btc.block_or_tc.digest(),
+            n: last_btc.block_or_tc.n(),
             view: self.view,
             config_num: self.config_num,
         };
@@ -345,16 +354,16 @@ impl Staging {
         let (_vote_n, _vote_view, _vote_digest) = (vote.n, vote.view, vote.digest.clone());
 
         // If this block is signed, need a signature for the vote.
-        if let Some(Sig::ProposerSig(_)) = last_block.block.block.sig {
-            let vote_sig = self.crypto.sign(&last_block.block.block_hash).await;
+        if let Some(_) = last_btc.block_or_tc.sig() {
+            let vote_sig = self.crypto.sign(&last_btc.block_or_tc.digest()).await;
             let sig_entry = ProtoSignatureArrayEntry {
-                n: last_block.block.block.n,
+                n: last_btc.block_or_tc.n(),
                 sig: vote_sig.to_vec(),
             };
             vote.sig_array.push(sig_entry.clone());
 
             self.pending_signatures
-                .push_back((last_block.block.block.n, sig_entry));
+                .push_back((last_btc.block_or_tc.n(), sig_entry));
         }
 
         let leader = self
@@ -414,10 +423,10 @@ impl Staging {
             let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
             // .unwrap();
 
-            if last_block.block.block.view_is_stable {
-                trace!("Sent vote to {} for {}", leader, last_block.block.block.n);
+            if last_btc.block_or_tc.view_is_stable() {
+                trace!("Sent vote to {} for {}", leader, last_btc.block_or_tc.n());
             } else {
-                info!("Sent vote to {} for {}", leader, last_block.block.block.n);
+                info!("Sent vote to {} for {}", leader, last_btc.block_or_tc.n());
             }
         }
 
@@ -425,15 +434,15 @@ impl Staging {
     }
 
     #[async_recursion]
-    pub(super) async fn process_block_as_leader(
+    pub(super) async fn process_btc_as_leader(
         &mut self,
-        block: CachedBlock,
+        btc: BlockOrTipCut,
         storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
-        this_is_final_block: bool,
+        this_is_final: bool,
     ) -> Result<(), ()> {
         if !self.view_is_stable {
-            trace!("Processing block {} as leader", block.block.n);
+            trace!("Processing block {} as leader", btc.n());
         }
         if ae_stats.view < self.view {
             // Do not accept anything from a lower view.
@@ -459,26 +468,26 @@ impl Staging {
                 // But not Unstable --> Stable; it has to be checked through QCs.
             }
             if !self.view_is_stable {
-                if !block.block.view_is_stable {
+                if !btc.view_is_stable() {
                     info!("New View message for view {}", self.view);
                 }
                 // Signal a rollback, if necessary
                 // self.pending_blocks
                 //     .retain(|e| e.block.block.n < block.block.n);
-                self.rollback(block.block.n - 1).await;
+                self.rollback(btc.n() - 1).await;
             }
             // Invariant <ViewLock>: Within the same view, the log must be append-only.
-            if !self.check_continuity(&block) {
+            if !self.check_continuity(&btc) {
                 warn!("Continuity broken");
-                if block.block.n == self.bci {
+                if btc.n() == self.bci {
                     // This is just a sanity check.
                     if self.curr_parent_for_pending.is_some()
                         && !self
                             .curr_parent_for_pending
                             .as_ref()
                             .unwrap()
-                            .block_hash
-                            .eq(&block.block_hash)
+                            .digest()
+                            .eq(&btc.digest())
                     {
                         error!("Trying to override a byz-committed block!!");
                     }
@@ -511,7 +520,7 @@ impl Staging {
                 .unwrap();
 
             // Flush the pending queue and cancel client requests.
-            self.rollback(block.block.n - 1).await;
+            self.rollback(btc.n() - 1).await;
             // let old_pending_len = self.pending_blocks.len();
             // self.pending_blocks
             //     .retain(|e| e.block.block.n < block.block.n);
@@ -526,7 +535,7 @@ impl Staging {
                 .unwrap();
 
             // None of the votes from the lower views should count anymore!
-            self.pending_blocks.iter_mut().for_each(|e| {
+            self.pending_votes.iter_mut().for_each(|e| {
                 e.replication_set.clear();
                 e.vote_sigs.clear();
             });
@@ -534,40 +543,52 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_btc_as_leader(btc, storage_ack, ae_stats, this_is_final)
                     .await;
             } else {
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_btc_as_follower(btc, storage_ack, ae_stats, this_is_final)
                     .await;
             }
         }
 
-        self.perf_register_block(&block);
-        self.logserver_tx
-            .send(LogServerCommand::NewBlock(block.clone()))
-            .await
-            .unwrap();
-        self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
+        // FIXME
+        // self.perf_register_block(&block);
+        match &btc {
+            BlockOrTipCut::Block(b) => {
+                self.logserver_tx
+                    .send(LogServerCommand::NewBlock(b.clone()))
+                    .await
+                    .unwrap();
+            }
+            BlockOrTipCut::TipCut(tc) => {
+                self.logserver_tx
+                    .send(LogServerCommand::NewTipCut(tc.clone()))
+                    .await
+                    .unwrap();
+            }
+        }
+        self.__ae_seen_in_this_view += if this_is_final { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && i_am_leader
-        let block_view_is_stable = block.block.view_is_stable;
-        let block_view = block.block.view;
+        let block_view_is_stable = btc.view_is_stable();
+        let block_view = btc.view();
 
-        let block_with_votes = CachedBlockWithVotes {
-            block,
+        let btc_with_votes = CachedWithVotes {
+            block_or_tc: btc,
             vote_sigs: HashMap::new(),
             replication_set: HashSet::new(),
             qc_is_proposed: false,
             fast_qc_is_proposed: false,
         };
 
-        self.pending_blocks.push_back(block_with_votes);
+        self.pending_votes.push_back(btc_with_votes);
 
-        self.perf_add_event(
-            &self.pending_blocks.iter().last().unwrap().block,
-            "Push to Pending",
-        );
+        // FIXME
+        // self.perf_add_event(
+        //     &self.pending_votes.iter().last().unwrap().block,
+        //     "Push to Pending",
+        // );
 
         // Now vote for self
 
@@ -579,8 +600,8 @@ impl Staging {
         //     return Ok(());
         // }
 
-        if this_is_final_block {
-            self.vote_on_last_block_for_self(storage_ack).await?;
+        if this_is_final {
+            self.vote_on_last_btc_for_self(storage_ack).await?;
         } else {
             self.__storage_ack_buffer.push_back(storage_ack);
         }
@@ -590,15 +611,16 @@ impl Staging {
 
     /// This has a lot of similarities with process_block_as_leader.
     #[async_recursion]
-    pub(super) async fn process_block_as_follower(
+    pub(super) async fn process_btc_as_follower(
         &mut self,
-        block: CachedBlock,
+        // block: CachedBlock,
+        btc: BlockOrTipCut,
         storage_ack: oneshot::Receiver<StorageAck>,
         ae_stats: AppendEntriesStats,
-        this_is_final_block: bool,
+        this_is_final: bool,
     ) -> Result<(), ()> {
         if !self.view_is_stable {
-            trace!("Processing block {} as follower", block.block.n);
+            trace!("Processing block {} as follower", btc.n());
         }
         if ae_stats.view < self.view {
             // Do not accept anything from a lower view.
@@ -628,17 +650,17 @@ impl Staging {
                 // But not Unstable --> Stable; it has to be checked through QCs.
             }
             if !self.view_is_stable {
-                if !block.block.view_is_stable {
+                if !btc.view_is_stable() {
                     info!("New View message for view {}", self.view);
                 }
                 // Signal a rollback, if necessary
-                self.rollback(block.block.n - 1).await;
+                self.rollback(btc.n() - 1).await;
                 // self.pending_blocks
                 //     .retain(|e| e.block.block.n < block.block.n);
             }
 
             // Invariant <ViewLock>: Within the same view, the log must be append-only.
-            if !self.check_continuity(&block) {
+            if !self.check_continuity(&btc) {
                 warn!("Continuity broken");
                 return Ok(());
             }
@@ -652,7 +674,7 @@ impl Staging {
             self.__ae_seen_in_this_view = 0;
 
             self.view_is_stable = false;
-            self.config_num = block.block.config_num;
+            self.config_num = btc.config_num();
 
             // Notify upstream stages of view change
             self.block_sequencer_command_tx
@@ -668,16 +690,15 @@ impl Staging {
                 .unwrap();
 
             // Flush the pending queue and cancel client requests.
-            self.pending_blocks
-                .retain(|e| e.block.block.n < block.block.n);
-            self.pending_signatures.retain(|(n, _)| *n < block.block.n);
+            self.pending_votes.retain(|e| e.block_or_tc.n() < btc.n());
+            self.pending_signatures.retain(|(n, _)| *n < btc.n());
             self.client_reply_tx
                 .send(ClientReplyCommand::CancelAllRequests)
                 .await
                 .unwrap();
 
             // None of the votes from the lower views should count anymore!
-            self.pending_blocks.iter_mut().for_each(|e| {
+            self.pending_votes.iter_mut().for_each(|e| {
                 e.replication_set.clear();
                 e.vote_sigs.clear();
             });
@@ -685,46 +706,55 @@ impl Staging {
             // Ready to accept the block normally.
             if self.i_am_leader() {
                 return self
-                    .process_block_as_leader(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_btc_as_leader(btc, storage_ack, ae_stats, this_is_final)
                     .await;
             } else {
                 return self
-                    .process_block_as_follower(block, storage_ack, ae_stats, this_is_final_block)
+                    .process_btc_as_follower(btc, storage_ack, ae_stats, this_is_final)
                     .await;
             }
         }
 
-        self.logserver_tx
-            .send(LogServerCommand::NewBlock(block.clone()))
-            .await
-            .unwrap();
-        self.__ae_seen_in_this_view += if this_is_final_block { 1 } else { 0 };
+        match &btc {
+            BlockOrTipCut::Block(block) => {
+                self.logserver_tx
+                    .send(LogServerCommand::NewBlock(block.clone()))
+                    .await
+                    .unwrap();
+            }
+            BlockOrTipCut::TipCut(tc) => {
+                self.logserver_tx
+                    .send(LogServerCommand::NewTipCut(tc.clone()))
+                    .await
+                    .unwrap();
+            }
+        }
+        self.__ae_seen_in_this_view += if this_is_final { 1 } else { 0 };
 
         // Postcondition here: block.view == self.view && check_continuity() == true && !i_am_leader
-        let block_with_votes = CachedBlockWithVotes {
-            block,
+        let btc_with_votes = CachedWithVotes {
+            block_or_tc: btc,
             vote_sigs: HashMap::new(),
             replication_set: HashSet::new(),
             qc_is_proposed: false,
             fast_qc_is_proposed: false,
         };
-        self.pending_blocks.push_back(block_with_votes);
+        self.pending_votes.push_back(btc_with_votes);
 
         // Now crash commit blindly
-        if this_is_final_block {
+        if this_is_final {
             self.do_crash_commit(self.ci, ae_stats.ci).await;
         }
 
         let old_view_is_stable = self.view_is_stable;
 
         let mut qc_list = self
-            .pending_blocks
+            .pending_votes
             .iter()
             .last()
             .unwrap()
-            .block
-            .block
-            .qc
+            .block_or_tc
+            .qc()
             .iter()
             .map(|e| e.clone())
             .collect::<Vec<_>>();
@@ -747,8 +777,8 @@ impl Staging {
         }
 
         // Reply vote to the leader.
-        if this_is_final_block {
-            self.send_vote_on_last_block_to_leader(storage_ack).await?;
+        if this_is_final {
+            self.send_vote_on_last_btc_to_leader(storage_ack).await?;
         } else {
             self.__storage_ack_buffer.push_back(storage_ack);
         }
@@ -783,19 +813,19 @@ impl Staging {
         let mut verify_futs = Vec::new();
         for sig in &vote.sig_array {
             let found_block = self
-                .pending_blocks
-                .binary_search_by(|b| b.block.block.n.cmp(&sig.n));
+                .pending_votes
+                .binary_search_by(|b| b.block_or_tc.n().cmp(&sig.n));
 
             match found_block {
                 Ok(idx) => {
-                    let block = &self.pending_blocks[idx];
+                    let block = &self.pending_votes[idx];
                     let _sig = sig.sig.clone().try_into();
                     match _sig {
                         Ok(_sig) => {
                             verify_futs.push(
                                 self.crypto
                                     .verify_nonblocking(
-                                        block.block.block_hash.clone(),
+                                        block.block_or_tc.digest().clone(),
                                         sender.clone(),
                                         _sig,
                                     )
@@ -836,26 +866,26 @@ impl Staging {
             return Ok(());
         }
 
-        if self.pending_blocks.len() == 0 {
+        if self.pending_votes.len() == 0 {
             return Ok(());
         }
 
-        let first_n = self.pending_blocks.front().unwrap().block.block.n;
-        let last_n = self.pending_blocks.back().unwrap().block.block.n;
+        let first_n = self.pending_votes.front().unwrap().block_or_tc.n();
+        let last_n = self.pending_votes.back().unwrap().block_or_tc.n();
 
         if !(first_n <= vote.n && vote.n <= last_n) {
             return Ok(());
         }
         // Vote for a block is a vote on all its ancestors.
-        for block in self.pending_blocks.iter_mut() {
-            if block.block.block.n <= vote.n {
+        for block in self.pending_votes.iter_mut() {
+            if block.block_or_tc.n() <= vote.n {
                 block.replication_set.insert(sender.clone());
             }
 
-            if let Some(Sig::ProposerSig(_)) = block.block.block.sig {
+            if let Some(_) = block.block_or_tc.sig() {
                 // If this block is signed, the sig array may have a signature for it.
                 vote.sig_array.retain(|e| {
-                    if e.n != block.block.block.n {
+                    if e.n != block.block_or_tc.n() {
                         true
                     } else {
                         block.vote_sigs.insert(sender.clone(), e.clone());
@@ -889,12 +919,77 @@ impl Staging {
             .await
             .unwrap();
 
-        let blocks = self
-            .pending_blocks
-            .iter()
-            .filter(|e| e.block.block.n > old_ci && e.block.block.n <= new_ci)
-            .map(|e| e.block.clone())
-            .collect::<Vec<_>>();
+        #[cfg(not(feature = "dag"))]
+        let blocks = {
+            let committed_blocks = self
+                .pending_votes
+                .iter()
+                .filter(|e| e.block_or_tc.n() > old_ci && e.block_or_tc.n() <= new_ci)
+                .map(|e| match &e.block_or_tc {
+                    BlockOrTipCut::Block(b) => b.clone(),
+                    _ => {
+                        warn!("Found committed tip cut during crash commit");
+                        panic!("Found committed tip cut during crash commit");
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            self.app_tx
+                .send(AppCommand::CrashCommit(committed_blocks))
+                .await
+                .unwrap();
+
+            committed_blocks
+        };
+
+        #[cfg(feature = "dag")]
+        let blocks = {
+            // Collect the committed tip cuts first to avoid borrowing self across await
+            let tipcuts: Vec<ProtoTipCut> = self
+                .pending_votes
+                .iter()
+                .filter(|entry| entry.block_or_tc.n() > old_ci && entry.block_or_tc.n() <= new_ci)
+                .filter_map(|entry| match &entry.block_or_tc {
+                    BlockOrTipCut::TipCut(tc) => Some(tc.tipcut.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let mut origin_map_total: std::collections::HashMap<HashType, String> =
+                std::collections::HashMap::new();
+            let mut committed_blocks: Vec<CachedBlock> = Vec::new();
+
+            for tipcut in tipcuts {
+                match self.dag_fetch_and_sort_tipcut(&tipcut).await {
+                    Ok((mut sorted_blocks, origin_map)) => {
+                        // Merge origin maps (do not override existing entries)
+                        for (k, v) in origin_map.into_iter() {
+                            origin_map_total.entry(k).or_insert(v);
+                        }
+                        committed_blocks.append(&mut sorted_blocks);
+
+                        // Update per-lane last committed sequence
+                        for car in &tipcut.tips {
+                            self.last_lane_seq.insert(car.origin_node.clone(), car.n);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("DAG crash-commit: failed to fetch/sort tip cut: {:?}", e);
+                    }
+                }
+            }
+
+            // Send to app with origin info
+            let _ = self
+                .app_tx
+                .send(AppCommand::CrashCommitWithOrigins(
+                    committed_blocks.clone(),
+                    origin_map_total,
+                ))
+                .await;
+
+            committed_blocks
+        };
 
         #[cfg(feature = "perf")]
         let mut block_perf_stats = Vec::new();
@@ -902,10 +997,6 @@ impl Staging {
         for b in &blocks {
             block_perf_stats.push(self.perf_add_event(&b, "Crash Commit"));
         }
-        self.app_tx
-            .send(AppCommand::CrashCommit(blocks))
-            .await
-            .unwrap();
 
         #[cfg(feature = "perf")]
         for (signed, block_n) in block_perf_stats {
@@ -932,13 +1023,13 @@ impl Staging {
             self.crash_commit_threshold()
         };
 
-        for block in self.pending_blocks.iter() {
-            if block.block.block.n <= self.ci {
+        for entry in self.pending_votes.iter() {
+            if entry.block_or_tc.n() <= self.ci {
                 continue;
             }
 
-            if block.replication_set.len() >= thresh {
-                self.ci = block.block.block.n;
+            if entry.replication_set.len() >= thresh {
+                self.ci = entry.block_or_tc.n();
             }
         }
         let new_ci = self.ci;
@@ -953,8 +1044,8 @@ impl Staging {
 
         let thresh = self.byzantine_commit_threshold();
         let fast_thresh = self.byzantine_fast_path_threshold();
-        for block in &mut self.pending_blocks {
-            if block.qc_is_proposed && block.fast_qc_is_proposed {
+        for entry in &mut self.pending_votes {
+            if entry.qc_is_proposed && entry.fast_qc_is_proposed {
                 continue;
             }
 
@@ -964,17 +1055,17 @@ impl Staging {
             // If we already have proposed a slow path QC,
             // there is no need to propose another until we can safely do the fast path.
 
-            let thresh = if block.qc_is_proposed {
+            let thresh = if entry.qc_is_proposed {
                 fast_thresh
             } else {
                 thresh
             };
 
-            if block.vote_sigs.len() >= thresh {
+            if entry.vote_sigs.len() >= thresh {
                 let qc = ProtoQuorumCertificate {
-                    n: block.block.block.n,
+                    n: entry.block_or_tc.n(),
                     view: self.view,
-                    sig: block
+                    sig: entry
                         .vote_sigs
                         .iter()
                         .map(|(k, v)| ProtoNameWithSignature {
@@ -982,13 +1073,13 @@ impl Staging {
                             sig: v.sig.clone(),
                         })
                         .collect(),
-                    digest: block.block.block_hash.clone(),
+                    digest: entry.block_or_tc.digest(),
                 };
                 qcs.push(qc);
-                block.qc_is_proposed = true;
+                entry.qc_is_proposed = true;
 
-                if block.vote_sigs.len() >= fast_thresh {
-                    block.fast_qc_is_proposed = true;
+                if entry.vote_sigs.len() >= fast_thresh {
+                    entry.fast_qc_is_proposed = true;
                 }
             }
         }
@@ -1056,11 +1147,11 @@ impl Staging {
 
         // Slow path: 2-hop rule
         let mut new_bci_slow_path = self
-            .pending_blocks
+            .pending_votes
             .iter()
             .rev()
-            .filter(|b| b.block.block.n <= incoming_qc.n) // The blocks pointed by this QC (and all its ancestors)
-            .map(|b| b.block.block.qc.iter().map(|qc| qc.n)) // Collect all the QCs in those blocks
+            .filter(|b| b.block_or_tc.n() <= incoming_qc.n) // The blocks pointed by this QC (and all its ancestors)
+            .map(|b| b.block_or_tc.qc().iter().map(|qc| qc.n).collect::<Vec<_>>()) // Collect all the QCs in those blocks
             .flatten()
             .max()
             .unwrap_or(old_bci); // All such qc.n must be byz committed, so new_bci = max(all such qc.n)
@@ -1101,23 +1192,80 @@ impl Staging {
         // Invariant: All blocks in pending_blocks is in order.
         let mut byz_blocks = Vec::new();
 
-        while let Some(block) = self.pending_blocks.front() {
-            if block.block.block.n > new_bci {
+        while let Some(entry) = self.pending_votes.front() {
+            if entry.block_or_tc.n() > new_bci {
                 break;
             }
 
-            let block = self.pending_blocks.pop_front().unwrap().block;
-            self.perf_add_event(&block, "Byz Commit");
+            let btc = self.pending_votes.pop_front().unwrap().block_or_tc;
+            // FIXME
+            // self.perf_add_event(&btc, "Byz Commit");
 
-            if block.block.n == new_bci {
-                self.curr_parent_for_pending = Some(block.clone());
+            if btc.n() == new_bci {
+                self.curr_parent_for_pending = Some(btc.clone());
             }
 
-            self.perf_deregister_block(&block);
-            byz_blocks.push(block);
+            // FIXME
+            // self.perf_deregister_block(&btc);
+            byz_blocks.push(btc);
         }
 
-        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks)).await;
+        // Execute committed entries
+        #[cfg(not(feature = "dag"))]
+        {
+            // In non-DAG mode, byz_blocks should all be Blocks; filter and send
+            let blocks: Vec<CachedBlock> = byz_blocks
+                .into_iter()
+                .filter_map(|btc| match btc {
+                    BlockOrTipCut::Block(b) => Some(b),
+                    _ => None,
+                })
+                .collect();
+            let _ = self.app_tx.send(AppCommand::ByzCommit(blocks)).await;
+        }
+
+        #[cfg(feature = "dag")]
+        {
+            // Build a combined list of blocks and origins from any committed tip cuts
+            let mut blocks_for_app: Vec<CachedBlock> = Vec::new();
+            let mut origin_map_total: std::collections::HashMap<HashType, String> =
+                std::collections::HashMap::new();
+
+            for btc in byz_blocks.into_iter() {
+                match btc {
+                    BlockOrTipCut::Block(b) => {
+                        // Rare in DAG path, but include if present
+                        blocks_for_app.push(b);
+                    }
+                    BlockOrTipCut::TipCut(tc) => {
+                        let tipcut = tc.tipcut.clone();
+                        match self.dag_fetch_and_sort_tipcut(&tipcut).await {
+                            Ok((mut sorted_blocks, origin_map)) => {
+                                for (k, v) in origin_map.into_iter() {
+                                    origin_map_total.entry(k).or_insert(v);
+                                }
+                                blocks_for_app.append(&mut sorted_blocks);
+                                // Update per-lane last committed sequence
+                                for car in &tipcut.tips {
+                                    self.last_lane_seq.insert(car.origin_node.clone(), car.n);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("DAG byz-commit: failed to fetch/sort tip cut: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = self
+                .app_tx
+                .send(AppCommand::ByzCommitWithOrigins(
+                    blocks_for_app,
+                    origin_map_total,
+                ))
+                .await;
+        }
         let _ = self
             .logserver_tx
             .send(LogServerCommand::UpdateBCI(self.bci))
@@ -1131,7 +1279,7 @@ impl Staging {
     }
 
     async fn rollback(&mut self, n: u64) {
-        self.pending_blocks.retain(|e| e.block.block.n <= n);
+        self.pending_votes.retain(|e| e.block_or_tc.n() <= n);
         self.pending_signatures.retain(|(_n, _)| *_n <= n);
         self.app_tx.send(AppCommand::Rollback(n)).await.unwrap();
         self.logserver_tx
@@ -1155,291 +1303,6 @@ impl Staging {
                 let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
             }
         }
-
-        Ok(())
-    }
-
-    /// Process tip cut proposal as leader (DAG mode)
-    ///
-    /// In DAG mode, the leader receives a tip cut proposal from the tip_cut_proposal component.
-    /// The leader should:
-    /// 1. Validate the tip cut (check CARs, verify structure)
-    /// 2. Vote for the tip cut if valid
-    /// 3. Collect votes from other replicas
-    /// 4. Form a QC when enough votes are collected
-    /// 5. Commit the tip cut
-    ///
-    /// TODO: Implement tip cut validation logic
-    /// TODO: Implement tip cut voting logic
-    /// TODO: Implement tip cut QC formation
-    /// Process tip cut proposal as leader (DAG mode)
-    ///
-    /// Leaders in DAG mode receive their own tip cut proposals.
-    /// The leader should validate and vote on their own tip cut.
-    #[cfg(feature = "dag")]
-    pub(super) async fn process_tipcut_as_leader(
-        &mut self,
-        tipcut_proposal: super::TipCutProposal,
-    ) -> Result<(), ()> {
-        info!(
-            "Leader processing tip cut with {} CARs for view {} (ci={})",
-            tipcut_proposal.tipcut.tips.len(),
-            tipcut_proposal.ae_stats.view,
-            tipcut_proposal.ae_stats.ci
-        );
-
-        // Basic view validation
-        if tipcut_proposal.ae_stats.view < self.view {
-            warn!(
-                "Received tip cut from lower view {}. Already in {}",
-                tipcut_proposal.ae_stats.view, self.view
-            );
-            return Ok(());
-        }
-
-        // Validate the tip cut structure and CARs
-        if !self.validate_tipcut(&tipcut_proposal.tipcut).await {
-            warn!("Tip cut validation failed - not voting");
-            return Ok(());
-        }
-
-        // Store tip cut in logserver (DAG mode stores tip cuts, not blocks)
-        self.logserver_tx
-            .send(LogServerCommand::NewTipCut(tipcut_proposal.tipcut.clone()))
-            .await
-            .unwrap();
-
-        // Vote on own tip cut (implicit vote)
-        info!(
-            "Leader implicitly voting for own tip cut with digest {:?}",
-            hex::encode(&tipcut_proposal.tipcut.digest[..8])
-        );
-
-        Ok(())
-    }
-
-    /// Process tip cut proposal as follower (DAG mode)
-    ///
-    /// In DAG mode, followers receive tip cut proposals from the leader.
-    /// Followers should:
-    /// 1. Validate the view in the proposal
-    /// 2. Validate the parent digest in the tip cut chain log
-    /// 3. Validate tip cut data - for every lane digest in the tip cut, check if we have a valid CAR
-    /// 4. If validation passes, vote for the TC. Otherwise, don't vote.
-    #[cfg(feature = "dag")]
-    pub(super) async fn process_tipcut_as_follower(
-        &mut self,
-        tipcut_proposal: super::TipCutProposal,
-    ) -> Result<(), ()> {
-        info!(
-            "Follower processing tip cut with {} CARs from {} for view {} (ci={})",
-            tipcut_proposal.tipcut.tips.len(),
-            tipcut_proposal.ae_stats.sender,
-            tipcut_proposal.ae_stats.view,
-            tipcut_proposal.ae_stats.ci
-        );
-
-        // Step 1: Validate view
-        if tipcut_proposal.ae_stats.view < self.view {
-            warn!(
-                "Received tip cut from lower view {}. Already in {}",
-                tipcut_proposal.ae_stats.view, self.view
-            );
-            return Ok(());
-        }
-
-        if tipcut_proposal.ae_stats.view > self.view {
-            // Jump to new view
-            info!(
-                "Jumping to new view {} from tip cut (was in view {})",
-                tipcut_proposal.ae_stats.view, self.view
-            );
-            self.view = tipcut_proposal.ae_stats.view;
-            self.view_is_stable = tipcut_proposal.ae_stats.view_is_stable;
-            self.config_num = tipcut_proposal.ae_stats.config_num;
-
-            // Notify upstream stages of view change
-            self.block_sequencer_command_tx
-                .send(BlockSequencerControlCommand::NewUnstableView(
-                    self.view,
-                    self.config_num,
-                ))
-                .await
-                .unwrap();
-            self.fork_receiver_command_tx
-                .send(ForkReceiverCommand::UpdateView(self.view, self.config_num))
-                .await
-                .unwrap();
-        }
-
-        // Step 2: Validate parent digest in the tip cut chain
-        if !self.validate_tipcut_parent(&tipcut_proposal.tipcut).await {
-            warn!(
-                "Tip cut parent validation failed - parent digest {:?} not found in chain",
-                hex::encode(&tipcut_proposal.tipcut.parent[..8])
-            );
-            return Ok(());
-        }
-
-        // Step 3: Validate tip cut data - check all CARs and their history
-        if !self.validate_tipcut(&tipcut_proposal.tipcut).await {
-            warn!("Tip cut validation failed - not voting");
-            return Ok(());
-        }
-
-        // Store tip cut in logserver (DAG mode stores tip cuts, not blocks)
-        self.logserver_tx
-            .send(LogServerCommand::NewTipCut(tipcut_proposal.tipcut.clone()))
-            .await
-            .unwrap();
-
-        // Step 4: Send vote to leader
-        self.send_vote_on_tipcut_to_leader(&tipcut_proposal).await?;
-
-        info!(
-            "Sent vote for tip cut with digest {:?} to leader",
-            hex::encode(&tipcut_proposal.tipcut.digest[..8])
-        );
-
-        Ok(())
-    }
-
-    /// Validate the parent digest of a tip cut against the logserver chain
-    #[cfg(feature = "dag")]
-    async fn validate_tipcut_parent(&mut self, tipcut: &ProtoTipCut) -> bool {
-        use tokio::sync::oneshot;
-
-        // If parent is all zeros, this is the genesis tip cut
-        if tipcut.parent.iter().all(|&b| b == 0) {
-            debug!("Tip cut has genesis parent (all zeros) - accepting");
-            return true;
-        }
-
-        // Query logserver to check if parent exists
-        // We need to get the last tip cut from logserver and verify parent matches
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        self.logserver_tx
-            .send(LogServerCommand::GetLastTipCutDigest(reply_tx))
-            .await
-            .unwrap();
-
-        match reply_rx.await {
-            Ok(Some(last_digest)) => {
-                if last_digest == tipcut.parent {
-                    debug!("Tip cut parent matches last committed tip cut");
-                    true
-                } else {
-                    warn!(
-                        "Tip cut parent mismatch: expected {:?}, got {:?}",
-                        hex::encode(&last_digest[..8]),
-                        hex::encode(&tipcut.parent[..8])
-                    );
-                    false
-                }
-            }
-            Ok(None) => {
-                // No previous tip cut exists - parent must be genesis
-                if tipcut.parent.iter().all(|&b| b == 0) {
-                    debug!("First tip cut with genesis parent");
-                    true
-                } else {
-                    warn!("No previous tip cut but parent is not genesis");
-                    false
-                }
-            }
-            Err(_) => {
-                error!("Failed to query logserver for last tip cut digest");
-                false
-            }
-        }
-    }
-
-    /// Validate a tip cut by checking all CARs and their history
-    #[cfg(feature = "dag")]
-    async fn validate_tipcut(&mut self, tipcut: &ProtoTipCut) -> bool {
-        // Check that tip cut is not empty
-        if tipcut.tips.is_empty() {
-            warn!("Tip cut is empty - rejecting");
-            return false;
-        }
-
-        // For each CAR in the tip cut, validate it exists and has valid history
-        // TODO: Once lane_logserver_tx is properly plumbed through to Staging,
-        // query it to validate each CAR. For now, we assume CARs are valid
-        // if they made it through the block_broadcaster validation.
-
-        for (idx, car) in tipcut.tips.iter().enumerate() {
-            // Check that CAR has signatures
-            if car.sig.is_empty() {
-                warn!("CAR {} has no signatures - rejecting tip cut", idx);
-                return false;
-            }
-
-            // Verify CAR structure
-            if car.digest.is_empty() || car.n == 0 {
-                warn!("CAR {} has invalid structure - rejecting tip cut", idx);
-                return false;
-            }
-
-            trace!(
-                "CAR {} validated (n={}, {} signatures)",
-                idx,
-                car.n,
-                car.sig.len()
-            );
-        }
-
-        debug!(
-            "All {} CARs in tip cut validated successfully",
-            tipcut.tips.len()
-        );
-        true
-    }
-
-    /// Send vote on tip cut to the leader
-    #[cfg(feature = "dag")]
-    async fn send_vote_on_tipcut_to_leader(
-        &mut self,
-        tipcut_proposal: &super::TipCutProposal,
-    ) -> Result<(), ()> {
-        // Create vote for the tip cut
-        // Note: In DAG mode with tip cuts, we don't use sig_array for pending blocks
-        // Instead, we vote directly on the tip cut digest
-        let vote_sig = self.crypto.sign(&tipcut_proposal.tipcut.digest).await;
-
-        let vote = ProtoVote {
-            sig_array: vec![ProtoSignatureArrayEntry {
-                n: 0, // Tip cuts don't have a single 'n', this is for compatibility
-                sig: vote_sig.to_vec(),
-            }],
-            digest: tipcut_proposal.tipcut.digest.clone(),
-            n: 0, // Will be assigned by logserver when tip cut is stored
-            view: self.view,
-            config_num: self.config_num,
-        };
-
-        let leader = self
-            .config
-            .get()
-            .consensus_config
-            .get_leader_for_view(self.view);
-
-        let rpc = ProtoPayload {
-            message: Some(crate::proto::rpc::proto_payload::Message::Vote(vote)),
-        };
-        let data = rpc.encode_to_vec();
-        let sz = data.len();
-        let data = PinnedMessage::from(data, sz, SenderType::Anon);
-
-        let _ = PinnedClient::send(&self.client, &leader, data.as_ref()).await;
-
-        info!(
-            "Sent tip cut vote to {} for view {} (digest: {:?})",
-            leader,
-            self.view,
-            hex::encode(&tipcut_proposal.tipcut.digest[..8])
-        );
 
         Ok(())
     }

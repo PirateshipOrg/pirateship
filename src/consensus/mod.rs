@@ -2,6 +2,7 @@ pub mod app;
 pub mod batch_proposal;
 mod block_broadcaster;
 mod block_sequencer;
+pub mod block_tipcut;
 pub mod client_reply;
 #[cfg(feature = "dag")]
 mod dag;
@@ -45,13 +46,12 @@ use app::{AppEngine, Application};
 use batch_proposal::{BatchProposer, TxWithAckChanTag};
 use block_broadcaster::BlockBroadcaster;
 use block_sequencer::BlockSequencer;
+use block_tipcut::BlockOrTipCut;
 use client_reply::ClientReplyHandler;
-// use extra_2pc::TwoPCHandler;
+use extra_2pc::TwoPCHandler;
 use fork_receiver::{ForkReceiver, ForkReceiverCommand};
 use log::{debug, info, warn};
 use logserver::LogServer;
-// #[cfg(feature = "dag")]
-// use lz4_flex::block;
 use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
@@ -774,7 +774,6 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             block_broadcaster_tx.clone(),
             client_reply_tx.clone(),
             block_maker_crypto,
-            #[cfg(feature = "dag")]
             block_broadcaster_command_tx.clone(),
         );
 
@@ -807,6 +806,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             qc_tx,
             batch_proposer_command_tx,
             logserver_tx,
+            #[cfg(feature = "dag")]
+            lane_logserver_query_tx.clone(),
             #[cfg(feature = "extra_2pc")]
             extra_2pc_command_tx,
             #[cfg(feature = "extra_2pc")]

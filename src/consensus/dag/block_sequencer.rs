@@ -30,6 +30,7 @@
 use std::cell::RefCell;
 use std::{pin::Pin, sync::Arc, time::Duration};
 
+use crate::consensus::block_tipcut::BlockOrTipCut;
 use crate::crypto::FutureHash;
 use crate::utils::channel::{Receiver, Sender};
 use log::{debug, info, trace};
@@ -60,7 +61,7 @@ pub struct DagBlockSequencer {
 
     signature_timer: Arc<Pin<Box<ResettableTimer>>>,
 
-    dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+    dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<BlockOrTipCut>)>,
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
     crypto: CryptoServiceConnector,
@@ -78,7 +79,7 @@ impl DagBlockSequencer {
         config: AtomicConfig,
         control_command_rx: Receiver<DagBlockSequencerCommand>,
         batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
-        dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
+        dag_broadcaster_tx: Sender<(u64, oneshot::Receiver<BlockOrTipCut>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
     ) -> Self {

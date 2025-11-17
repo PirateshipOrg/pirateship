@@ -1,10 +1,11 @@
+use log::warn;
 use std::collections::HashMap;
 
 use crate::{
-    crypto::{default_hash, hash_proto_block_ser},
-    proto::consensus::{ProtoFork, ProtoViewChange},
+    crypto::{default_hash, hash_proto_block_ser, hash_proto_tipcut_ser},
+    proto::consensus::{ProtoFork, ProtoTipCut, ProtoViewChange},
     rpc::SenderType,
-    utils::get_parent_hash_in_proto_block_ser,
+    utils::{get_parent_hash_in_proto_block_ser, get_parent_hash_in_proto_tipcut_ser},
 };
 
 use super::{view_change::ForkStat, Staging};
@@ -16,63 +17,99 @@ impl Staging {
     ) -> HashMap<SenderType, ForkStat> {
         let mut fork_stats = HashMap::new();
         for (sender, vc) in forks {
-            let fork_len = vc.fork.as_ref().unwrap().serialized_blocks.len();
-            let mut block_hashes = Vec::with_capacity(fork_len);
-            if fork_len > 0 {
-                // Instead of calculating the hashes again, we can just use the parent relations.
-                // Just need to compute the last hash.
-                let last_hash = hash_proto_block_ser(
-                    &vc.fork
-                        .as_ref()
-                        .unwrap()
+            match &vc.fork.as_ref() {
+                Some(crate::proto::consensus::proto_view_change::Fork::F(fork)) => {
+                    let fork_len = fork.serialized_blocks.len();
+                    let mut block_hashes = Vec::with_capacity(fork_len);
+                    if fork_len > 0 {
+                        // Instead of calculating the hashes again, we can just use the parent relations.
+                        // Just need to compute the last hash.
+                        let last_hash = hash_proto_block_ser(
+                            &fork.serialized_blocks.last().unwrap().serialized_body,
+                        );
+                        for i in 1..fork_len {
+                            block_hashes.push(
+                                get_parent_hash_in_proto_block_ser(
+                                    &fork.serialized_blocks[i].serialized_body,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        block_hashes.push(last_hash);
+                    }
+
+                    let (last_view, last_config_num, last_n) = fork
                         .serialized_blocks
                         .last()
-                        .unwrap()
-                        .serialized_body,
-                );
-                for i in 1..fork_len {
-                    block_hashes.push(
-                        get_parent_hash_in_proto_block_ser(
-                            &vc.fork.as_ref().unwrap().serialized_blocks[i].serialized_body,
-                        )
-                        .unwrap(),
+                        .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
+
+                    fork_stats.insert(
+                        sender.clone(),
+                        ForkStat {
+                            fork_last_n: last_n,
+                            block_hashes,
+                            first_n: fork.serialized_blocks.first().map_or(0, |b| b.n),
+                            first_parent: fork.serialized_blocks.first().map_or(
+                                default_hash(),
+                                |b| {
+                                    get_parent_hash_in_proto_block_ser(&b.serialized_body)
+                                        .unwrap_or(default_hash())
+                                },
+                            ),
+                            last_qc: vc.fork_last_qc.clone(),
+                            last_view,
+                            last_config_num,
+                        },
                     );
                 }
-                block_hashes.push(last_hash);
-            }
+                Some(crate::proto::consensus::proto_view_change::Fork::Tc(fork)) => {
+                    let fork_len = fork.serialized_tipcuts.len();
+                    let mut block_hashes = Vec::with_capacity(fork_len);
+                    if fork_len > 0 {
+                        // Instead of calculating the hashes again, we can just use the parent relations.
+                        // Just need to compute the last hash.
+                        let last_hash = hash_proto_block_ser(
+                            &fork.serialized_tipcuts.last().unwrap().serialized_body,
+                        );
+                        for i in 1..fork_len {
+                            block_hashes.push(
+                                get_parent_hash_in_proto_block_ser(
+                                    &fork.serialized_tipcuts[i].serialized_body,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        block_hashes.push(last_hash);
+                    }
 
-            let (last_view, last_config_num, last_n) = vc
-                .fork
-                .as_ref()
-                .unwrap()
-                .serialized_blocks
-                .last()
-                .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
+                    let (last_view, last_config_num, last_n) = fork
+                        .serialized_tipcuts
+                        .last()
+                        .map_or((0, 0, 0), |b| (b.view, b.config_num, b.n));
 
-            fork_stats.insert(
-                sender.clone(),
-                ForkStat {
-                    fork_last_n: last_n,
-                    block_hashes,
-                    first_n: vc
-                        .fork
-                        .as_ref()
-                        .unwrap()
-                        .serialized_blocks
-                        .first()
-                        .map_or(0, |b| b.n),
-                    first_parent: vc.fork.as_ref().unwrap().serialized_blocks.first().map_or(
-                        default_hash(),
-                        |b| {
-                            get_parent_hash_in_proto_block_ser(&b.serialized_body)
-                                .unwrap_or(default_hash())
+                    fork_stats.insert(
+                        sender.clone(),
+                        ForkStat {
+                            fork_last_n: last_n,
+                            block_hashes,
+                            first_n: fork.serialized_tipcuts.first().map_or(0, |b| b.n),
+                            first_parent: fork.serialized_tipcuts.first().map_or(
+                                default_hash(),
+                                |b| {
+                                    get_parent_hash_in_proto_block_ser(&b.serialized_body)
+                                        .unwrap_or(default_hash())
+                                },
+                            ),
+                            last_qc: vc.fork_last_qc.clone(),
+                            last_view,
+                            last_config_num,
                         },
-                    ),
-                    last_qc: vc.fork_last_qc.clone(),
-                    last_view,
-                    last_config_num,
-                },
-            );
+                    );
+                }
+                None => {
+                    warn!("Received ViewChange without fork");
+                }
+            }
         }
 
         fork_stats

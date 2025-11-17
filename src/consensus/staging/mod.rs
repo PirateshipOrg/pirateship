@@ -14,8 +14,11 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 use crate::crypto::HashType;
 use crate::{
     config::AtomicConfig,
-    crypto::{CachedBlock, CryptoServiceConnector},
-    proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoTipCut, ProtoVote},
+    crypto::{CachedBlock, CachedTipCut, CryptoServiceConnector},
+    proto::consensus::{
+        ProtoForkValidation, ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoTipCut,
+        ProtoTipCutValidation, ProtoVote,
+    },
     rpc::{client::PinnedClient, SenderType},
     utils::{
         channel::{Receiver, Sender},
@@ -29,6 +32,7 @@ use super::{
     batch_proposal::BatchProposerCommand,
     block_broadcaster::BlockBroadcasterCommand,
     block_sequencer::BlockSequencerControlCommand,
+    block_tipcut::BlockOrTipCut,
     client_reply::ClientReplyCommand,
     extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand},
     fork_receiver::{AppendEntriesStats, ForkReceiverCommand},
@@ -36,12 +40,18 @@ use super::{
     pacemaker::PacemakerCommand,
 };
 
+#[cfg(feature = "dag")]
+use crate::consensus::dag::lane_logserver::LaneLogServerQuery;
+#[cfg(feature = "dag")]
+use crate::consensus::dag::sort::{fetch_and_sort_tipcut_blocks, TipCutSortError};
+#[cfg(feature = "dag")]
+use crate::proto::consensus::ProtoBlockCar;
+#[cfg(feature = "dag")]
+use crate::utils::channel::make_channel;
+
 pub(super) mod fork_choice;
 pub(super) mod steady_state;
 pub(super) mod view_change;
-
-#[cfg(feature = "dag")]
-pub mod tip_cut_sort;
 
 struct CachedBlockWithVotes {
     block: CachedBlock,
@@ -53,32 +63,44 @@ struct CachedBlockWithVotes {
     fast_qc_is_proposed: bool,
 }
 
+pub struct CachedWithVotes {
+    block_or_tc: BlockOrTipCut,
+    vote_sigs: HashMap<String, ProtoSignatureArrayEntry>,
+    replication_set: HashSet<String>,
+    qc_is_proposed: bool,
+    fast_qc_is_proposed: bool,
+}
+
+impl From<CachedWithVotes> for CachedBlockWithVotes {
+    fn from(cached: CachedWithVotes) -> Self {
+        match cached.block_or_tc {
+            BlockOrTipCut::Block(block) => Self {
+                block,
+                vote_sigs: cached.vote_sigs,
+                replication_set: cached.replication_set,
+                qc_is_proposed: cached.qc_is_proposed,
+                fast_qc_is_proposed: cached.fast_qc_is_proposed,
+            },
+            #[cfg(feature = "dag")]
+            BlockOrTipCut::TipCut(_) => {
+                panic!("Cannot convert TipCut to CachedBlockWithVotes")
+            }
+        }
+    }
+}
+
 pub type VoteWithSender = (SenderType /* Sender */, ProtoVote);
 pub type SignatureWithBlockN = (
     u64, /* Block the QC was attached to */
     ProtoSignatureArrayEntry,
 );
 
-/// Represents a fork (chain of blocks) received for consensus voting
-pub struct ForkProposal {
-    pub block: CachedBlock,
+/// Reperesent a fork or tip cut received for consensus voting
+pub struct Proposal {
+    pub entry: BlockOrTipCut,
     pub storage_ack: oneshot::Receiver<StorageAck>,
     pub ae_stats: AppendEntriesStats,
-    pub this_is_final_block: bool,
-}
-
-/// Represents a tip cut proposal received for consensus voting (DAG mode)
-#[cfg(feature = "dag")]
-pub struct TipCutProposal {
-    pub tipcut: ProtoTipCut,
-    pub ae_stats: AppendEntriesStats,
-}
-
-/// Unified message type for staging to handle both forks and tip cuts
-pub enum StagingMessage {
-    Fork(ForkProposal),
-    #[cfg(feature = "dag")]
-    TipCut(TipCutProposal),
+    pub this_is_final: bool,
 }
 
 /// This is where all the consensus decisions are made.
@@ -97,17 +119,22 @@ pub struct Staging {
     view_is_stable: bool,
     config_num: u64,
     last_qc: Option<ProtoQuorumCertificate>,
-    curr_parent_for_pending: Option<CachedBlock>,
+    curr_parent_for_pending: Option<BlockOrTipCut>,
 
-    /// Invariant: pending_blocks.len() == 0 || bci == pending_blocks.front().n - 1
-    pending_blocks: VecDeque<CachedBlockWithVotes>,
+    /// pending_votes holds blocks or tip cuts waiting on commit
+    /// Invariant: pending_votes.len() == 0 || bci == pending_votes.front().n - 1
+    pending_votes: VecDeque<CachedWithVotes>,
+    /// pending_exec_blocks holds committed blocks waiting on execution
+    /// In traditional mode, these come directly from pending_votes
+    /// In DAG mode, these come from tip cut sort processing
+    pending_exec_blocks: VecDeque<CachedBlockWithVotes>,
 
     /// Signed votes for blocks in pending_blocks
     pending_signatures: VecDeque<SignatureWithBlockN>,
 
     view_change_timer: Arc<Pin<Box<ResettableTimer>>>,
 
-    block_rx: Receiver<StagingMessage>,
+    block_rx: Receiver<Proposal>,
     vote_rx: Receiver<VoteWithSender>,
     pacemaker_rx: Receiver<PacemakerCommand>,
     pacemaker_tx: Sender<PacemakerCommand>,
@@ -116,6 +143,7 @@ pub struct Staging {
     app_tx: Sender<AppCommand>,
     block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
     block_sequencer_command_tx: Sender<BlockSequencerControlCommand>,
+    // TODO: What should this channel point to in DAG mode? Probably tip cut proposer?
     batch_proposer_command_tx: Sender<BatchProposerCommand>,
     fork_receiver_command_tx: Sender<ForkReceiverCommand>,
     qc_tx: UnboundedSender<ProtoQuorumCertificate>,
@@ -133,6 +161,12 @@ pub struct Staging {
 
     #[cfg(feature = "extra_2pc")]
     engraft_2pc_futures_rx: Receiver<EngraftActionAfterFutureDone>,
+
+    // DAG-only fields for tip cut sorting and block fetching
+    #[cfg(feature = "dag")]
+    lane_logserver_query_tx: Sender<LaneLogServerQuery>,
+    #[cfg(feature = "dag")]
+    last_lane_seq: HashMap<String, u64>,
 }
 
 impl Staging {
@@ -140,7 +174,7 @@ impl Staging {
         config: AtomicConfig,
         client: PinnedClient,
         crypto: CryptoServiceConnector,
-        block_rx: Receiver<StagingMessage>,
+        block_rx: Receiver<Proposal>,
         vote_rx: Receiver<VoteWithSender>,
         pacemaker_rx: Receiver<PacemakerCommand>,
         pacemaker_tx: Sender<PacemakerCommand>,
@@ -152,6 +186,7 @@ impl Staging {
         qc_tx: UnboundedSender<ProtoQuorumCertificate>,
         batch_proposer_command_tx: Sender<BatchProposerCommand>,
         logserver_tx: Sender<LogServerCommand>,
+    #[cfg(feature = "dag")] lane_logserver_query_tx: Sender<LaneLogServerQuery>,
 
         #[cfg(feature = "extra_2pc")] two_pc_command_tx: Sender<TwoPCCommand>,
 
@@ -191,7 +226,8 @@ impl Staging {
             last_qc: None,
             curr_parent_for_pending: None,
             config_num: 1,
-            pending_blocks: VecDeque::with_capacity(_chan_depth),
+            pending_votes: VecDeque::with_capacity(_chan_depth),
+            pending_exec_blocks: VecDeque::with_capacity(_chan_depth),
             pending_signatures: VecDeque::with_capacity(_chan_depth),
             view_change_timer,
             block_rx,
@@ -208,10 +244,14 @@ impl Staging {
             leader_perf_counter_unsigned,
             batch_proposer_command_tx,
             logserver_tx,
+            #[cfg(feature = "dag")]
+            lane_logserver_query_tx,
 
             __vc_retry_num: 0,
             __storage_ack_buffer: VecDeque::new(),
             __ae_seen_in_this_view: 0,
+            #[cfg(feature = "dag")]
+            last_lane_seq: HashMap::new(),
 
             #[cfg(feature = "extra_2pc")]
             two_pc_command_tx,
@@ -266,34 +306,21 @@ impl Staging {
                 if msg.is_none() {
                     return Err(())
                 }
-                match msg.unwrap() {
-                    StagingMessage::Fork(fork_proposal) => {
-                        trace!("Got fork block {}", fork_proposal.block.block.n);
-                        if i_am_leader {
-                            self.process_block_as_leader(
-                                fork_proposal.block,
-                                fork_proposal.storage_ack,
-                                fork_proposal.ae_stats,
-                                fork_proposal.this_is_final_block
-                            ).await?;
-                        } else {
-                            self.process_block_as_follower(
-                                fork_proposal.block,
-                                fork_proposal.storage_ack,
-                                fork_proposal.ae_stats,
-                                fork_proposal.this_is_final_block
-                            ).await?;
-                        }
-                    },
-                    #[cfg(feature = "dag")]
-                    StagingMessage::TipCut(tipcut_proposal) => {
-                        trace!("Got tip cut proposal with {} CARs", tipcut_proposal.tipcut.tips.len());
-                        if i_am_leader {
-                            self.process_tipcut_as_leader(tipcut_proposal).await?;
-                        } else {
-                            self.process_tipcut_as_follower(tipcut_proposal).await?;
-                        }
-                    },
+                let proposal = msg.unwrap();
+                if i_am_leader {
+                    self.process_btc_as_leader(
+                        proposal.entry,
+                        proposal.storage_ack,
+                        proposal.ae_stats,
+                        proposal.this_is_final
+                    ).await?;
+                } else {
+                    self.process_btc_as_follower(
+                        proposal.entry,
+                        proposal.storage_ack,
+                        proposal.ae_stats,
+                        proposal.this_is_final
+                    ).await?;
                 }
             },
             vote = self.vote_rx.recv() => {
@@ -326,14 +353,6 @@ impl Staging {
 
                 self.process_2pc_result(cmd).await?;
             },
-
-            #[cfg(feature = "dag")]
-            tipcut_cmd = self.tipcut_sort_rx.recv() => {
-                if tipcut_cmd.is_none() {
-                    return Err(())
-                }
-                self.handle_tipcut_sort_command(tipcut_cmd.unwrap()).await?;
-            },
         }
 
         #[cfg(not(feature = "extra_2pc"))]
@@ -345,34 +364,21 @@ impl Staging {
                 if msg.is_none() {
                     return Err(())
                 }
-                match msg.unwrap() {
-                    StagingMessage::Fork(fork_proposal) => {
-                        trace!("Got fork block {}", fork_proposal.block.block.n);
-                        if i_am_leader {
-                            self.process_block_as_leader(
-                                fork_proposal.block,
-                                fork_proposal.storage_ack,
-                                fork_proposal.ae_stats,
-                                fork_proposal.this_is_final_block
-                            ).await?;
-                        } else {
-                            self.process_block_as_follower(
-                                fork_proposal.block,
-                                fork_proposal.storage_ack,
-                                fork_proposal.ae_stats,
-                                fork_proposal.this_is_final_block
-                            ).await?;
-                        }
-                    },
-                    #[cfg(feature = "dag")]
-                    StagingMessage::TipCut(tipcut_proposal) => {
-                        trace!("Got tip cut proposal with {} CARs", tipcut_proposal.tipcut.tips.len());
-                        if i_am_leader {
-                            self.process_tipcut_as_leader(tipcut_proposal).await?;
-                        } else {
-                            self.process_tipcut_as_follower(tipcut_proposal).await?;
-                        }
-                    },
+                let proposal = msg.unwrap();
+                if i_am_leader {
+                    self.process_btc_as_leader(
+                        proposal.entry,
+                        proposal.storage_ack,
+                        proposal.ae_stats,
+                        proposal.this_is_final
+                    ).await?;
+                } else {
+                    self.process_btc_as_follower(
+                        proposal.entry,
+                        proposal.storage_ack,
+                        proposal.ae_stats,
+                        proposal.this_is_final
+                    ).await?;
                 }
             },
             vote = self.vote_rx.recv() => {
@@ -399,162 +405,35 @@ impl Staging {
         Ok(())
     }
 
-    /// Add topologically sorted blocks from a committed tip cut to pending_blocks
-    /// and trigger Byzantine commit. This is the DAG mode execution path.
-    ///
-    /// Called by TipCutSort after it has fetched and sorted blocks from a committed tip cut.
+    /// DAG-only: Build inputs and call the sorter for a committed tip cut.
+    /// Returns sorted blocks and origin map. Does not execute or update commit indices.
     #[cfg(feature = "dag")]
-    pub async fn add_sorted_tipcut_blocks(&mut self, blocks: Vec<CachedBlock>) {
-        info!(
-            "Adding {} topologically sorted blocks from tip cut to pending_blocks",
-            blocks.len()
-        );
-
-        // Determine the highest block.n from the sorted blocks
-        // This becomes our new BCI
-        let new_bci = blocks.last().map(|b| b.block.n).unwrap_or(self.bci);
-
-        // Wrap each CachedBlock in CachedBlockWithVotes structure
-        // In DAG mode, we don't collect individual votes - the tip cut itself
-        // represents the consensus result
-        for block in blocks {
-            let block_with_votes = CachedBlockWithVotes {
-                block: block.clone(),
-                vote_sigs: HashMap::new(),
-                replication_set: HashSet::new(),
-                qc_is_proposed: true, // Already consensus-committed via tip cut
-                fast_qc_is_proposed: false,
-            };
-
-            self.pending_blocks.push_back(block_with_votes);
-
-            debug!(
-                "Added block {} to pending_blocks (total: {})",
-                block.block.n,
-                self.pending_blocks.len()
-            );
-        }
-
-        // Update BCI and trigger Byzantine commit
-        // This reuses the existing steady_state Byzantine commit logic
-        self.bci = new_bci;
-        self.ci = new_bci; // In DAG mode, BCI == CI since tip cuts represent finality
-
-        info!(
-            "Updated BCI to {} after tip cut commit, triggering Byzantine commit",
-            new_bci
-        );
-
-        // Execute all committed blocks (same logic as steady_state.rs:1103-1124)
-        let mut byz_blocks = Vec::new();
-
-        while let Some(block) = self.pending_blocks.front() {
-            if block.block.block.n > new_bci {
-                break;
-            }
-
-            let block = self.pending_blocks.pop_front().unwrap().block;
-
-            if block.block.n == new_bci {
-                self.curr_parent_for_pending = Some(block.clone());
-            }
-
-            byz_blocks.push(block);
-        }
-
-        info!(
-            "Sending ByzCommit with {} blocks to Application layer",
-            byz_blocks.len()
-        );
-
-        let _ = self.app_tx.send(AppCommand::ByzCommit(byz_blocks)).await;
-        let _ = self
-            .logserver_tx
-            .send(LogServerCommand::UpdateBCI(self.bci))
-            .await;
-    }
-
-    /// Add topologically sorted blocks from a committed tip cut with origin node information
-    /// for the proxy pattern. This enables forwarding execution results to the correct nodes.
-    ///
-    /// Called by TipCutSort after it has fetched and sorted blocks from a committed tip cut.
-    #[cfg(feature = "dag")]
-    pub async fn add_sorted_tipcut_blocks_with_origins(
+    pub async fn dag_fetch_and_sort_tipcut(
         &mut self,
-        blocks: Vec<CachedBlock>,
-        origin_map: std::collections::HashMap<HashType, String>,
-    ) {
-        info!(
-            "Adding {} topologically sorted blocks from tip cut with {} origin entries",
-            blocks.len(),
-            origin_map.len()
-        );
-
-        // Determine the highest block.n from the sorted blocks
-        // This becomes our new BCI
-        let new_bci = blocks.last().map(|b| b.block.n).unwrap_or(self.bci);
-
-        // Wrap each CachedBlock in CachedBlockWithVotes structure
-        for block in blocks {
-            let block_with_votes = CachedBlockWithVotes {
-                block: block.clone(),
-                vote_sigs: HashMap::new(),
-                replication_set: HashSet::new(),
-                qc_is_proposed: true, // Already consensus-committed via tip cut
-                fast_qc_is_proposed: false,
-            };
-
-            self.pending_blocks.push_back(block_with_votes);
-
-            debug!(
-                "Added block {} to pending_blocks (origin: {})",
-                block.block.n,
-                origin_map
-                    .get(&block.block_hash)
-                    .unwrap_or(&"unknown".to_string())
-            );
+        tipcut: &ProtoTipCut,
+    ) -> Result<(Vec<CachedBlock>, HashMap<HashType, String>), TipCutSortError> {
+        // Build cars map keyed by origin_node (serves as lane_id)
+        let mut cars: HashMap<String, ProtoBlockCar> = HashMap::new();
+        for car in &tipcut.tips {
+            cars.insert(car.origin_node.clone(), car.clone());
         }
 
-        // Update BCI and trigger Byzantine commit
-        self.bci = new_bci;
-        self.ci = new_bci;
+        let last_lane_seq = &self.last_lane_seq;
+        let query_tx = self.lane_logserver_query_tx.clone();
 
-        info!(
-            "Updated BCI to {} after tip cut commit, triggering Byzantine commit with origin map",
-            new_bci
-        );
-
-        // Execute all committed blocks
-        let mut byz_blocks = Vec::new();
-
-        while let Some(block) = self.pending_blocks.front() {
-            if block.block.block.n > new_bci {
-                break;
+        // Fetch function to retrieve a block from a lane by sequence number
+        let fetch = move |lane: &str, seq: u64| {
+            let query_tx = query_tx.clone();
+            let lane = lane.to_string();
+            async move {
+                let (tx, rx) = make_channel(1);
+                let _ = query_tx
+                    .send(LaneLogServerQuery::GetBlock(lane.clone(), seq, tx))
+                    .await;
+                rx.recv().await.flatten()
             }
+        };
 
-            let block = self.pending_blocks.pop_front().unwrap().block;
-
-            if block.block.n == new_bci {
-                self.curr_parent_for_pending = Some(block.clone());
-            }
-
-            byz_blocks.push(block);
-        }
-
-        info!(
-            "Sending ByzCommitWithOrigins with {} blocks to Application layer",
-            byz_blocks.len()
-        );
-
-        // Send Byzantine commit command with origin map for proxy pattern
-        let _ = self
-            .app_tx
-            .send(AppCommand::ByzCommitWithOrigins(byz_blocks, origin_map))
-            .await;
-
-        let _ = self
-            .logserver_tx
-            .send(LogServerCommand::UpdateBCI(self.bci))
-            .await;
+        fetch_and_sort_tipcut_blocks(&cars, last_lane_seq, fetch).await
     }
 }

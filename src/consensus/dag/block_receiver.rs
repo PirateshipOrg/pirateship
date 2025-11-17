@@ -14,6 +14,7 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     config::AtomicConfig,
+    consensus::block_tipcut::BlockOrTipCut,
     crypto::{CachedBlock, CryptoServiceConnector, FutureHash},
     proto::{
         checkpoint::ProtoBackfillNack,
@@ -264,8 +265,15 @@ impl BlockReceiver {
             let (result_tx, result_rx) = oneshot::channel();
             tokio::spawn(async move {
                 match block_rx.await {
-                    Ok(block) => {
-                        let _ = result_tx.send(Ok(block));
+                    Ok(btc) => {
+                        if let BlockOrTipCut::Block(block) = btc {
+                            let _ = result_tx.send(Ok(block));
+                        } else {
+                            let _ = result_tx.send(Err(Error::new(
+                                std::io::ErrorKind::Other,
+                                "Expected block but got tipcut",
+                            )));
+                        }
                     }
                     Err(_) => {
                         let _ = result_tx.send(Err(Error::new(

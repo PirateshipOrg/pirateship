@@ -134,8 +134,6 @@ pub enum LogServerQuery {
         u64, /* last needed block.n */
         Sender<Vec<ProtoBlockHint>>,
     ),
-    // #[cfg(feature = "dag")]
-    // GetTipCutHash(u64 /* tipcut.n */, Sender<Option<Vec<u8>>>),
 }
 
 pub enum LogServerCommand {
@@ -144,8 +142,6 @@ pub enum LogServerCommand {
     UpdateBCI(u64),
     #[cfg(feature = "dag")]
     NewTipCut(CachedTipCut),
-    // #[cfg(feature = "dag")]
-    // GetLastTipCutDigest(oneshot::Sender<Option<Vec<u8>>>),
 }
 
 pub struct LogServer {
@@ -226,12 +222,6 @@ impl LogServer {
                         trace!("Received tip cut with {} CARs", tipcut.tipcut.tips.len());
                         self.handle_new_tipcut(tipcut).await;
                     },
-                    // #[cfg(feature = "dag")]
-                    // Some(LogServerCommand::GetLastTipCutDigest(reply_tx)) => {
-                    //     // Use unified log deque (stores CachedTipCut in DAG mode)
-                    //     let digest = self.log.back().map(|tc| tc.tipcut_hash.clone());
-                    //     let _ = reply_tx.send(digest);
-                    // },
                     None => {
                         error!("LogServerCommand channel closed");
                         return Err(());
@@ -639,20 +629,7 @@ impl LogServer {
             LogServerQuery::GetHints(_, sender) => {
                 // Hints logic for DAG blocks not yet implemented
                 let _ = sender.send(Vec::new()).await;
-            } // LogServerQuery::GetTipCutHash(n, sender) => {
-              //     let h = self.log.back().map(|tc| tc.tipcut.n).unwrap_or(0);
-              //     if n == 0 || n > h {
-              //         let _ = sender.send(None).await;
-              //         return;
-              //     }
-              //     // Linear search (could be optimized to index math similar to get_tipcut)
-              //     let digest = self
-              //         .log
-              //         .iter()
-              //         .find(|tc| tc.tipcut.n == n)
-              //         .map(|tc| tc.tipcut_hash.clone());
-              //     let _ = sender.send(digest).await;
-              // }
+            }
         }
     }
 

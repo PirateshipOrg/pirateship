@@ -12,7 +12,7 @@ use itertools::min;
 use log::{info, trace, warn};
 use prost::Message;
 use rand::{thread_rng, Rng};
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{digest::block_buffer::Block, Digest, Sha256, Sha512};
 use tokio::{
     sync::{
         mpsc::{channel, Receiver, Sender},
@@ -23,9 +23,13 @@ use tokio::{
 
 use crate::{
     config::AtomicConfig,
+    consensus::block_tipcut::BlockOrTipCut,
     consensus::fork_receiver::{AppendEntriesStats, MultipartFork},
     crypto::{default_hash, DIGEST_LENGTH},
-    proto::consensus::{HalfSerializedBlock, ProtoBlock, ProtoQuorumCertificate, ProtoViewChange},
+    proto::consensus::{
+        HalfSerializedBlock, HalfSerializedTipCut, ProtoBlock, ProtoQuorumCertificate,
+        ProtoViewChange,
+    },
     utils::{
         deserialize_proto_block, serialize_proto_block_nascent,
         update_parent_hash_in_proto_block_ser, update_signature_in_proto_block_ser, PerfCounter,
@@ -128,6 +132,14 @@ pub fn hash_proto_block_ser(data: &[u8]) -> HashType {
     hasher.finalize().to_vec()
 }
 
+pub fn hash_proto_tipcut_ser(data: &[u8]) -> HashType {
+    let mut hasher = Sha::new();
+    hasher.update(&data[DIGEST_LENGTH + SIGNATURE_LENGTH..]);
+    hasher.update(&data[SIGNATURE_LENGTH..SIGNATURE_LENGTH + DIGEST_LENGTH]);
+    hasher.update(&data[..SIGNATURE_LENGTH]);
+    hasher.finalize().to_vec()
+}
+
 /// Uses Ed25519 batch verify to verify a quorum certificate.
 fn verify_qc(keystore: &KeyStore, qc: &ProtoQuorumCertificate, min_len: usize) -> bool {
     let mut keys = Vec::new();
@@ -179,7 +191,7 @@ enum CryptoServiceCommand {
     ChangeKeyStore(KeyStore, oneshot::Sender<()>),
     PrepareBlock(
         ProtoBlock,
-        oneshot::Sender<CachedBlock>,
+        oneshot::Sender<BlockOrTipCut>,
         oneshot::Sender<HashType>,
         oneshot::Sender<HashType>,
         bool, /* must_sign */
@@ -190,7 +202,7 @@ enum CryptoServiceCommand {
     #[cfg(feature = "dag")]
     PrepareTipCut(
         ProtoTipCut,
-        oneshot::Sender<CachedTipCut>,
+        oneshot::Sender<BlockOrTipCut>,
         oneshot::Sender<HashType>, /* hash/digest */
         oneshot::Sender<HashType>, /* duplicate hash */
         bool,                      /* must_sign */
@@ -341,7 +353,7 @@ impl CryptoService {
                     // let mut buf = bincode::serialize(&proto_block).unwrap();
                     // let mut buf = bitcode::encode(&proto_block);
                     // let mut buf = proto_block.encode_to_vec();
-                    let (perf_counter, event_order, event_num) = if must_sign {
+                    let (perf_counter, event_order, mut event_num) = if must_sign {
                         (
                             &mut signed_block_prepare_perf_counter,
                             &signed_block_prepare_event_order,
@@ -410,7 +422,7 @@ impl CryptoService {
 
                     let _ = hash_tx.send(hsh.clone());
                     let _ = hash_tx2.send(hsh.clone());
-                    let _ = block_tx.send(CachedBlock::new(block, buf, hsh));
+                    let _ = block_tx.send(BlockOrTipCut::Block(CachedBlock::new(block, buf, hsh)));
                     perf_event!();
                     perf_counter.deregister_entry(&perf_entry);
                 }
@@ -519,7 +531,8 @@ impl CryptoService {
 
                     let _ = hash_tx.send(hsh.clone());
                     let _ = hash_tx2.send(hsh.clone());
-                    let _ = tipcut_tx.send(CachedTipCut::new(tipcut, buf, hsh));
+                    let _ =
+                        tipcut_tx.send(BlockOrTipCut::TipCut(CachedTipCut::new(tipcut, buf, hsh)));
                     perf_event_tc!();
                     perf_counter.deregister_entry(&perf_entry);
                 }
@@ -775,9 +788,20 @@ impl CryptoService {
                     // Sign over H(last_block) || H(fork_last_qc) || view || config_num || fork_last_n
 
                     let last_block_hash = match &vc.fork {
-                        Some(fork) if fork.serialized_blocks.len() > 0 => hash_proto_block_ser(
-                            &fork.serialized_blocks.last().unwrap().serialized_body,
-                        ),
+                        Some(crate::proto::consensus::proto_view_change::Fork::F(fork))
+                            if fork.serialized_blocks.len() > 0 =>
+                        {
+                            hash_proto_block_ser(
+                                &fork.serialized_blocks.last().unwrap().serialized_body,
+                            )
+                        }
+                        Some(crate::proto::consensus::proto_view_change::Fork::Tc(fork))
+                            if fork.serialized_tipcuts.len() > 0 =>
+                        {
+                            hash_proto_tipcut_ser(
+                                &fork.serialized_tipcuts.last().unwrap().serialized_body,
+                            )
+                        }
                         _ => default_hash(),
                     };
 
@@ -802,9 +826,20 @@ impl CryptoService {
 
                 CryptoServiceCommand::VerifyVC(vc, name, tx) => {
                     let last_block_hash = match &vc.fork {
-                        Some(fork) if fork.serialized_blocks.len() > 0 => hash_proto_block_ser(
-                            &fork.serialized_blocks.last().unwrap().serialized_body,
-                        ),
+                        Some(crate::proto::consensus::proto_view_change::Fork::F(fork))
+                            if fork.serialized_blocks.len() > 0 =>
+                        {
+                            hash_proto_block_ser(
+                                &fork.serialized_blocks.last().unwrap().serialized_body,
+                            )
+                        }
+                        Some(crate::proto::consensus::proto_view_change::Fork::Tc(fork))
+                            if fork.serialized_tipcuts.len() > 0 =>
+                        {
+                            hash_proto_tipcut_ser(
+                                &fork.serialized_tipcuts.last().unwrap().serialized_body,
+                            )
+                        }
                         _ => default_hash(),
                     };
 
@@ -943,7 +978,7 @@ impl CryptoServiceConnector {
         must_sign: bool,
         parent_hash_rx: FutureHash,
     ) -> (
-        oneshot::Receiver<CachedBlock>,
+        oneshot::Receiver<BlockOrTipCut>,
         oneshot::Receiver<HashType>,
         oneshot::Receiver<HashType>,
     ) {
@@ -972,9 +1007,9 @@ impl CryptoServiceConnector {
         must_sign: bool,
         parent_hash_rx: FutureHash,
     ) -> (
-        oneshot::Receiver<CachedTipCut>, // Prepared tip cut with serialization and hash
-        oneshot::Receiver<HashType>,     // Hash (for storing as next parent)
-        oneshot::Receiver<HashType>,     // Hash (duplicate for other uses)
+        oneshot::Receiver<BlockOrTipCut>, // Prepared tip cut with serialization and hash
+        oneshot::Receiver<HashType>,      // Hash (for storing as next parent)
+        oneshot::Receiver<HashType>,      // Hash (duplicate for other uses)
     ) {
         let (tipcut_tx, tipcut_rx) = oneshot::channel();
         let (digest_tx, digest_rx) = oneshot::channel();
@@ -1083,24 +1118,65 @@ impl CryptoServiceConnector {
 
     pub async fn prepare_for_rebroadcast(
         &mut self,
-        mut part: Vec<HalfSerializedBlock>,
+        #[cfg(not(feature = "dag"))] mut part: Vec<HalfSerializedBlock>,
+        #[cfg(feature = "dag")] mut part: Vec<HalfSerializedTipCut>,
         min_qc_len: usize,
     ) -> Vec<(
-        oneshot::Receiver<Result<CachedBlock, Error>>,
+        oneshot::Receiver<Result<BlockOrTipCut, Error>>,
         oneshot::Receiver<Result<HashType, Error>>,
     )> {
         let mut fork_future = Vec::with_capacity(part.len());
         for e in part.drain(..) {
             let (tx, rx) = oneshot::channel();
             let (tx2, rx2) = oneshot::channel();
-            self.dispatch(CryptoServiceCommand::VerifyBlockSer(
-                min_qc_len,
-                e.serialized_body,
-                tx,
-                tx2,
-            ))
-            .await;
-            fork_future.push((rx, rx2));
+            #[cfg(not(feature = "dag"))]
+            {
+                self.dispatch(CryptoServiceCommand::VerifyBlockSer(
+                    min_qc_len,
+                    e.serialized_body,
+                    tx,
+                    tx2,
+                ))
+                .await;
+                // Map CachedBlock -> BlockOrTipCut::Block via a forwarding channel
+                let (wrap_tx, wrap_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let mapped: Result<BlockOrTipCut, Error> = match rx.await {
+                        Ok(Ok(cb)) => Ok(BlockOrTipCut::Block(cb)),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(Error::new(
+                            ErrorKind::BrokenPipe,
+                            "Crypto service channel closed",
+                        )),
+                    };
+                    let _ = wrap_tx.send(mapped);
+                });
+                fork_future.push((wrap_rx, rx2));
+            }
+            #[cfg(feature = "dag")]
+            {
+                self.dispatch(CryptoServiceCommand::VerifyTipCutSer(
+                    min_qc_len,
+                    e.serialized_body,
+                    tx,
+                    tx2,
+                ))
+                .await;
+                // Map CachedTipCut -> BlockOrTipCut::TipCut via a forwarding channel
+                let (wrap_tx, wrap_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let mapped: Result<BlockOrTipCut, Error> = match rx.await {
+                        Ok(Ok(tc)) => Ok(BlockOrTipCut::TipCut(tc)),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(Error::new(
+                            ErrorKind::BrokenPipe,
+                            "Crypto service channel closed",
+                        )),
+                    };
+                    let _ = wrap_tx.send(mapped);
+                });
+                fork_future.push((wrap_rx, rx2));
+            }
         }
         fork_future
     }

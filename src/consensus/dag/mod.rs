@@ -12,4 +12,6 @@ pub mod lane_logserver;
 #[cfg(feature = "dag")]
 pub mod lane_staging;
 #[cfg(feature = "dag")]
+pub mod sort;
+#[cfg(feature = "dag")]
 pub mod tip_cut_proposal;

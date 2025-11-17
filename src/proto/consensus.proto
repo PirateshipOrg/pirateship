@@ -25,10 +25,13 @@ message DefferedSignature { }
 message ProtoViewChange {
     uint64 view = 1;
     uint64 config_num = 2;
-    ProtoFork fork = 3;
-    ProtoQuorumCertificate fork_last_qc = 4;
-    uint64 fork_last_n = 5;
-    bytes fork_sig = 6;
+    oneof fork {
+        ProtoFork f = 3;
+        ProtoTipCutFork tc = 4;
+    }
+    ProtoQuorumCertificate fork_last_qc = 5;
+    uint64 fork_last_n = 6;
+    bytes fork_sig = 7;
 
     // The signature needs to be agnostic of how much of the prefix is sent over.
     // Signature is over H(last_block) || H(fork_last_qc) || view || config_num || fork_last_n

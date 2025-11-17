@@ -5,6 +5,7 @@ use std::{pin::Pin, sync::Arc, time::Duration};
 
 #[cfg(feature = "dag")]
 use crate::consensus::block_broadcaster;
+use crate::consensus::block_tipcut::BlockOrTipCut;
 use crate::crypto::{default_hash, FutureHash};
 use crate::utils::channel::{Receiver, Sender};
 use log::{debug, error, info, trace, warn};
@@ -66,10 +67,7 @@ pub struct BlockSequencer {
     qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
     current_qc_list: Vec<ProtoQuorumCertificate>,
 
-    #[cfg(not(feature = "dag"))]
-    block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
-    #[cfg(feature = "dag")]
-    block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedTipCut>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
+    block_broadcaster_tx: Sender<(u64, oneshot::Receiver<BlockOrTipCut>)>, // Last-ditch effort to parallelize hashing and signing of blocks, shouldn't matter.
     client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
     crypto: CryptoServiceConnector,
@@ -97,14 +95,7 @@ impl BlockSequencer {
         #[cfg(not(feature = "dag"))] batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
         #[cfg(feature = "dag")] tipcut_rx: Receiver<ProtoTipCut>,
         qc_rx: UnboundedReceiver<ProtoQuorumCertificate>,
-        #[cfg(not(feature = "dag"))] block_broadcaster_tx: Sender<(
-            u64,
-            oneshot::Receiver<CachedBlock>,
-        )>,
-        #[cfg(feature = "dag")] block_broadcaster_tx: Sender<(
-            u64,
-            oneshot::Receiver<CachedTipCut>,
-        )>,
+        block_broadcaster_tx: Sender<(u64, oneshot::Receiver<BlockOrTipCut>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
         #[cfg(feature = "dag")] block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
@@ -239,192 +230,152 @@ impl BlockSequencer {
     }
 
     async fn worker(&mut self, chan_depth: usize) -> Result<(), ()> {
-        // DAG mode: sequence tip cuts for consensus layer
-        // Handle tip cuts similarly to batches: collect QCs, respect signature timer,
-        // pipeline parent digest, and forward to broadcaster.
-        #[cfg(feature = "dag")]
-        // {
-        //     let mut qc_buf = Vec::new();
+        // The slow path needs 2-hop QCs to byz-commit.
+        // If we assume the head of the chain is crash committed immediately (best case),
+        // On average, need the 2-hop to happen within config.consensus_config.commit_index_gap_hard.
+        // Otherwise, this will cause a view change.
 
-        //     tokio::select! {
-        //         biased;
-        //         // Drain QCs eagerly (like traditional path)
-        //         _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-        //             if !qc_buf.is_empty() {
-        //                 self.add_qcs(qc_buf).await;
-        //             }
-        //         },
-        //         // Signature timer to bound QC attachment latency
-        //         _tick = self.signature_timer.wait() => {
-        //             self.force_sign_next_batch = true;
-        //         },
-        //         // Main input: incomplete tip cut from tip_cut_proposal
-        //         _tipcut = self.tipcut_rx.recv() => {
-        //             if let Some(tipcut) = _tipcut {
-        //                 self.__blocks_proposed_in_this_view += 1;
-        //                 // Projected seq num is used as entry id for perf (parity with blocks)
-        //                 self.perf_register(self.seq_num + 1);
-        //                 self.handle_new_tipcut(tipcut).await;
-        //             }
-        //         },
-        //         // Control commands (view changes etc.)
-        //         _cmd = self.control_command_rx.recv() => {
-        //             self.handle_control_command(_cmd).await;
-        //         },
-        //     }
+        // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
+        // This limits the depth of pipeline (ie, max number of inflight blocks).
 
-        //     return Ok(());
-        // }
+        let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
+        let mut blocked_for_qc_pass = false;
 
-        // Traditional mode: sequence batches into blocks
+        #[cfg(not(feature = "no_qc"))]
         {
-            // The slow path needs 2-hop QCs to byz-commit.
-            // If we assume the head of the chain is crash committed immediately (best case),
-            // On average, need the 2-hop to happen within config.consensus_config.commit_index_gap_hard.
-            // Otherwise, this will cause a view change.
-
-            // So, we want to wait for QCs to appear if seq_num - last_qc_n_seen > commit_index_gap_hard / 2.
-            // This limits the depth of pipeline (ie, max number of inflight blocks).
-
-            let mut listen_for_new_batch = self.view_is_stable && self.i_am_leader();
-            let mut blocked_for_qc_pass = false;
-
-            #[cfg(not(feature = "no_qc"))]
+            // Is there a QC I can get?
+            let mut qc_check_cond = self.qc_rx.len() > 0;
+            #[cfg(feature = "no_pipeline")]
             {
-                // Is there a QC I can get?
-                let mut qc_check_cond = self.qc_rx.len() > 0;
-                #[cfg(feature = "no_pipeline")]
-                {
-                    qc_check_cond = qc_check_cond && self.current_qc_list.len() == 0;
-                }
-                if qc_check_cond {
-                    let mut qc_buf = Vec::new();
-                    self.qc_rx.recv_many(&mut qc_buf, self.qc_rx.len()).await;
-                    self.add_qcs(qc_buf).await;
-                }
-
-                // let config = &self.config.get().consensus_config;
-                // let hard_gap = config.commit_index_gap_hard;
-                // let soft_gap = config.commit_index_gap_soft;
-
-                // if !self.force_sign_next_batch && self.__blocks_proposed_in_this_view > soft_gap {
-                //     listen_for_new_batch = listen_for_new_batch
-                //     && (self.seq_num as i64 - self.__last_qc_n_seen as i64) < (hard_gap / 2) as i64;
-                //     // This is to prevent the locking happen when the leader is new.
-
-                //     blocked_for_qc_pass = true;
-                // }
+                qc_check_cond = qc_check_cond && self.current_qc_list.len() == 0;
+            }
+            if qc_check_cond {
+                let mut qc_buf = Vec::new();
+                self.qc_rx.recv_many(&mut qc_buf, self.qc_rx.len()).await;
+                self.add_qcs(qc_buf).await;
             }
 
-            let mut qc_buf = Vec::new();
+            // let config = &self.config.get().consensus_config;
+            // let hard_gap = config.commit_index_gap_hard;
+            // let soft_gap = config.commit_index_gap_soft;
 
-            if listen_for_new_batch {
-                #[cfg(not(feature = "dag"))]
-                {
-                    tokio::select! {
-                        biased;
-                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                            self.add_qcs(qc_buf).await;
-                        }
-                        _tick = self.signature_timer.wait() => {
-                            self.force_sign_next_batch = true;
-                        },
-                        _batch_and_client_reply = self.batch_rx.recv() => {
-                            if let Some(_) = _batch_and_client_reply {
-                                self.__blocks_proposed_in_this_view += 1;
-                                let (batch, client_reply) = _batch_and_client_reply.unwrap();
-                                self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
-                                self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
-                            }
-                        },
-                        _cmd = self.control_command_rx.recv() => {
-                            self.handle_control_command(_cmd).await;
-                        },
-                    }
-                }
-                #[cfg(feature = "dag")]
-                {
-                    tokio::select! {
-                        biased;
-                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                            self.add_qcs(qc_buf).await;
-                        }
-                        _tick = self.signature_timer.wait() => {
-                            self.force_sign_next_batch = true;
-                        },
-                        _tipcut = self.tipcut_rx.recv() => {
-                            if let Some(tipcut) = _tipcut {
-                                self.__blocks_proposed_in_this_view += 1;
-                                // Projected seq num is used as entry id for perf (parity with blocks)
-                                self.perf_register(self.seq_num + 1);
-                                self.handle_new_batch(tipcut, vec![], self.seq_num + 1).await;
-                            }
-                        },
-                        _cmd = self.control_command_rx.recv() => {
-                            self.handle_control_command(_cmd).await;
-                        },
-                    }
-                }
-            } else if blocked_for_qc_pass {
+            // if !self.force_sign_next_batch && self.__blocks_proposed_in_this_view > soft_gap {
+            //     listen_for_new_batch = listen_for_new_batch
+            //     && (self.seq_num as i64 - self.__last_qc_n_seen as i64) < (hard_gap / 2) as i64;
+            //     // This is to prevent the locking happen when the leader is new.
+
+            //     blocked_for_qc_pass = true;
+            // }
+        }
+
+        let mut qc_buf = Vec::new();
+
+        if listen_for_new_batch {
+            #[cfg(not(feature = "dag"))]
+            {
                 tokio::select! {
                     biased;
                     _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
                         self.add_qcs(qc_buf).await;
-                    },
+                    }
                     _tick = self.signature_timer.wait() => {
                         self.force_sign_next_batch = true;
                     },
+                    _batch_and_client_reply = self.batch_rx.recv() => {
+                        if let Some(_) = _batch_and_client_reply {
+                            self.__blocks_proposed_in_this_view += 1;
+                            let (batch, client_reply) = _batch_and_client_reply.unwrap();
+                            self.perf_register(self.seq_num + 1); // Projected seq num is used as entry id for perf
+                            self.handle_new_batch(batch, client_reply, vec![], self.seq_num + 1).await;
+                        }
+                    },
                     _cmd = self.control_command_rx.recv() => {
                         self.handle_control_command(_cmd).await;
-                    }
-
-                    // I am not listening to new batch because I am blocked for a new QC.
-                    // There is no need to cancel requests here.
-                }
-            } else {
-                #[cfg(not(feature = "dag"))]
-                {
-                    tokio::select! {
-                        biased;
-                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                            self.add_qcs(qc_buf).await;
-                        }
-                        _cmd = self.control_command_rx.recv() => {
-                            self.handle_control_command(_cmd).await;
-                        },
-                        _batch_and_client_reply = self.batch_rx.recv() => {
-                            if let Some(_) = _batch_and_client_reply {
-                                let (_, client_reply) = _batch_and_client_reply.unwrap();
-                                let (tx, rx) = oneshot::channel();
-                                tx.send(vec![]).expect("Should be able to send hash");
-
-                                self.client_reply_tx
-                                    .send((rx, client_reply))
-                                    .await
-                                    .expect("Should be able to send client_reply_tx");
-                            }
-                        },
-                    }
-                }
-                #[cfg(feature = "dag")]
-                {
-                    tokio::select! {
-                        biased;
-                        _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
-                            self.add_qcs(qc_buf).await;
-                        }
-                        _cmd = self.control_command_rx.recv() => {
-                            self.handle_control_command(_cmd).await;
-                        },
-                        _tipcut = self.tipcut_rx.recv() => {
-                            trace!("Dropping tipcut because not leader or view not stable");
-                        },
-                    }
+                    },
                 }
             }
+            #[cfg(feature = "dag")]
+            {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
+                    }
+                    _tick = self.signature_timer.wait() => {
+                        self.force_sign_next_batch = true;
+                    },
+                    _tipcut = self.tipcut_rx.recv() => {
+                        if let Some(tipcut) = _tipcut {
+                            self.__blocks_proposed_in_this_view += 1;
+                            // Projected seq num is used as entry id for perf (parity with blocks)
+                            self.perf_register(self.seq_num + 1);
+                            self.handle_new_batch(tipcut, vec![], self.seq_num + 1).await;
+                        }
+                    },
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
+                    },
+                }
+            }
+        } else if blocked_for_qc_pass {
+            tokio::select! {
+                biased;
+                _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                    self.add_qcs(qc_buf).await;
+                },
+                _tick = self.signature_timer.wait() => {
+                    self.force_sign_next_batch = true;
+                },
+                _cmd = self.control_command_rx.recv() => {
+                    self.handle_control_command(_cmd).await;
+                }
 
-            Ok(())
-        } // end cfg(not(feature = "dag"))
+                // I am not listening to new batch because I am blocked for a new QC.
+                // There is no need to cancel requests here.
+            }
+        } else {
+            #[cfg(not(feature = "dag"))]
+            {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
+                    }
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
+                    },
+                    _batch_and_client_reply = self.batch_rx.recv() => {
+                        if let Some(_) = _batch_and_client_reply {
+                            let (_, client_reply) = _batch_and_client_reply.unwrap();
+                            let (tx, rx) = oneshot::channel();
+                            tx.send(vec![]).expect("Should be able to send hash");
+
+                            self.client_reply_tx
+                                .send((rx, client_reply))
+                                .await
+                                .expect("Should be able to send client_reply_tx");
+                        }
+                    },
+                }
+            }
+            #[cfg(feature = "dag")]
+            {
+                tokio::select! {
+                    biased;
+                    _ = self.qc_rx.recv_many(&mut qc_buf, chan_depth) => {
+                        self.add_qcs(qc_buf).await;
+                    }
+                    _cmd = self.control_command_rx.recv() => {
+                        self.handle_control_command(_cmd).await;
+                    },
+                    _tipcut = self.tipcut_rx.recv() => {
+                        trace!("Dropping tipcut because not leader or view not stable");
+                    },
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn handle_new_batch(
@@ -505,12 +456,6 @@ impl BlockSequencer {
             .expect("Should be able to send client_reply_tx");
         self.perf_add_event(perf_entry_id, "Send to Client Reply", must_sign);
 
-        #[cfg(not(feature = "dag"))]
-        self.block_broadcaster_tx
-            .send((n, block_rx))
-            .await
-            .expect("Should be able to send block_broadcaster_tx");
-        #[cfg(feature = "dag")]
         self.block_broadcaster_tx
             .send((n, tipcut_rx))
             .await

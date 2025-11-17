@@ -29,6 +29,7 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     config::AtomicConfig,
+    consensus::block_tipcut::BlockOrTipCut,
     crypto::{CachedBlock, CryptoServiceConnector},
     proto::{
         consensus::{HalfSerializedBlock, ProtoAppendBlocks},
@@ -63,7 +64,7 @@ pub struct DagBlockBroadcaster {
     lane_prefix_buffer: Vec<CachedBlock>,
 
     // Input ports
-    my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
+    my_block_rx: Receiver<(u64, oneshot::Receiver<BlockOrTipCut>)>,
     other_block_rx: Receiver<SingleBlock>,
     control_command_rx: Receiver<DagBlockBroadcasterCommand>,
 
@@ -90,7 +91,7 @@ impl DagBlockBroadcaster {
         config: AtomicConfig,
         client: PinnedClient,
         crypto: CryptoServiceConnector,
-        my_block_rx: Receiver<(u64, oneshot::Receiver<CachedBlock>)>,
+        my_block_rx: Receiver<(u64, oneshot::Receiver<BlockOrTipCut>)>,
         other_block_rx: Receiver<SingleBlock>,
         control_command_rx: Receiver<DagBlockBroadcasterCommand>,
         storage: StorageServiceConnector,
@@ -194,7 +195,12 @@ impl DagBlockBroadcaster {
                     error!("Failed to get block {} {:?}", __n, block);
                     return Ok(());
                 }
-                self.process_my_block(block.unwrap()).await?;
+                if let BlockOrTipCut::Block(b) = block.unwrap() {
+                    self.process_my_block(b).await?;
+                } else {
+                    error!("Expected block but got tipcut for block {}", __n);
+                    return Ok(());
+                }
 
                 trace!("Processed block {}", __n);
             },
