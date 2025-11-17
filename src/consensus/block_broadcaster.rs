@@ -333,15 +333,19 @@ impl BlockBroadcaster {
         }
 
         #[cfg(not(feature = "dag"))]
-        if let BlockOrTipCut::Block(b) = entry {
+        {
+            let block = match entry {
+                BlockOrTipCut::Block(b) => b,
+                _ => unreachable!(),
+            };
             self.app_command_tx
                 .send(AppCommand::NewRequestBatch(
-                    b.n(),
+                    block.block.n,
                     view,
                     view_is_stable,
                     true,
-                    b.tx_list.len(),
-                    b.block_hash.clone(),
+                    block.block.tx_list.len(),
+                    block.block_hash.clone(),
                 ))
                 .await
                 .unwrap();
@@ -434,17 +438,23 @@ impl BlockBroadcaster {
             // Forward to app for stats.
             // NOTE: In Dag mode, TipCuts are not forwarded to app command. Batch stats are handled by dag/block_broadcaster.
             #[cfg(not(feature = "dag"))]
-            self.app_command_tx
-                .send(AppCommand::NewRequestBatch(
-                    block.block.n,
-                    view,
-                    view_is_stable,
-                    false,
-                    block.block.tx_list.len(),
-                    block.block_hash.clone(),
-                ))
-                .await
-                .unwrap();
+            {
+                let block = match entry {
+                    BlockOrTipCut::Block(b) => b,
+                    _ => unreachable!(),
+                };
+                self.app_command_tx
+                    .send(AppCommand::NewRequestBatch(
+                        block.block.n,
+                        view,
+                        view_is_stable,
+                        false,
+                        block.block.tx_list.len(),
+                        block.block_hash.clone(),
+                    ))
+                    .await
+                    .unwrap();
+            }
         }
 
         Ok(())

@@ -8,7 +8,6 @@ use tokio::{sync::oneshot, task::spawn_local};
 
 use crate::{
     consensus::{
-        dag::lane_staging,
         extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand},
         logserver::LogServerCommand,
         pacemaker::PacemakerCommand,
@@ -24,6 +23,9 @@ use crate::{
     rpc::{client::PinnedClient, PinnedMessage, SenderType},
     utils::StorageAck,
 };
+
+#[cfg(feature = "dag")]
+use crate::consensus::dag::lane_staging;
 
 use super::{
     super::{
@@ -561,6 +563,7 @@ impl Staging {
                     .await
                     .unwrap();
             }
+            #[cfg(feature = "dag")]
             BlockOrTipCut::TipCut(tc) => {
                 self.logserver_tx
                     .send(LogServerCommand::NewTipCut(tc.clone()))
@@ -722,6 +725,7 @@ impl Staging {
                     .await
                     .unwrap();
             }
+            #[cfg(feature = "dag")]
             BlockOrTipCut::TipCut(tc) => {
                 self.logserver_tx
                     .send(LogServerCommand::NewTipCut(tc.clone()))
@@ -935,7 +939,7 @@ impl Staging {
                 .collect::<Vec<_>>();
 
             self.app_tx
-                .send(AppCommand::CrashCommit(committed_blocks))
+                .send(AppCommand::CrashCommit(committed_blocks.clone()))
                 .await
                 .unwrap();
 

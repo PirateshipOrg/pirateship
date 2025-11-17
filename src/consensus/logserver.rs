@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -341,8 +341,8 @@ impl LogServer {
             },
 
             Some(Origin::Vc(vc)) => match vc.fork.as_ref() {
-                Some(fork) => fork,
-                None => {
+                Some(crate::proto::consensus::proto_view_change::Fork::F(fork)) => fork,
+                _ => {
                     warn!("Malformed request");
                     return Ok(());
                 }
@@ -385,7 +385,9 @@ impl LogServer {
 
             Origin::Vc(vc) => ProtoPayload {
                 message: Some(Message::ViewChange(ProtoViewChange {
-                    fork: Some(new_fork),
+                    fork: Some(crate::proto::consensus::proto_view_change::Fork::F(
+                        new_fork,
+                    )),
                     ..vc
                 })),
             },

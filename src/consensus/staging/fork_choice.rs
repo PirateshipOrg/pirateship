@@ -5,8 +5,11 @@ use crate::{
     crypto::{default_hash, hash_proto_block_ser, hash_proto_tipcut_ser},
     proto::consensus::{ProtoFork, ProtoTipCut, ProtoViewChange},
     rpc::SenderType,
-    utils::{get_parent_hash_in_proto_block_ser, get_parent_hash_in_proto_tipcut_ser},
+    utils::get_parent_hash_in_proto_block_ser,
 };
+
+#[cfg(feature = "dag")]
+use crate::utils::get_parent_hash_in_proto_tipcut_ser;
 
 use super::{view_change::ForkStat, Staging};
 

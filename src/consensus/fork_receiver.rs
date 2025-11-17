@@ -1,6 +1,6 @@
-use crate::{consensus::dag::tip_cut_proposal, crypto::FutureHash, utils::channel::make_channel};
 #[cfg(feature = "dag")]
 use crate::{crypto::CachedTipCut, proto::consensus::HalfSerializedTipCut};
+use crate::{crypto::FutureHash, utils::channel::make_channel};
 use std::{collections::VecDeque, io::Error, sync::Arc};
 
 use crate::crypto::DIGEST_LENGTH;
@@ -12,6 +12,8 @@ use prost::Message;
 use tokio::sync::broadcast;
 use tokio::sync::{oneshot, Mutex};
 
+#[cfg(feature = "dag")]
+use crate::consensus::dag::tip_cut_proposal;
 use crate::{
     config::AtomicConfig,
     crypto::{default_hash, CachedBlock, CryptoServiceConnector, HashType},
@@ -214,7 +216,7 @@ impl ForkReceiver {
                                 self.process_fork(ae, sender).await;
                             }
                             #[cfg(not(feature = "dag"))]
-                            Some(crate::proto::consensus::proto_append_entries::Entry::Tipcut(_)) => {
+                            Some(crate::proto::consensus::proto_append_entries::Entry::TipcutFork(_)) => {
                                 warn!("Received TipCut in non-DAG mode - ignoring");
                             }
                             None => {

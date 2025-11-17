@@ -17,7 +17,7 @@ use tokio::sync::{oneshot, Mutex};
 use crate::utils::PerfCounter;
 use crate::{
     config::AtomicConfig,
-    crypto::{CachedBlock, CachedTipCut, CryptoServiceConnector, HashType},
+    crypto::{CachedBlock, CryptoServiceConnector, HashType},
     proto::consensus::{
         DefferedSignature, ProtoBlock, ProtoForkValidation, ProtoQuorumCertificate,
         ProtoTipCutValidation,
@@ -27,8 +27,9 @@ use crate::{
 
 use super::batch_proposal::{MsgAckChanWithTag, RawBatch};
 
-#[cfg(feature = "dag")]
 use super::block_broadcaster::BlockBroadcasterCommand;
+#[cfg(feature = "dag")]
+use crate::crypto::CachedTipCut;
 #[cfg(feature = "dag")]
 use crate::proto::consensus::ProtoTipCut;
 
@@ -98,7 +99,7 @@ impl BlockSequencer {
         block_broadcaster_tx: Sender<(u64, oneshot::Receiver<BlockOrTipCut>)>,
         client_reply_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         crypto: CryptoServiceConnector,
-        #[cfg(feature = "dag")] block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
+        block_broadcaster_command_tx: Sender<BlockBroadcasterCommand>,
     ) -> Self {
         let signature_timer = ResettableTimer::new(Duration::from_millis(
             config.get().consensus_config.signature_max_delay_ms,
@@ -140,7 +141,6 @@ impl BlockSequencer {
             perf_counter_unsigned,
             __last_qc_n_seen: 0,
             __blocks_proposed_in_this_view: 0,
-            #[cfg(feature = "dag")]
             block_broadcaster_command_tx,
         };
 
@@ -456,10 +456,18 @@ impl BlockSequencer {
             .expect("Should be able to send client_reply_tx");
         self.perf_add_event(perf_entry_id, "Send to Client Reply", must_sign);
 
+        #[cfg(not(feature = "dag"))]
+        self.block_broadcaster_tx
+            .send((n, block_rx))
+            .await
+            .expect("Should be able to send block_broadcaster_tx");
+
+        #[cfg(feature = "dag")]
         self.block_broadcaster_tx
             .send((n, tipcut_rx))
             .await
             .expect("Should be able to send block_broadcaster_tx");
+
         self.perf_add_event(perf_entry_id, "Send to Block Broadcaster", must_sign);
 
         self.perf_deregister(perf_entry_id);

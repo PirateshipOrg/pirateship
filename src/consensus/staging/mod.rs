@@ -14,7 +14,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 use crate::crypto::HashType;
 use crate::{
     config::AtomicConfig,
-    crypto::{CachedBlock, CachedTipCut, CryptoServiceConnector},
+    crypto::{CachedBlock, CryptoServiceConnector},
     proto::consensus::{
         ProtoForkValidation, ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoTipCut,
         ProtoTipCutValidation, ProtoVote,
@@ -44,6 +44,8 @@ use super::{
 use crate::consensus::dag::lane_logserver::LaneLogServerQuery;
 #[cfg(feature = "dag")]
 use crate::consensus::dag::sort::{fetch_and_sort_tipcut_blocks, TipCutSortError};
+#[cfg(feature = "dag")]
+use crate::crypto::CachedTipCut;
 #[cfg(feature = "dag")]
 use crate::proto::consensus::ProtoBlockCar;
 #[cfg(feature = "dag")]
@@ -186,7 +188,7 @@ impl Staging {
         qc_tx: UnboundedSender<ProtoQuorumCertificate>,
         batch_proposer_command_tx: Sender<BatchProposerCommand>,
         logserver_tx: Sender<LogServerCommand>,
-    #[cfg(feature = "dag")] lane_logserver_query_tx: Sender<LaneLogServerQuery>,
+        #[cfg(feature = "dag")] lane_logserver_query_tx: Sender<LaneLogServerQuery>,
 
         #[cfg(feature = "extra_2pc")] two_pc_command_tx: Sender<TwoPCCommand>,
 

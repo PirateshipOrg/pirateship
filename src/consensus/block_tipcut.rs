@@ -1,9 +1,12 @@
 /// Module for shared behavior between blocks and tipcuts in consensus layer.
 /// Essentially just an enum wrapper around CachedBlock and CachedTipCut.
 use crate::{
-    crypto::{CachedBlock, CachedTipCut},
+    crypto::CachedBlock,
     proto::consensus::{ProtoForkValidation, ProtoQuorumCertificate, ProtoTipCutValidation},
 };
+
+#[cfg(feature = "dag")]
+use crate::crypto::CachedTipCut;
 
 #[derive(Clone, Debug)]
 pub enum BlockOrTipCut {

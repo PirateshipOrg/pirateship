@@ -594,7 +594,6 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (tip_cut_proposal_tx, tip_cut_proposal_rx) = make_channel(_chan_depth);
         #[cfg(feature = "dag")]
         let (_tip_cut_proposal_cmd_tx, tip_cut_proposal_cmd_rx) = make_channel(_chan_depth);
-        #[cfg(feature = "dag")]
         let (block_broadcaster_command_tx, _block_broadcaster_command_rx) =
             make_channel(_chan_depth);
 
