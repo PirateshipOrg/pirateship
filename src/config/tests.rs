@@ -70,6 +70,7 @@ fn test_nodeconfig_serialize() {
     let app_config = AppConfig {
         logger_stats_report_ms: 100,
         checkpoint_interval_ms: 60000,
+        app_specific: HashMap::new(),
     };
 
     let evil_config = EvilConfig {
@@ -226,6 +227,7 @@ async fn test_atomic_config_access() {
     let app_config = AppConfig {
         logger_stats_report_ms: 100,
         checkpoint_interval_ms: 60000,
+        app_specific: HashMap::new(),
     };
 
     let evil_config = EvilConfig {
