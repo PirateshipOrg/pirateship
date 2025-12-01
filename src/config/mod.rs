@@ -3,7 +3,7 @@
 
 
 use serde::{Deserialize, Serialize};
-use serde_json::Result;
+use serde_json::{Result, Value};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -114,6 +114,10 @@ impl ConsensusConfig {
 pub struct AppConfig {
     pub logger_stats_report_ms: u64,
     pub checkpoint_interval_ms: u64,
+
+    #[serde(flatten)]
+    #[serde(default = "HashMap::new")]
+    pub app_specific: HashMap<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -222,6 +226,7 @@ impl ClientConfig {
             app_config: AppConfig {
                 logger_stats_report_ms: 100,
                 checkpoint_interval_ms: 60000,
+                app_specific: HashMap::new(),
             },
             
             #[cfg(feature = "evil")]
