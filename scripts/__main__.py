@@ -222,7 +222,7 @@ def main(ctx):
 )
 @click.option(
     "-d", "--workdir", required=False,
-    type=click.Path(file_okay=False, resolve_path=True),
+    type=click.Path(file_okay=False, resolve_path=False), # Need relative paths here.
     default=None
 )
 def all(config, workdir):

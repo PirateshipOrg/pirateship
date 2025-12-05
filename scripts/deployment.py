@@ -158,6 +158,13 @@ class Deployment:
         if self.mode == "manual":
             # Manual must mean there is a nodelist specified in the toml file.
             # There is no need to deploy.
+            # Save myself
+            with open(os.path.join(self.workdir, "deployment", "deployment.pkl"), "wb") as f:
+                pickle.dump(self, f)
+
+            # Rewrite deployment.txt
+            with open(os.path.join(self.workdir, "deployment", "deployment.txt"), "w") as f:
+                pprint(self, f)
             return
         
         # Terraform deploy

@@ -1,0 +1,168 @@
+workdir = "deployment_artifacts"
+project_home = "https://github.com/grapheo12/pirateship"
+
+[deployment_config]
+mode = "manual"
+ssh_key = "id_ed25519"
+ssh_user = "shubham_mishra"
+node_port_base = 3000
+
+
+[deployment_config.node_list]
+[deployment_config.node_list.nodepool_vm0]
+private_ip = "10.0.1.16"
+public_ip = "34.9.210.58"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm1]
+private_ip = "10.0.1.10"
+public_ip = "34.132.89.189"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm2]
+private_ip = "10.0.1.15"
+public_ip = "34.170.163.79"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm3]
+private_ip = "10.0.1.13"
+public_ip = "34.45.236.240"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm4]
+private_ip = "10.0.1.14"
+public_ip = "34.57.92.93"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm5]
+private_ip = "10.0.1.11"
+public_ip = "34.10.69.175"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.nodepool_vm6]
+private_ip = "10.0.1.12"
+public_ip = "104.198.56.254"
+tee_type = "sev"
+region_id = 0
+
+[deployment_config.node_list.clientpool_vm0]
+private_ip = "10.0.2.3"
+public_ip = "34.31.76.85"
+[deployment_config.node_list.clientpool_vm1]
+private_ip = "10.0.2.4"
+public_ip = "34.31.167.16"
+[deployment_config.node_list.clientpool_vm2]
+private_ip = "10.0.2.5"
+public_ip = "35.239.110.106"
+
+
+[node_config]
+
+
+[node_config.net_config]
+client_max_retry = 10
+
+[node_config.rpc_config]
+recv_buffer_size = 32768
+channel_depth = 1000
+
+[node_config.consensus_config]
+commit_index_gap_soft = 250
+commit_index_gap_hard = 500
+liveness_u = 2
+max_backlog_batch_size = 1000
+signature_max_delay_blocks = 10
+signature_max_delay_ms = 102 # roughly batch_max_delay_ms * signature_max_delay_blocks
+num_crypto_workers = 5
+view_timeout_ms = 4000
+batch_max_delay_ms = 2
+
+[node_config.consensus_config.log_storage_config.RocksDB]
+write_buffer_size = 2147483648
+max_write_buffer_number = 1
+max_write_buffers_to_merge = 1
+
+[node_config.app_config]
+logger_stats_report_ms = 100
+checkpoint_interval_ms = 1000
+
+[node_config.evil_config]
+simulate_byzantine_behavior = false
+byzantine_start_block = 0
+
+
+[client_config]
+full_duplex = true
+client_sub_id = 0       # This is filled up later by the caller code.
+
+[client_config.net_config]
+client_max_retry = 10
+
+[client_config.workload_config]
+num_requests = 100_000_000
+request_config = "Blanks"
+max_concurrent_requests = 16
+
+
+[[experiments]]
+name = "pirateship"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make"
+duration = 60
+
+[experiments.sweeping_parameters]
+# num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
+num_clients = [400, 500, 600]
+
+
+# [[experiments]]
+# name = "pirateship_sig_1"
+# repeats = 1
+# num_nodes = 7
+# node_distribution = "uniform"
+# build_command = "make"
+# duration = 60
+
+# [experiments.node_config.consensus_config]
+# signature_max_delay_blocks = 1
+
+# [experiments.sweeping_parameters]
+# num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
+
+
+
+
+[[results]]
+name = "tput_latency_client_sweep"
+plotter = "tput_latency_sweep"
+ramp_up = 15
+ramp_down = 15
+output = "lan_final.pdf"
+force_parse = true
+# skip_indices = [0, 1]
+
+[results.legends]
+# Experiment group to legend mapping
+pirateship = "ps(sig=10)+ps(sig=10)-aud+byz"
+pirateship_sig_1 = "ps(sig=1)+ps(sig=1)-aud+byz"
+hotstuff = "hotstuff+onlybyz"
+engraft = "engraft+onlybyz"
+signed_raft = "signed_raft(n=5)"
+autobahn = "autobahn"
+signed_raft_n7 = "signed_raft(n=7)"
+
+
+# [results.partitions]
+# cft = ["ps(sig=10)", "ps(sig=1)", "engraft", "signed_raft(n=5)", "signed_raft(n=7)"]
+# bft = ["ps(sig=10)-aud", "ps(sig=1)-aud", "hotstuff", "autobahn"]
+
+[results.font]
+size = 55
