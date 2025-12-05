@@ -84,8 +84,8 @@ view_timeout_ms = 4000
 batch_max_delay_ms = 2
 
 [node_config.consensus_config.log_storage_config.RocksDB]
-write_buffer_size = 2147483648
-max_write_buffer_number = 1
+write_buffer_size = 67_108_864 # 64 MiB
+max_write_buffer_number = 8
 max_write_buffers_to_merge = 1
 
 [node_config.app_config]
@@ -115,12 +115,25 @@ name = "pirateship"
 repeats = 1
 num_nodes = 7
 node_distribution = "uniform"
-build_command = "make"
+build_command = "make signed_raft_logger"
 duration = 60
 
 [experiments.sweeping_parameters]
 # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
 num_clients = [400, 500, 600]
+
+# [[experiments]]
+# name = "autobahn"
+# type = "autobahn"
+# repeats = 1
+# num_nodes = 7
+# node_distribution = "uniform"
+# build_command = "make -C autobahn"
+# duration = 60
+
+# [experiments.sweeping_parameters]
+# # num_clients = [100_000, 120_000, 150_000, 200_000, 250_000, 300_000, 310_000, 320_000]
+# num_clients = [250_000, 300_000]
 
 
 # [[experiments]]
@@ -143,8 +156,8 @@ num_clients = [400, 500, 600]
 [[results]]
 name = "tput_latency_client_sweep"
 plotter = "tput_latency_sweep"
-ramp_up = 15
-ramp_down = 15
+ramp_up = 5
+ramp_down = 2
 output = "lan_final.pdf"
 force_parse = true
 # skip_indices = [0, 1]
