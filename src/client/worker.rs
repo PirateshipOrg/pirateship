@@ -381,7 +381,7 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
             };
 
             if res.is_err() {
-                debug!("Error: {:?}", res);
+                error!("Error: {:?}", res);
                 match __executor_mode {
                     Executor::Leader => {
                         *curr_leader_id = (*curr_leader_id + 1) % node_list.len();
