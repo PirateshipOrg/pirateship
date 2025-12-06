@@ -883,8 +883,8 @@ impl Staging {
     async fn process_vote(&mut self, sender: String, mut vote: ProtoVote) -> Result<(), ()> {
         #[cfg(feature = "witness_forwarding")]
         {
-            let block = self.pending_blocks.iter().find(|e| e.block.block.n == vote.n).unwrap();
-            let block_hash = block.block.block_hash.clone();
+            // let block = self.pending_blocks.iter().find(|e| e.block.block.n == vote.n).unwrap();
+            let block_hash = vote.fork_digest.clone();
             self.send_vote_to_witness_set(sender.clone(), vote.clone(), block_hash).await;
         }
 

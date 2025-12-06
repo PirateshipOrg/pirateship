@@ -60,12 +60,12 @@ name = "peerreview"
 repeats = 1
 num_nodes = 7
 node_distribution = "uniform"
-build_command = "make"
+build_command = "make peerreview"
 duration = 60
 
 [experiments.sweeping_parameters]
-# num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-num_clients = [100, 200, 400] 
+num_clients = [100, 200, 400, 500, 600]
+# num_clients = [100] 
 
 
 [[experiments]]
@@ -80,7 +80,7 @@ duration = 60
 signature_max_delay_blocks = 1
 
 [experiments.sweeping_parameters]
-num_clients = [100, 200, 400]
+num_clients = [100, 200, 400, 500, 600]
 
 
 
@@ -102,6 +102,7 @@ engraft = "engraft+onlybyz"
 signed_raft = "signed_raft(n=5)"
 autobahn = "autobahn"
 signed_raft_n7 = "signed_raft(n=7)"
+peerreview = "peerreview"
 
 
 # [results.partitions]
