@@ -75,7 +75,7 @@ channel_depth = 1000
 [node_config.consensus_config]
 commit_index_gap_soft = 250
 commit_index_gap_hard = 500
-liveness_u = 2
+liveness_u = 1
 max_backlog_batch_size = 1000
 signature_max_delay_blocks = 10
 signature_max_delay_ms = 102 # roughly batch_max_delay_ms * signature_max_delay_blocks
@@ -113,7 +113,7 @@ max_concurrent_requests = 16
 [[experiments]]
 name = "pirateship"
 repeats = 1
-num_nodes = 7
+num_nodes = 4
 node_distribution = "uniform"
 build_command = "make signed_raft_logger"
 duration = 60
