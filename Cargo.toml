@@ -119,7 +119,8 @@ hotstuff = ["round_robin_leader", "always_sign", "view_change", "no_pipeline", "
 pirateship = ["round_robin_leader", "dynamic_sign", "view_change"]
 peerreview = ["fixed_leader", "always_sign", "witness_forwarding"]
 
-default = ["peerreview", "app_logger", "storage", "platforms", "evil"]
+# default = ["peerreview", "app_logger", "storage", "platforms"]
+default = ["pirateship", "app_logger", "storage", "platforms", "fast_path"]
 # default = ["jolteon", "app_logger", "storage"]
 # default = ["engraft", "app_kvs", "storage", "fast_path", "platforms"]
 

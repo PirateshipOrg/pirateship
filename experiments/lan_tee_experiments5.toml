@@ -56,7 +56,7 @@ max_concurrent_requests = 32
 
 
 [[experiments]]
-name = "pirateship"
+name = "peerreview"
 repeats = 1
 num_nodes = 7
 node_distribution = "uniform"
@@ -68,20 +68,19 @@ duration = 60
 num_clients = [100, 200, 400] 
 
 
-# [[experiments]]
-# name = "pirateship_sig_1"
-# repeats = 1
-# num_nodes = 7
-# node_distribution = "uniform"
-# build_command = "make"
-# duration = 60
+[[experiments]]
+name = "pirateship_sig_1"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make"
+duration = 60
 
-# [experiments.node_config.consensus_config]
-# signature_max_delay_blocks = 1
+[experiments.node_config.consensus_config]
+signature_max_delay_blocks = 1
 
-# [experiments.sweeping_parameters]
-# num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-
+[experiments.sweeping_parameters]
+num_clients = [100, 200, 400]
 
 
 

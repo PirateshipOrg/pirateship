@@ -6,6 +6,11 @@
 pirateship_logger:
 	CC=clang CXX=clang++ cargo build --release
 
+
+.PHONY: peerreview
+peerreview:
+	CC=clang CXX=clang++ cargo build --release --features peerreview,app_logger,storage,platforms --no-default-features
+
 .PHONY: contrib
 contrib:
 	CC=clang CXX=clang++ cargo build --release --manifest-path contrib/Cargo.toml
