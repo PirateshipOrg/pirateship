@@ -1,4 +1,4 @@
 [submodule "autobahn"]
 	path = autobahn
 	url = https://github.com/grapheo12/autobahn-artifact.git
-	branch = autobahn-pirateship-baseline-2
+	branch = autobahn-blips-client-timeouts
