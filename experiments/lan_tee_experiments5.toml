@@ -22,7 +22,7 @@ commit_index_gap_soft = 250
 commit_index_gap_hard = 500
 liveness_u = 2
 max_backlog_batch_size = 1000
-signature_max_delay_blocks = 10
+signature_max_delay_blocks = 1
 signature_max_delay_ms = 102 # roughly batch_max_delay_ms * signature_max_delay_blocks
 num_crypto_workers = 5
 view_timeout_ms = 4000
@@ -62,25 +62,28 @@ num_nodes = 7
 node_distribution = "uniform"
 build_command = "make peerreview"
 duration = 60
+# seq_start = 5
 
 [experiments.sweeping_parameters]
-num_clients = [100, 200, 400, 500, 600]
+# num_clients = [100, 200, 400, 500, 600]
+num_clients = [10, 20, 50, 70, 100, 105, 110]
+# num_clients = [105, 110, 115]
 # num_clients = [100] 
 
 
-[[experiments]]
-name = "pirateship_sig_1"
-repeats = 1
-num_nodes = 7
-node_distribution = "uniform"
-build_command = "make"
-duration = 60
+# [[experiments]]
+# name = "pirateship_sig_1"
+# repeats = 1
+# num_nodes = 7
+# node_distribution = "uniform"
+# build_command = "make"
+# duration = 60
 
-[experiments.node_config.consensus_config]
-signature_max_delay_blocks = 1
+# [experiments.node_config.consensus_config]
+# signature_max_delay_blocks = 1
 
-[experiments.sweeping_parameters]
-num_clients = [100, 200, 400, 500, 600]
+# [experiments.sweeping_parameters]
+# num_clients = [100, 200, 400, 500, 600]
 
 
 
@@ -91,7 +94,7 @@ ramp_up = 15
 ramp_down = 15
 output = "lan_final.pdf"
 force_parse = true
-# skip_indices = [0, 1]
+# skip_indices = [5, 6]
 
 [results.legends]
 # Experiment group to legend mapping
