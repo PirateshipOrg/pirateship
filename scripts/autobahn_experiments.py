@@ -730,12 +730,13 @@ SCP_CMD="rsync -avz -e 'ssh -o StrictHostKeyChecking=no -i {self.dev_ssh_key}'"
                         if not config_dir.endswith("/"):
                             config_dir += "/"
                         log_dir = os.path.join(self.remote_workdir, "logs")
+                        db_dir = "/data/"
                         if not log_dir.endswith("/"):
                             log_dir += "/"
                         primary_cmd = CommandMaker.run_primary(
                             PathMaker.key_file(node_num, path_prefix=config_dir),
                             PathMaker.committee_file(path_prefix=config_dir),
-                            PathMaker.db_path(node_num, path_prefix=log_dir),
+                            PathMaker.db_path(node_num, path_prefix=db_dir),
                             PathMaker.parameters_file(path_prefix=config_dir),
                             debug=False,
                             binary_name=binary_name
@@ -751,7 +752,7 @@ PID="$PID $!"
                             worker_cmd = CommandMaker.run_worker(
                                 PathMaker.key_file(node_num, path_prefix=config_dir),
                                 PathMaker.committee_file(path_prefix=config_dir),
-                                PathMaker.db_path(node_num, worker_num, path_prefix=log_dir),
+                                PathMaker.db_path(node_num, worker_num, path_prefix=db_dir),
                                 PathMaker.parameters_file(path_prefix=config_dir),
                                 worker_num,
                                 debug=False,
