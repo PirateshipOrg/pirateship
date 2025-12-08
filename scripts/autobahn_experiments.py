@@ -76,6 +76,7 @@ class Committee:
 
         port = base_port
         self.json = {'authorities': OrderedDict()}
+        id_counter = 0
 
         for name, hosts in addresses.items():
             host = hosts.pop(0)
@@ -101,10 +102,12 @@ class Committee:
 
             self.json['authorities'][name] = {
                 'stake': 1,
+                'id': id_counter,
                 'consensus': consensus_addr,
                 'primary': primary_addr,
                 'workers': workers_addr
             }
+            id_counter += 1
 
     def primary_addresses(self, faults=0):
         ''' Returns an ordered list of primaries' addresses. '''
@@ -343,6 +346,10 @@ class PathMaker:
         return f'{path_prefix}.db-{i}{worker_id}'
 
     @staticmethod
+    def db_path_client(i, path_prefix=""):
+        return f'{path_prefix}.db-client-{i}'
+
+    @staticmethod
     def logs_path():
         return 'logs'
 
@@ -362,6 +369,12 @@ class PathMaker:
         assert isinstance(i, int) and i >= 0
         assert isinstance(j, int) and i >= 0
         return join(PathMaker.logs_path(), f'client-{i}-{j}.log')
+
+    @staticmethod
+    def client_metrics_file(i, j):
+        assert isinstance(i, int) and i >= 0
+        assert isinstance(j, int) and i >= 0
+        return join(PathMaker.logs_path(), f'client-{i}-{j}.metrics')
 
     @staticmethod
     def results_path():
@@ -448,7 +461,7 @@ def progress_bar(iterable, prefix='', suffix='', decimals=1, length=30, fill='â–
     print()
 
 class RemoteCommittee(Committee):
-    def __init__(self, names, port, workers, ip_list):
+    def __init__(self, names, port, workers, ip_list, clients = None):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
@@ -457,6 +470,9 @@ class RemoteCommittee(Committee):
  
         addresses = OrderedDict((x, [ip_list[i]]*(1+workers)) for i, x in enumerate(names))
         super().__init__(addresses, port)
+
+        if clients is not None:
+            self.json['clients'] = clients
 
 
 def get_default_node_params(num_nodes, repeats, seconds):
@@ -552,15 +568,39 @@ class CommandMaker:
         return (f'{binary_name} {v} run --keys {keys} --committee {committee} '
                 f'--store {store} --parameters {parameters} worker --id {id}')
 
+    # @staticmethod
+    # def run_client(id, reply_addr, address, size, clients, binary_name="./benchmark_client"):
+    #     assert isinstance(address, str)
+    #     assert isinstance(size, int) and size > 0
+    #     assert isinstance(clients, int) and clients >= 0
+    #     # assert isinstance(nodes, list)
+    #     # assert all(isinstance(x, str) for x in nodes)
+    #     # nodes = f'--nodes {" ".join(nodes)}' if nodes else ''
+    #     return f'{binary_name} {address} --size {size} --rate {clients} --client-id {id} --reply-addr {reply_addr}'
+
     @staticmethod
-    def run_client(address, size, clients, nodes, binary_name="./benchmark_client"):
-        assert isinstance(address, str)
+    def run_client(client_id, reply_addr, ack_addr, committee, keys, store, size, rate, workers, threshold=1, duration=None, branch=None, metrics_file=None, transaction_timeout=150, binary_name="./node"):
+        assert isinstance(client_id, int) and 0 <= client_id <= 255
+        assert isinstance(reply_addr, str)
+        assert isinstance(ack_addr, str)
+        assert isinstance(committee, str)
+        assert isinstance(keys, str)
+        # assert isinstance(threshold_keys, str)
+        assert isinstance(store, str)
         assert isinstance(size, int) and size > 0
-        assert isinstance(clients, int) and clients >= 0
-        assert isinstance(nodes, list)
-        assert all(isinstance(x, str) for x in nodes)
-        nodes = f'--nodes {" ".join(nodes)}' if nodes else ''
-        return f'{binary_name} {address} --size {size} --rate {clients} {nodes}'
+        assert isinstance(rate, int) and rate >= 0
+        assert isinstance(workers, int) and workers > 0
+        assert isinstance(threshold, int) and threshold > 0
+        assert isinstance(transaction_timeout, int) and transaction_timeout > 0
+        if duration is not None:
+            assert isinstance(duration, int) and duration >= 0
+        if metrics_file is not None:
+            assert isinstance(metrics_file, str)
+        threshold_keys_flag = ''
+        metrics_flag = f' --metrics-file {metrics_file}' if metrics_file else ''
+        duration_flag = f' --duration {duration}' if duration is not None else ''
+        return f'{binary_name} -vvv run --keys {keys} {threshold_keys_flag}--committee {committee} --store {store} client --client-id {client_id} --reply-addr {reply_addr} --ack-addr {ack_addr} --size {size} --rate {rate} --workers {workers} --threshold {threshold} --transaction-timeout {transaction_timeout}{duration_flag}{metrics_flag}'
+
 
     @staticmethod
     def kill():
@@ -572,7 +612,7 @@ class CommandMaker:
         node, client = join(origin, 'node'), join(origin, 'benchmark_client')
         return f'rm node ; rm benchmark_client ; ln -s {node} . ; ln -s {client} .'
 
-def gen_config(nodes: int, base_port: int, workers: int, node_parameters: NodeParameters, ip_list: List[str], path_prefix):
+def gen_config(nodes: int, base_port: int, workers: int, node_parameters: NodeParameters, ip_list: List[str], path_prefix, clients=None):
     # Generate configuration files.
     keys = []
     key_files = [PathMaker.key_file(i, path_prefix=path_prefix) for i in range(nodes)]
@@ -583,7 +623,7 @@ def gen_config(nodes: int, base_port: int, workers: int, node_parameters: NodePa
 
     names = [x.name for x in keys]
     #print('num workers', self.workers)
-    committee = RemoteCommittee(names, base_port, workers, ip_list)
+    committee = RemoteCommittee(names, base_port, workers, ip_list, clients=clients)
     committee.print(PathMaker.committee_file(path_prefix=path_prefix))
 
     node_parameters.print(PathMaker.parameters_file(path_prefix=path_prefix))
@@ -702,6 +742,30 @@ class AutobahnExperiment(Experiment):
         self.node_params = node_params
         self.bench_params = bench_params
 
+        __client_id = 0
+        __client_reply_base_port = deployment.node_port_base + 2001
+
+        self.client_reply_mapping = defaultdict(dict)
+
+        for client_num in range(len(client_vms)):
+            client = "client" + str(client_num + 1)
+            node_addrs = self.committee.workers_addresses(0)
+            for i, addresses in enumerate(node_addrs):
+                for (id, addr) in addresses:
+                    self.client_reply_mapping[client][addr] = (__client_id, __client_reply_base_port + 2 * __client_id, __client_reply_base_port + 2 * __client_id + 1, client_vms[client_num].private_ip)
+                    __client_id += 1
+
+        ____clients = {}
+        for _, v in self.client_reply_mapping.items():
+            for _, (client_id, reply_addr, transaction_ack_addr, ip) in v.items():
+                ____clients[client_id] = {
+                    "replies": f"{ip}:{reply_addr}",
+                    "transaction_acks": f"{ip}:{transaction_ack_addr}"
+                }
+
+        self.committee = gen_config(self.num_nodes, deployment.node_port_base, num_workers, node_params, ip_list, config_dir, clients=____clients)
+
+
         
     def generate_arbiter_script(self):
 
@@ -716,12 +780,23 @@ SCP_CMD="rsync -avz -e 'ssh -o StrictHostKeyChecking=no -i {self.dev_ssh_key}'"
 # SSH into each VM and run the binaries
 """
         # Plan the binaries to run
+
+        __node_vms = [x for x in self.binary_mapping.keys() if not("client" in x.name)]
+        __client_vms = [x for x in self.binary_mapping.keys() if "client" in x.name]
+        __binary_mapping = OrderedDict()
+        for vm in __node_vms:
+            __binary_mapping[vm] = self.binary_mapping[vm]
+        for vm in __client_vms:
+            __binary_mapping[vm] = self.binary_mapping[vm]
+        # All nodes spawned before clients.
+        clients_have_slept = False
+
         for repeat_num in range(self.repeats):
             print("Running repeat", repeat_num)
             _script = script_base[:]
             curr_client_count = 0
 
-            for vm, bin_list in self.binary_mapping.items():
+            for vm, bin_list in __binary_mapping.items():
                 for bin in bin_list:
                     if "node" in bin:
                         binary_name = f"{self.remote_workdir}/build/node"
@@ -767,16 +842,33 @@ PID="$PID $!"
 """
                     
                     elif "client" in bin:
-                        binary_name = f"{self.remote_workdir}/build/benchmark_client"
+                        if not clients_have_slept:
+                            _script += f"""
+sleep 10
+"""
+                            clients_have_slept = True
+                        # binary_name = f"{self.remote_workdir}/build/benchmark_client"
+                        binary_name = f"{self.remote_workdir}/build/node"
                         num_clients = self.clients_per_vm[curr_client_count]
                         curr_client_count += 1
                         tx_size = self.bench_params['tx_size']
                         node_addrs = self.committee.workers_addresses(0)
                         for i, addresses in enumerate(node_addrs):
                             for (id, addr) in addresses:
+                                client_id, reply_addr, transaction_ack_addr, _ = self.client_reply_mapping[bin][addr]
                                 cmd = CommandMaker.run_client(
-                                    addr, tx_size, num_clients,
-                                    [x for y in node_addrs for _, x in y],
+                                    client_id, f"0.0.0.0:{reply_addr}", f"0.0.0.0:{transaction_ack_addr}",
+                                    PathMaker.committee_file(path_prefix=config_dir),
+                                    PathMaker.key_file(node_num, path_prefix=config_dir),
+                                    # PathMaker.threshold_key_file(node_num, path_prefix=config_dir),
+                                    PathMaker.db_path_client(client_id, path_prefix=db_dir),
+                                    tx_size, num_clients,
+                                    self.num_workers,
+                                    threshold=1,
+                                    duration=self.duration,
+                                    branch=None,
+                                    metrics_file=f"{self.remote_workdir}/logs/{repeat_num}/{bin}-{i}-{id}.metrics",
+                                    transaction_timeout=150,
                                     binary_name=binary_name
                                 )
                                 _script += f"""
@@ -805,12 +897,12 @@ sleep 10
                     if "node" in bin:
                         binary_name = "node"
                     elif "client" in bin:
-                        binary_name = "benchmark" # "benchmark_client" is more than 15 chars and pkill doesn't like that
+                        binary_name = "node"
 
                 # Copy the logs back
                     _script += f"""
 $SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'pkill -9 -c {binary_name}' || true
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'rm -rf {self.remote_workdir}/logs/.db-*' || true
+$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'rm -rf /data/.db-*' || true
 $SCP_CMD {self.dev_ssh_user}@{vm.public_ip}:{self.remote_workdir}/logs/{repeat_num}/ {self.remote_workdir}/logs/{repeat_num}/ || true
 """
                 

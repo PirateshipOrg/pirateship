@@ -307,17 +307,19 @@ class Result:
         log_dir = os.path.join(experiment.local_workdir, "logs", "0")
         print(log_dir)
         try:
-            result = AutobahnLogParser.process(log_dir).result()
+            result = AutobahnLogParser.process(log_dir, faults=0, warmup_seconds=ramp_up, cooldown_seconds=ramp_down).result()
             mean_tput = 0.0
             mean_latency = 0.0
+            ___i = 0
             for line in result.split("\n"):
-                print(line)
-                if line.startswith(" Consensus TPS"):
+                print(___i, line)
+                ___i += 1
+                if line.startswith(" End-to-end TPS"):
                     mean_tput = line.split(":")[-1].strip()
                     mean_tput = mean_tput.replace(",", "")
                     mean_tput = float(mean_tput.split(" ")[0]) / tput_scale
 
-                if line.startswith(" Client latency"):
+                if line.startswith(" End-to-end latency (mean)"):
                     mean_latency = line.split(":")[-1].strip()
                     mean_latency = mean_latency.replace(",", "")
                     mean_latency = float(mean_latency.split(" ")[0]) / latency_scale

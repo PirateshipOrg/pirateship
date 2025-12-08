@@ -424,18 +424,18 @@ def deploy_experiments(config, workdir):
     cached_diff = ""
     cached_build_cmd = ""
     for experiment in experiments:
-        try:
+        # try:
             experiment.deploy(deployment, last_git_hash=cached_git_hash, last_git_diff=cached_diff, last_build_command=cached_build_cmd)
             hash, diff, build_cmd = experiment.get_build_details()
             cached_git_hash = hash
             cached_diff = diff
             cached_build_cmd = build_cmd
-        except Exception as e:
-            print(f"Error deploying {experiment.name}. Continuing anyway: {e} {os.getcwd()}")
-            cached_git_hash = ""
-            cached_diff = ""
-            cached_build_cmd = ""
-            # Force build on the next try
+        # except Exception as e:
+        #     print(f"Error deploying {experiment.name}. Continuing anyway: {e} {os.getcwd()}")
+        #     cached_git_hash = ""
+        #     cached_diff = ""
+        #     cached_build_cmd = ""
+        #     # Force build on the next try
 
 
     # Copy over the entire directory to all nodes
