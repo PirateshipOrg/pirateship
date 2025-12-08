@@ -2,7 +2,7 @@ workdir = "deployment_artifacts"
 project_home = "https://github.com/grapheo12/pirateship"
 
 [deployment_config]
-mode = "lan"
+mode = "lan-2"
 ssh_key = "cluster_key.pem"
 ssh_user = "pftadmin"
 node_port_base = 3000
