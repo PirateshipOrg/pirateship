@@ -95,7 +95,7 @@ build_command = "make -C autobahn"
 duration = 60
 
 [experiments.sweeping_parameters]
-num_clients = [100_000, 120_000, 150_000, 200_000, 210_000, 220_000, 250_000]
+num_clients = [150_000, 170_000, 200_000, 205_000, 210_000, 215_000]
 # num_clients = [250_000]
 
 
@@ -107,7 +107,7 @@ ramp_up = 15
 ramp_down = 15
 output = "lan_final.pdf"
 force_parse = true
-# skip_indices = [5, 6]
+# skip_indices = [6]
 
 [results.legends]
 # Experiment group to legend mapping
