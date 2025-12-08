@@ -477,46 +477,53 @@ class RemoteCommittee(Committee):
 
 def get_default_node_params(num_nodes, repeats, seconds):
     bench_params = {
-        'faults': 0, 
-        'nodes': num_nodes,
+        'faults': 0,
+        'nodes': 4,
         'workers': 1,
-        'rate': 200_000,
+        'worker_fault_tolerance': 2,  # Number of workers each client sends to
+        'rate': 10_000,
         'tx_size': 512,
-        'duration': seconds,
+        'duration': 60,
+        'latency_warmup': 2,
+        'latency_cooldown': 2,
+        'transaction_timeout': 120,  # ms - timeout for early ACKs before retry
 
         # Unused
-        'simulate_partition': False,
-        'partition_start': seconds + 100,
-        'partition_duration': 0,
-        'partition_nodes': 0,
+        'simulate_partition': True,
+        'partition_start': 5,
+        'partition_duration': 5,
+        'partition_nodes': 1,
     }
     node_params = {
-        'timeout_delay': 1_000,  # ms
+        'timeout_delay': 5_000,  # ms
         'header_size': 32,  # bytes
-        'max_header_delay': 200,  # ms
+        'max_header_delay': 5,  # ms
         'gc_depth': 50,  # rounds
-        'sync_retry_delay': 1_000,  # ms
+        'sync_retry_delay': 100,  # ms
         'sync_retry_nodes': 4,  # number of nodes
         'batch_size': 500_000,  # bytes
-        'max_batch_delay': 10,  # ms
-        'use_optimistic_tips': False,
+        'max_batch_delay': 1,  # ms
+        'use_optimistic_tips': True,
+        'use_threshold_random_coin': True,
+        'optimistic_leader_only': False,
         'use_parallel_proposals': True,
-        'k': 1,
+        'k': 4,
         'use_fast_path': True,
-        'fast_path_timeout': 200,
+        'fast_path_timeout': 100,
         'use_ride_share': False,
-        'car_timeout': 2000,
+        'car_timeout': 200,
+        'start_slot_rounds': 1,
 
-        'simulate_asynchrony': False,
-        'asynchrony_type': [],
+        'simulate_asynchrony': True,
+        'asynchrony_type': [2],
 
-        'asynchrony_start': [], #ms
-        'asynchrony_duration': [], #ms
-        'affected_nodes': [],
-        'egress_penalty': 0, #ms
+        'asynchrony_start': [10_000], #ms
+        'asynchrony_duration': [4_800], #ms
+        'affected_nodes': [1],
+        'egress_penalty': 40, #ms
 
-        'use_fast_sync': True,
-        'use_exponential_timeouts': True,
+        'use_fast_sync': False,
+        'use_exponential_timeouts': False,
     }
 
     return bench_params, node_params
@@ -899,10 +906,18 @@ sleep 10
                     elif "client" in bin:
                         binary_name = "node"
 
-                # Copy the logs back
+                # Kill individually
                     _script += f"""
 $SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'pkill -9 -c {binary_name}' || true
 $SSH_CMD {self.dev_ssh_user}@{vm.public_ip} 'rm -rf /data/.db-*' || true
+"""
+
+            _script += f"""
+sleep 5
+"""
+            # Copy the logs back
+            for vm in set(list(self.binary_mapping.keys())):
+                _script += f"""
 $SCP_CMD {self.dev_ssh_user}@{vm.public_ip}:{self.remote_workdir}/logs/{repeat_num}/ {self.remote_workdir}/logs/{repeat_num}/ || true
 """
                 
