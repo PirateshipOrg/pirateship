@@ -55,20 +55,20 @@ request_config = "Blanks"
 max_concurrent_requests = 32
 
 
-# [[experiments]]
-# name = "peerreview"
-# repeats = 1
-# num_nodes = 7
-# node_distribution = "uniform"
-# build_command = "make peerreview"
-# duration = 60
-# # seq_start = 5
+[[experiments]]
+name = "peerreview"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make peerreview"
+duration = 60
+# seq_start = 5
 
-# [experiments.sweeping_parameters]
-# # num_clients = [100, 200, 400, 500, 600]
+[experiments.sweeping_parameters]
+# num_clients = [100, 200, 400, 500, 600]
 # num_clients = [10, 20, 50, 70, 100, 105, 110]
 # num_clients = [105, 110, 115]
-# num_clients = [100] 
+num_clients = [110] 
 
 
 # [[experiments]]
@@ -85,19 +85,21 @@ max_concurrent_requests = 32
 # [experiments.sweeping_parameters]
 # num_clients = [100, 200, 400, 500, 600]
 
-[[experiments]]
-name = "autobahn"
-type = "autobahn"
-repeats = 1
-num_nodes = 7
-node_distribution = "uniform"
-build_command = "make -C autobahn"
-duration = 60
+# [[experiments]]
+# name = "autobahn"
+# type = "autobahn"
+# repeats = 1
+# num_nodes = 7
+# node_distribution = "uniform"
+# build_command = "make -C autobahn"
+# duration = 60
+# seq_start = 7
 
-[experiments.sweeping_parameters]
-# num_clients = [150_000, 170_000, 200_000, 205_000, 210_000, 215_000]
-num_clients = [10_000, 20_000, 50_000, 70_000, 100_000, 120_000, 150_000]
-# num_clients = [250_000]
+# [experiments.sweeping_parameters]
+# # num_clients = [150_000, 170_000, 200_000, 205_000, 210_000, 215_000]
+# # num_clients = [10_000, 20_000, 50_000, 70_000, 100_000, 120_000, 150_000]
+# num_clients = [170_000, 200_000, 250_000, 270_000, 300_000, 320_000, 350_000]
+# # num_clients = [250_000]
 
 
 
@@ -108,7 +110,7 @@ ramp_up = 15
 ramp_down = 15
 output = "lan_final.pdf"
 force_parse = true
-# skip_indices = [6]
+# skip_indices = [0, 1, 2, 3]
 
 [results.legends]
 # Experiment group to legend mapping

@@ -51,7 +51,14 @@ impl AuditorState {
 
         let vote_stat_str = vote_last.iter().map(|(sender, (n, hash))| format!("{}: {} -> {}", sender, n, hash)).collect::<Vec<_>>().join(", ");
 
-        info!("Auditor stats for node: {}, last block: {} -> {}, last vote: {}", self.sender, last_block_n, last_block_hash, vote_stat_str);        
+        info!("Auditor stats for node: {}, last block: {} -> {}, last vote: {}", self.sender, last_block_n, last_block_hash, vote_stat_str);
+
+        // Garbage collect
+
+        self.block_hashes.retain(|n, _| *n > last_block_n - 1000);
+        for (sender, votes) in self.votes.iter_mut() {
+            votes.retain(|n, _| *n > last_block_n - 1000);
+        }
     }
 
     pub fn process_witness(&mut self, witness: ProtoWitness) {
