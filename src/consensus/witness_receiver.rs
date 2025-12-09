@@ -3,7 +3,7 @@ use log::{error, info, trace};
 use prost::Message as _;
 use rand::{SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::{sync::Mutex, task::JoinSet, sync::mpsc::UnboundedReceiver};
 
 use crate::{config::AtomicConfig, crypto::{HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::{channel::{Receiver, Sender, make_channel}, timer::ResettableTimer}};
 
@@ -12,7 +12,7 @@ pub struct WitnessReceiver {
     client: PinnedClient,
     witness_set_map: HashMap<String, Vec<String>>, // sender -> list of witness sets.
     my_audit_responsibility: HashSet<String>, // list of nodes that I am responsible for auditing.
-    witness_rx: Receiver<ProtoWitness>,
+    witness_rx: UnboundedReceiver<ProtoWitness>,
     witness_audit_txs: HashMap<String, Sender<ProtoWitness>>, // If the load is too high, might split the responsibility into multiple tasks.
 
     handles: JoinSet<()>,
@@ -181,7 +181,7 @@ impl WitnessReceiver {
     }
 
     
-    pub fn new(config: AtomicConfig, client: PinnedClient, witness_rx: Receiver<ProtoWitness>) -> Self {
+    pub fn new(config: AtomicConfig, client: PinnedClient, witness_rx: UnboundedReceiver<ProtoWitness>) -> Self {
         let _config = config.get();
         let node_list = _config.consensus_config.node_list.clone();
         let r_plus_one = _config.consensus_config.node_list.len() - 2 * (_config.consensus_config.liveness_u as usize);

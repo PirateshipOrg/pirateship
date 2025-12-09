@@ -30,6 +30,8 @@ use logserver::LogServer;
 use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
+#[cfg(feature = "witness_forwarding")]
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
 #[cfg(feature = "witness_forwarding")]
 use crate::proto::consensus::ProtoWitness;
@@ -51,7 +53,7 @@ pub struct ConsensusServerContext {
     backfill_request_tx: Sender<ProtoBackfillNack>,
 
     #[cfg(feature = "witness_forwarding")]
-    witness_receiver_tx: Sender<ProtoWitness>,
+    witness_receiver_tx: UnboundedSender<ProtoWitness>,
 }
 
 
@@ -68,7 +70,7 @@ impl PinnedConsensusServerContext {
         view_change_receiver_tx: Sender<(ProtoViewChange, SenderType)>,
         backfill_request_tx: Sender<ProtoBackfillNack>,
         #[cfg(feature = "witness_forwarding")]
-        witness_receiver_tx: Sender<ProtoWitness>,
+        witness_receiver_tx: UnboundedSender<ProtoWitness>,
     ) -> Self {
         Self(Arc::new(Box::pin(ConsensusServerContext {
             config, keystore, batch_proposal_tx,
@@ -161,7 +163,7 @@ impl ServerContextType for PinnedConsensusServerContext {
             crate::proto::rpc::proto_payload::Message::Witness(proto_witness) => {
                         #[cfg(feature = "witness_forwarding")]
                         {
-                            self.witness_receiver_tx.send(proto_witness).await
+                            self.witness_receiver_tx.send(proto_witness)
                                 .expect("Channel send error");
                         }
                         return Ok(RespType::NoResp);
@@ -302,7 +304,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (extra_2pc_staging_tx, extra_2pc_staging_rx) = make_channel(10 * _chan_depth);
 
         #[cfg(feature = "witness_forwarding")]
-        let (witness_tx, witness_rx) = make_channel(_chan_depth);
+        let (witness_tx, witness_rx) = unbounded_channel();
 
         let ctx = PinnedConsensusServerContext::new(config.clone(), keystore.clone(), batch_proposer_tx.clone(), fork_tx, fork_receiver_command_tx.clone(), vote_tx, view_change_tx, backfill_request_tx,
             #[cfg(feature = "witness_forwarding")]
