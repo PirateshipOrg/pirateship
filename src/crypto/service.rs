@@ -1,7 +1,7 @@
 use std::{io::{BufReader, Error, ErrorKind}, ops::Deref, pin::Pin, sync::{atomic::fence, Arc}};
 
 use bytes::{BufMut, BytesMut};
-use ed25519_dalek::{verify_batch, Signature, SIGNATURE_LENGTH};
+use ed25519_dalek::{SIGNATURE_LENGTH, Signature, VerifyingKey, verify_batch};
 use futures::SinkExt;
 use itertools::min;
 use log::{info, trace, warn};
@@ -98,8 +98,10 @@ fn verify_qc(keystore: &KeyStore, qc: &ProtoQuorumCertificate, min_len: usize) -
     let msgs = (0..keys.len()).map(|_| qc.digest.as_slice()).collect::<Vec<_>>();
 
 
-    let res = verify_batch(&msgs, sigs.as_slice(), &keys)
-        .is_ok();
+    // let res = verify_batch(&msgs, sigs.as_slice(), &keys)
+    //     .is_ok();
+
+    let res = dummy_verify_batch(&msgs, sigs.as_slice(), &keys);
 
     if !res {
         warn!("QC verification failed");
@@ -107,6 +109,16 @@ fn verify_qc(keystore: &KeyStore, qc: &ProtoQuorumCertificate, min_len: usize) -
     
     res
 
+}
+
+fn dummy_verify_batch(msgs: &[&[u8]], sigs: &[Signature], keys: &[VerifyingKey]) -> bool {
+    use ed25519_dalek::Verifier;
+    for i in 0..msgs.len() {
+        if !keys[i].verify(msgs[i], &sigs[i]).is_ok() {
+            return false;
+        }
+    }
+    true
 }
 
 enum CryptoServiceCommand {
