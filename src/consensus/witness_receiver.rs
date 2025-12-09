@@ -55,9 +55,9 @@ impl AuditorState {
 
         // Garbage collect
 
-        self.block_hashes.retain(|n, _| *n > last_block_n - 1000);
+        self.block_hashes.retain(|n, _| if last_block_n > 10_000 {*n > last_block_n - 10_000 } else {true});
         for (sender, votes) in self.votes.iter_mut() {
-            votes.retain(|n, _| *n > last_block_n - 1000);
+            votes.retain(|n, _| if last_block_n > 10_000 {*n > last_block_n - 10_000 } else {true});
         }
     }
 
