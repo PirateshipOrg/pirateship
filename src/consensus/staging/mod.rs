@@ -5,7 +5,7 @@ use log::{debug, error, info, trace, warn};
 use tokio::sync::{mpsc::UnboundedSender, oneshot, Mutex};
 
 #[cfg(feature = "witness_forwarding")]
-use crate::crypto::{HashType, default_hash};
+use crate::{crypto::{HashType, default_hash}, rpc::client::Client};
 use crate::{config::AtomicConfig, crypto::{CachedBlock, CryptoServiceConnector}, proto::consensus::{ProtoQuorumCertificate, ProtoSignatureArrayEntry, ProtoVote}, rpc::{client::PinnedClient, SenderType}, utils::{channel::{Receiver, Sender}, timer::ResettableTimer, PerfCounter, StorageAck}};
 
 use super::{app::AppCommand, batch_proposal::BatchProposerCommand, block_broadcaster::BlockBroadcasterCommand, block_sequencer::BlockSequencerControlCommand, client_reply::ClientReplyCommand, extra_2pc::{EngraftActionAfterFutureDone, EngraftTwoPCFuture, TwoPCCommand}, fork_receiver::{AppendEntriesStats, ForkReceiverCommand}, logserver::{self, LogServerCommand}, pacemaker::PacemakerCommand};
@@ -86,6 +86,10 @@ pub struct Staging {
 
     #[cfg(feature = "witness_forwarding")]
     last_vote_hash: HashType,
+
+    #[cfg(feature = "witness_forwarding")]
+    witness_client: PinnedClient,
+
 }
 
 impl Staging {
@@ -148,9 +152,16 @@ impl Staging {
             WitnessReceiver::find_witness_set_map(node_list, r_plus_one)
         };
 
+        #[cfg(feature = "witness_forwarding")]
+        let witness_client = Client::new_atomic(config.clone(), client.0.key_store.clone(), false, 0).into();
+
         let mut ret = Self {
             config,
             client,
+
+            #[cfg(feature = "witness_forwarding")]
+            witness_client,
+
             crypto,
             ci: 0,
             bci: 0,

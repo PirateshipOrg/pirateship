@@ -342,7 +342,9 @@ impl Staging {
 
         #[cfg(feature = "witness_forwarding")]
         {
-            self.last_vote_hash = hash(&vote.encode_to_vec());
+            use crate::crypto::default_hash;
+            // self.last_vote_hash = hash(&vote.encode_to_vec());
+            self.last_vote_hash = default_hash();
         }
 
         #[cfg(feature = "extra_2pc")]
@@ -877,7 +879,7 @@ impl Staging {
         let sz = buf.len();
         let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
-        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+        let _res = PinnedClient::broadcast(&self.witness_client, witness_set, &msg, &mut profile, 0).await;
     }
 
 
