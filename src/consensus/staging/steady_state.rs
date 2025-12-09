@@ -236,7 +236,9 @@ impl Staging {
 
         #[cfg(feature = "witness_forwarding")]
         {
-            self.last_vote_hash = hash(&vote.encode_to_vec());
+            // self.last_vote_hash = hash(&vote.encode_to_vec());
+            use crate::crypto::default_hash;
+            self.last_vote_hash = default_hash();
         }
 
         #[cfg(feature = "extra_2pc")]
