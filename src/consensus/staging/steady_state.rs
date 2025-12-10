@@ -770,6 +770,9 @@ impl Staging {
 
             #[cfg(not(feature = "peerreview"))]
             self.maybe_byzantine_commit(qc).await?;
+
+            #[cfg(feature = "peerreview")]
+            self.pending_signatures.retain(|(n, _)| *n > qc.n);
         }
 
         #[cfg(any(feature = "no_qc", feature = "peerreview"))]
@@ -1080,6 +1083,10 @@ impl Staging {
 
             #[cfg(not(feature = "peerreview"))]
             self.maybe_byzantine_commit(qc).await?;
+
+            #[cfg(feature = "peerreview")]
+            self.pending_signatures.retain(|(n, _)| *n > qc.n);
+
         }
 
         #[cfg(feature = "peerreview")]
