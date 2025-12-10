@@ -766,11 +766,13 @@ impl Staging {
                 trace!("Trying to stabilize view {} with QC", self.view);
                 self.maybe_stabilize_view(&qc).await;
             }
-            
+
+
+            #[cfg(not(feature = "peerreview"))]
             self.maybe_byzantine_commit(qc).await?;
         }
 
-        #[cfg(any(feature = "no_qc", feature = "witness_forwarding"))]
+        #[cfg(any(feature = "no_qc", feature = "peerreview"))]
         {
             if this_is_final_block {
                 self.do_byzantine_commit(self.bci, self.ci).await;
@@ -1075,7 +1077,14 @@ impl Staging {
             // But since this thread will block on block_broadcaster_tx.send, it will not be able to consume from qc_rx.
             // Once the queues are saturated, the system will deadlock.
             let _ = self.qc_tx.send(qc.clone());
+
+            #[cfg(not(feature = "peerreview"))]
             self.maybe_byzantine_commit(qc).await?;
+        }
+
+        #[cfg(feature = "peerreview")]
+        {
+            self.do_byzantine_commit(self.bci, self.ci).await;
         }
 
         Ok(())
@@ -1094,11 +1103,6 @@ impl Staging {
         &mut self,
         incoming_qc: ProtoQuorumCertificate,
     ) -> Result<(), ()> {
-        #[cfg(feature = "witness_forwarding")]
-        {
-            self.do_byzantine_commit(self.bci, incoming_qc.n).await;
-            return Ok(());
-        }
         // Reset view timer. Getting a QC signals that byzantine progress can still be made.
         if self.view <= incoming_qc.view /* no old */
             && self.last_qc.as_ref().map(|e| e.n).unwrap_or(0) < incoming_qc.n /* dedup */
