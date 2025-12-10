@@ -115,10 +115,11 @@ message ProtoVote {
 
 message ProtoBlockWitness {
     bytes block_hash = 1;
-    bytes block_sig = 2;
-    bytes parent_hash = 3;
-    uint64 n = 4;
-    repeated ProtoQuorumCertificate qc = 5;
+    bytes block_partial_hash = 2;
+    bytes block_sig = 3;
+    bytes parent_hash = 4;
+    uint64 n = 5;
+    repeated ProtoQuorumCertificate qc = 6;
 }
 
 message ProtoVoteWitness {

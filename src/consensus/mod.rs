@@ -335,7 +335,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
         
         #[cfg(feature = "witness_forwarding")]
-        let witness_receiver = WitnessReceiver::new(config.clone(), witness_client.into(), witness_rx);
+        let witness_receiver = WitnessReceiver::new(config.clone(), witness_client.into(), keystore.clone(), witness_rx);
 
 
         let mut handles = JoinSet::new();

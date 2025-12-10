@@ -586,6 +586,8 @@ impl Staging {
 
     #[cfg(feature = "witness_forwarding")]
     async fn send_block_to_witness_set(&mut self, block: CachedBlock) {
+        use ed25519_dalek::SIGNATURE_LENGTH;
+
         use crate::{proto::consensus::{ProtoBlockWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
 
         #[cfg(not(feature = "always_sign"))]
@@ -607,6 +609,7 @@ impl Staging {
             receiver: my_name,
             body: Some(Body::BlockWitness(ProtoBlockWitness {
                 block_hash: block.block_hash.clone(),
+                block_partial_hash: hash(&block.block_ser[SIGNATURE_LENGTH..]),
                 block_sig: sig,
                 parent_hash: block.block.parent.clone(),
                 n: block.block.n,

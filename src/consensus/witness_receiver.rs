@@ -5,7 +5,7 @@ use rand::{SeedableRng as _, seq::IteratorRandom};
 use rand_chacha::ChaCha20Rng;
 use tokio::{sync::Mutex, task::JoinSet, sync::mpsc::UnboundedReceiver};
 
-use crate::{config::AtomicConfig, crypto::{HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::{channel::{Receiver, Sender, make_channel}, timer::ResettableTimer}};
+use crate::{config::AtomicConfig, crypto::{AtomicKeyStore, HashType, default_hash, hash}, proto::{consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::ProtoPayload}, rpc::{PinnedMessage, SenderType, client::PinnedClient, server::LatencyProfile}, utils::{channel::{Receiver, Sender, make_channel}, timer::ResettableTimer}};
 
 pub struct WitnessReceiver {
     config: AtomicConfig,
@@ -16,18 +16,20 @@ pub struct WitnessReceiver {
     witness_audit_txs: HashMap<String, Sender<ProtoWitness>>, // If the load is too high, might split the responsibility into multiple tasks.
 
     handles: JoinSet<()>,
+    key_store: AtomicKeyStore,
 }
 
 
 struct AuditorState {
     sender: String,
+    key_store: AtomicKeyStore,
     block_hashes: BTreeMap<u64 /* block n */, HashType>,
     votes: HashMap<String /* sender */, BTreeMap<u64, HashType>>,
 }
 
 impl AuditorState {
-    pub fn new(sender: String) -> Self {
-        Self { sender, block_hashes: BTreeMap::new(), votes: HashMap::new() }
+    pub fn new(sender: String, key_store: AtomicKeyStore) -> Self {
+        Self { sender, key_store, block_hashes: BTreeMap::new(), votes: HashMap::new() }
     }
 
     fn display_hash(hash: &HashType) -> String {
@@ -64,6 +66,14 @@ impl AuditorState {
     pub fn process_witness(&mut self, witness: ProtoWitness) {
         match witness.body {
             Some(Body::BlockWitness(block_witness)) => {
+                let _sig = block_witness.block_sig.try_into();
+                let Ok(_sig) = _sig else {
+                    error!("Block signature is malformed for block n: {}, sender: {}", block_witness.n, witness.sender);
+                    return;
+                };
+                if !self.key_store.get().verify(&witness.sender, &_sig, &block_witness.block_partial_hash.as_slice()) {
+                    error!("Block signature verification failed for block n: {}, sender: {}", block_witness.n, witness.sender);
+                }
                 if self.block_hashes.contains_key(&block_witness.n) {
                     let old_hash = self.block_hashes.get(&block_witness.n).unwrap();
                     if old_hash != &block_witness.block_hash {
@@ -113,6 +123,16 @@ impl AuditorState {
                     }
                 }
                 entry.insert(vote_witness.n, vote_witness.block_hash.clone());
+
+                // Verify the vote signature.
+                let _sig = vote_witness.vote_sig.try_into();
+                let Ok(_sig) = _sig else {
+                    error!("Vote signature is malformed for vote n: {}, sender: {}", vote_witness.n, witness.sender);
+                    return;
+                };
+                if !self.key_store.get().verify(&witness.sender, &_sig, &vote_witness.block_hash.as_slice()) {
+                    error!("Vote signature verification failed for vote n: {}, sender: {}", vote_witness.n, witness.sender);
+                }
             }
             None => {
                 error!("Witness has no body!");
@@ -181,7 +201,7 @@ impl WitnessReceiver {
     }
 
     
-    pub fn new(config: AtomicConfig, client: PinnedClient, witness_rx: UnboundedReceiver<ProtoWitness>) -> Self {
+    pub fn new(config: AtomicConfig, client: PinnedClient, key_store: AtomicKeyStore, witness_rx: UnboundedReceiver<ProtoWitness>) -> Self {
         let _config = config.get();
         let node_list = _config.consensus_config.node_list.clone();
         let r_plus_one = _config.consensus_config.node_list.len() - 2 * (_config.consensus_config.liveness_u as usize);
@@ -189,7 +209,7 @@ impl WitnessReceiver {
         let my_audit_responsibility = Self::find_my_audit_responsibility(&_config.net_config.name, &witness_set_map);
         let handles = JoinSet::new();
         let witness_audit_txs = HashMap::new();
-        Self { config, client, witness_set_map, my_audit_responsibility, witness_rx, witness_audit_txs, handles }
+        Self { config, client, witness_set_map, my_audit_responsibility, witness_rx, witness_audit_txs, handles, key_store }
     }
 
     pub async fn run(witness_receiver: Arc<Mutex<Self>>) {
@@ -208,9 +228,10 @@ impl WitnessReceiver {
             let log_timeout = witness_receiver.config.get().app_config.logger_stats_report_ms;
             let log_timer = ResettableTimer::new(Duration::from_millis(log_timeout));
             log_timer.run().await;
+            let key_store = witness_receiver.key_store.clone();
             witness_receiver.handles.spawn(async move {
                 // TODO: Handle load-balancing logic.
-                let mut state = AuditorState::new("*".to_string());
+                let mut state = AuditorState::new("*".to_string(), key_store);
                 loop {
                     tokio::select! {
                         _ = log_timer.wait() => {
