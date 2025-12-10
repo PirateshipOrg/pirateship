@@ -61,14 +61,14 @@ repeats = 1
 num_nodes = 7
 node_distribution = "uniform"
 build_command = "make peerreview"
-duration = 60
+duration = 30
 # seq_start = 5
 
 [experiments.sweeping_parameters]
 # num_clients = [100, 200, 400, 500, 600]
 # num_clients = [10, 20, 50, 70, 100, 105, 110]
 # num_clients = [105, 110, 115]
-num_clients = [60, 65] 
+num_clients = [50, 55, 60, 65]
 
 
 # [[experiments]]

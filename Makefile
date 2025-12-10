@@ -9,7 +9,7 @@ pirateship_logger:
 
 .PHONY: peerreview
 peerreview:
-	CC=clang CXX=clang++ cargo build --release --features peerreview,app_logger,storage,platforms --no-default-features
+	CC=clang CXX=clang++ cargo build --release --features peerreview,app_logger,storage,platforms,fast_path --no-default-features
 
 .PHONY: contrib
 contrib:

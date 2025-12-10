@@ -592,7 +592,7 @@ impl Staging {
         {
             panic!("Misconfigured protocol!");
         }
-        return;
+        // return;
 
         let leader = self.config.get().consensus_config.get_leader_for_view(self.view);
         let witness_set = self.witness_set_map.get(&leader).unwrap();
@@ -760,7 +760,7 @@ impl Staging {
             .map(|e| e.clone())
             .collect::<Vec<_>>();
 
-        warn!("qc_list size: {}", qc_list.len());
+        // warn!("qc_list size: {}", qc_list.len());
 
         for qc in qc_list.drain(..) {
             if !old_view_is_stable {
@@ -770,16 +770,11 @@ impl Staging {
             }
 
 
-            #[cfg(not(feature = "peerreview"))]
-            {
-                self.maybe_byzantine_commit(qc).await?;
-            }
+            self.maybe_byzantine_commit(qc).await?;
 
-            #[cfg(feature = "peerreview")]
-            self.pending_signatures.retain(|(n, _)| *n > qc.n);
         }
 
-        #[cfg(any(feature = "no_qc", feature = "peerreview"))]
+        #[cfg(feature = "no_qc")]
         {
             if this_is_final_block {
                 self.do_byzantine_commit(self.bci, self.ci).await;
@@ -863,7 +858,7 @@ impl Staging {
         {
             panic!("Misconfigured protocol!");
         }
-        return;
+        // return;
 
         use crate::{proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
 
@@ -1028,7 +1023,9 @@ impl Staging {
         let mut qcs = Vec::new();
 
         let thresh = self.byzantine_commit_threshold();
+
         let fast_thresh = self.byzantine_fast_path_threshold();
+
         for block in &mut self.pending_blocks {
             if block.qc_is_proposed && block.fast_qc_is_proposed {
                 continue;
@@ -1045,7 +1042,6 @@ impl Staging {
             } else {
                 thresh
             };
-
 
             if block.vote_sigs.len() >= thresh {
                 let qc = ProtoQuorumCertificate {
@@ -1085,17 +1081,9 @@ impl Staging {
             // Once the queues are saturated, the system will deadlock.
             let _ = self.qc_tx.send(qc.clone());
 
-            #[cfg(not(feature = "peerreview"))]
             self.maybe_byzantine_commit(qc).await?;
 
-            #[cfg(feature = "peerreview")]
-            self.pending_signatures.retain(|(n, _)| *n > qc.n);
 
-        }
-
-        #[cfg(feature = "peerreview")]
-        {
-            self.do_byzantine_commit(self.bci, self.ci).await;
         }
 
         Ok(())

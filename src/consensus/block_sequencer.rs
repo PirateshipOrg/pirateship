@@ -392,7 +392,7 @@ impl BlockSequencer {
             }
 
             self.current_qc_list.push(qc);
-            warn!("current_qc_list size: {}", self.current_qc_list.len());
+            // warn!("current_qc_list size: {}", self.current_qc_list.len());
         }
     }
 
