@@ -592,6 +592,7 @@ impl Staging {
         {
             panic!("Misconfigured protocol!");
         }
+        return;
 
         let leader = self.config.get().consensus_config.get_leader_for_view(self.view);
         let witness_set = self.witness_set_map.get(&leader).unwrap();
