@@ -760,6 +760,8 @@ impl Staging {
             .map(|e| e.clone())
             .collect::<Vec<_>>();
 
+        warn!("qc_list size: {}", qc_list.len());
+
         for qc in qc_list.drain(..) {
             if !old_view_is_stable {
                 // Try to see if this QC can stabilize the view.
@@ -769,7 +771,9 @@ impl Staging {
 
 
             #[cfg(not(feature = "peerreview"))]
-            self.maybe_byzantine_commit(qc).await?;
+            {
+                self.maybe_byzantine_commit(qc).await?;
+            }
 
             #[cfg(feature = "peerreview")]
             self.pending_signatures.retain(|(n, _)| *n > qc.n);
