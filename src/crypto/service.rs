@@ -98,10 +98,10 @@ fn verify_qc(keystore: &KeyStore, qc: &ProtoQuorumCertificate, min_len: usize) -
     let msgs = (0..keys.len()).map(|_| qc.digest.as_slice()).collect::<Vec<_>>();
 
 
-    // let res = verify_batch(&msgs, sigs.as_slice(), &keys)
-    //     .is_ok();
+    let res = verify_batch(&msgs, sigs.as_slice(), &keys)
+        .is_ok();
 
-    let res = dummy_verify_batch(&msgs, sigs.as_slice(), &keys);
+    // let res = dummy_verify_batch(&msgs, sigs.as_slice(), &keys);
 
     if !res {
         warn!("QC verification failed");

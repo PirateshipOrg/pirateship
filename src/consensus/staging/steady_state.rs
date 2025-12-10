@@ -620,7 +620,7 @@ impl Staging {
         let sz = buf.len();
         let msg = PinnedMessage::from(buf, sz, SenderType::Anon);
         let mut profile = LatencyProfile::new();
-        let _res = PinnedClient::broadcast(&self.client, witness_set, &msg, &mut profile, 0).await;
+        let _res = PinnedClient::broadcast(&self.witness_client, witness_set, &msg, &mut profile, 0).await;
     }
 
     /// This has a lot of similarities with process_block_as_leader.
@@ -853,6 +853,7 @@ impl Staging {
         {
             panic!("Misconfigured protocol!");
         }
+        // return;
 
         use crate::{proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
 
