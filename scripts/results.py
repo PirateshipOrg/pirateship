@@ -703,8 +703,8 @@ class Result:
 
 
         num_lines = len(plot_dict)
-        colors = self.kwargs.get('colors', ['b', 'g', 'r', 'c', 'm', 'y', 'k', "orange", "c"])
-        markers = self.kwargs.get('markers', ['o', 's', 'D', '^', 'v', 'p', 'P', '*', 'X', 'H'])
+        colors = self.kwargs.get('colors', ['b', 'g', 'r', 'c', 'm', 'y', 'k', "orange", "brown", "purple"])
+        markers = self.kwargs.get('markers', ['o', 's', 'D', '^', 'v', 'p', 'P', '*', 'X', 'H', 'x'])
         while len(colors) < num_lines:
             colors += colors
         while len(markers) < num_lines:
@@ -712,8 +712,8 @@ class Result:
 
         
         legends_ncols = self.kwargs.get('legends_ncols', len(plot_dict))
-        if legends_ncols > 3:
-            legends_ncols = 3
+        if legends_ncols > 4:
+            legends_ncols = 4
 
     
         try:
@@ -764,9 +764,9 @@ class Result:
                 y_range_total = max([v[3] for v in bounding_boxes.values()]) - min([v[2] for v in bounding_boxes.values()])
                 # if y_range_total > 200:
                 # plt.yscale("log")
-                # plt.ylim((0, 125))
-                # plt.xlim((50, 550))
-                plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.4), ncol=legends_ncols, fontsize=70)
+                plt.ylim((0, 125))
+                plt.xlim((50, 550))
+                plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.0), ncol=legends_ncols, fontsize=20, align='center', markerscale=0.1)
                 plt.xticks(fontsize=70)
                 plt.yticks(fontsize=70)
 
@@ -785,7 +785,7 @@ class Result:
     def plot_partitions(self, cft_partitions, bft_partitions, plot_dict, colors, markers, legends_ncols):
         # Two figures side by side
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 12))
-        fig.subplots_adjust(hspace=0.1, wspace=0.5)
+        fig.subplots_adjust(hspace=0.1, wspace=0.8)
 
         for i, (legend, stat_list) in enumerate(plot_dict.items()):
             tputs = [stat.mean_tput for stat in stat_list]
@@ -801,7 +801,7 @@ class Result:
         ax1.set_ylabel("Latency (ms)", fontsize=70)
         ax2.set_xlabel("Throughput (k req/s)", fontsize=70)
         ax2.set_ylabel("Latency (ms)", fontsize=70)
-        fig.legend(loc='upper center', bbox_to_anchor=(0.5, 1.32), ncol=legends_ncols, fontsize=70, columnspacing=0.5)
+        fig.legend(loc='upper center', bbox_to_anchor=(0.5, 1.24), ncol=legends_ncols, fontsize=55, columnspacing=0.2)
 
         ax1.set_ylim(top=130, bottom=0)
         ax2.set_ylim(top=130, bottom=0)

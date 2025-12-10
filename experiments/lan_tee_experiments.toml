@@ -147,11 +147,12 @@ engraft = "engraft+onlybyz"
 signed_raft = "signed_raft(n=5)"
 autobahn = "autobahn"
 signed_raft_n7 = "signed_raft(n=7)"
+peerreview = "peerreview+onlybyz"
 
 
 [results.partitions]
 cft = ["ps(sig=10)", "ps(sig=1)", "engraft", "signed_raft(n=5)", "signed_raft(n=7)"]
-bft = ["ps(sig=10)-aud", "ps(sig=1)-aud", "hotstuff", "autobahn"]
+bft = ["ps(sig=10)-aud", "ps(sig=1)-aud", "hotstuff", "autobahn", "peerreview"]
 
 [results.font]
 size = 55
