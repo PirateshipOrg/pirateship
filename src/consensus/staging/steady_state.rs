@@ -853,7 +853,7 @@ impl Staging {
         {
             panic!("Misconfigured protocol!");
         }
-        // return;
+        return;
 
         use crate::{proto::consensus::{ProtoVoteWitness, ProtoWitness, proto_witness::Body}, rpc::server::LatencyProfile};
 
