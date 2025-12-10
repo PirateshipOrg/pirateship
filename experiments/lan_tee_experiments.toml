@@ -132,9 +132,9 @@ num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
 [[results]]
 name = "tput_latency_client_sweep"
 plotter = "tput_latency_sweep"
-ramp_up = 15
-ramp_down = 15
-output = "lan_final.pdf"
+ramp_up = 12
+ramp_down = 12
+output = "lan_with_peerreview.pdf"
 force_parse = true
 skip_indices = [0, 1]
 
@@ -147,10 +147,11 @@ engraft = "engraft+onlybyz"
 signed_raft = "signed_raft(n=5)"
 autobahn = "autobahn"
 signed_raft_n7 = "signed_raft(n=7)"
+peerreview = "peerreview"
 
 
 [results.partitions]
-cft = ["ps(sig=10)", "ps(sig=1)", "engraft", "signed_raft(n=5)", "signed_raft(n=7)"]
+cft = ["ps(sig=10)", "ps(sig=1)", "engraft", "signed_raft(n=5)", "signed_raft(n=7)", "peerreview"]
 bft = ["ps(sig=10)-aud", "ps(sig=1)-aud", "hotstuff", "autobahn"]
 
 [results.font]

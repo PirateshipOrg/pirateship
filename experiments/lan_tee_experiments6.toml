@@ -2,7 +2,8 @@ workdir = "deployment_artifacts"
 project_home = "https://github.com/grapheo12/pirateship"
 
 [deployment_config]
-mode = "lan-2"
+# mode = "lan-2"
+mode = "lan"
 ssh_key = "cluster_key.pem"
 ssh_user = "pftadmin"
 node_port_base = 3000
@@ -61,14 +62,16 @@ repeats = 1
 num_nodes = 7
 node_distribution = "uniform"
 build_command = "make peerreview"
-duration = 30
+duration = 60
 # seq_start = 5
 
 [experiments.sweeping_parameters]
 # num_clients = [100, 200, 400, 500, 600]
 # num_clients = [10, 20, 50, 70, 100, 105, 110]
 # num_clients = [105, 110, 115]
-num_clients = [50, 55, 60, 65]
+# num_clients = [50, 55, 60, 65]
+num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
+
 
 
 # [[experiments]]
@@ -107,8 +110,8 @@ num_clients = [50, 55, 60, 65]
 [[results]]
 name = "tput_latency_client_sweep"
 plotter = "tput_latency_sweep"
-ramp_up = 2
-ramp_down = 2
+ramp_up = 12
+ramp_down = 12
 output = "lan_final.pdf"
 force_parse = true
 # skip_indices = [0, 1, 2, 3]
