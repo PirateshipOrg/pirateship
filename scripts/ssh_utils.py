@@ -29,18 +29,23 @@ def run_local(cmds: list, hide=True, asynchronous=False):
         return [res.join().stdout.strip() for res in results]
     
 
-def run_remote_public_ip(cmds: list, ssh_user, ssh_key, host: Node, hide=True):
+def run_remote_public_ip(cmds: list, ssh_user, ssh_key, host: Node|str, hide=True, timeout=None):
     results = []
+
+    if isinstance(host, Node):
+        host = host.public_ip
+
     conn = Connection(
-        host=host.public_ip,
+        host=host,
         user=ssh_user,
+        connect_timeout=timeout,
         connect_kwargs={
             "key_filename": ssh_key
         }
     )
     for cmd in cmds:
         try:
-            res = conn.run(cmd, hide=hide, pty=True)
+            res = conn.run(cmd, hide=hide, pty=True, timeout=timeout)
             results.append(res.stdout.strip())
         except Exception as e:
             results.append(str(e))
