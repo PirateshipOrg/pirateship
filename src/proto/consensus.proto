@@ -115,3 +115,9 @@ message ProtoWorkerVote {
     uint64 block_n = 2;
     string voter = 3;
 }
+
+message ProtoWorkerBlockInfo {
+    uint64 block_n = 1;
+    bytes block_hash = 2;
+    string block_origin = 3;
+}

@@ -23,7 +23,7 @@ use tokio::task::JoinSet;
 use vote_sender::VoteSender;
 use vote_tracker::VoteTracker;
 
-use crate::config::{AtomicConfig, Config};
+use crate::config::{AtomicConfig, Config, StorageConfig};
 use crate::consensus::batch_proposal::TxWithAckChanTag;
 use crate::crypto::{AtomicKeyStore, CryptoService, KeyStore};
 use crate::proto::consensus::{ProtoAppendEntries, ProtoWorkerVote};
@@ -237,6 +237,16 @@ impl WorkerNode {
         );
 
         let storage_config = config.get().consensus_config.log_storage_config.clone();
+        let storage_config = match storage_config {
+            StorageConfig::RocksDB(config) => {
+                let mut final_config = config.clone();
+                final_config.db_path = format!("{}_worker", config.db_path);
+                StorageConfig::RocksDB(final_config)
+            }
+            StorageConfig::FileStorage(_) => {
+                panic!("File storage not supported!");
+            }
+        };
         let db = RocksDBStorageEngine::new(storage_config);
 
         let block_storage = BlockStorage::new(

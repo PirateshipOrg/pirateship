@@ -203,7 +203,7 @@ def generate(args):
         cfg["rpc_config"]["signing_priv_key_path"] = rel(f"{name}_signing_privkey.pem")
 
         cfg["consensus_config"]["node_list"] = list(node_names)
-        cfg["consensus_config"]["learner_list"] = list(worker_names)
+        cfg["consensus_config"]["learner_list"] = []
         cfg["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"/tmp/testdb{i}"
 
         path = os.path.join(output_dir, f"{name}_config.json")

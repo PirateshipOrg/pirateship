@@ -7,7 +7,7 @@ use tokio::sync::{oneshot, Mutex};
 
 use crate::config::AtomicConfig;
 use crate::crypto::CachedBlock;
-use crate::proto::consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork};
+use crate::proto::consensus::{HalfSerializedBlock, ProtoAppendEntries, ProtoFork, ProtoWorkerBlockInfo};
 use crate::proto::rpc::ProtoPayload;
 use crate::rpc::client::PinnedClient;
 use crate::rpc::server::LatencyProfile;
@@ -112,7 +112,35 @@ impl BlockBroadcaster {
         .await;
 
         trace!("Worker broadcast block {}", block.block.n);
+
+        self.send_block_info_to_consensus(&block).await;
+
         Ok(())
     }
 
+    async fn send_block_info_to_consensus(&self, block: &CachedBlock) {
+        let config = self.config.get();
+        let my_name = &config.net_config.name;
+        let consensus_name = my_name.strip_suffix("_worker").unwrap_or(my_name).to_string();
+
+        let info = ProtoWorkerBlockInfo {
+            block_n: block.block.n,
+            block_hash: block.block_hash.clone(),
+            block_origin: my_name.clone(),
+        };
+
+        let rpc = ProtoPayload {
+            message: Some(crate::proto::rpc::proto_payload::Message::WorkerBlockInfo(info)),
+        };
+        let data = rpc.encode_to_vec();
+        let sz = data.len();
+        let data = PinnedMessage::from(data, sz, SenderType::Anon);
+        trace!("Sending block info for block {} to {}", block.block.n, consensus_name);
+        let _ = PinnedClient::send(
+            &self.client,
+            &consensus_name,
+            data.as_ref(),
+        )
+        .await;
+    }
 }

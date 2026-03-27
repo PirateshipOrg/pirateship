@@ -18,7 +18,7 @@ pub struct BlockSequencer {
 
     batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
     block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
-    vote_register_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
+    vote_register_tx: Sender<(u64, oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
 
     parent_hash_rx: FutureHash,
     seq_num: u64,
@@ -34,7 +34,7 @@ impl BlockSequencer {
         crypto: CryptoServiceConnector,
         batch_rx: Receiver<(RawBatch, Vec<MsgAckChanWithTag>)>,
         block_broadcaster_tx: Sender<(u64, oneshot::Receiver<CachedBlock>)>,
-        vote_register_tx: Sender<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
+        vote_register_tx: Sender<(u64, oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
     ) -> Self {
         let signature_timer = ResettableTimer::new(Duration::from_millis(
             config.get().consensus_config.signature_max_delay_ms,
@@ -127,7 +127,7 @@ impl BlockSequencer {
         self.parent_hash_rx = FutureHash::Future(hash_rx);
 
         self.vote_register_tx
-            .send((hash_rx2, replies))
+            .send((n, hash_rx2, replies))
             .await
             .expect("vote_register_tx send failed");
 

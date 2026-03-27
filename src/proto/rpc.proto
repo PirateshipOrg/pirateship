@@ -25,5 +25,6 @@ message ProtoPayload {
 
         proto.consensus.ProtoWorkerVote worker_vote = 8;
         proto.consensus.ProtoAppendEntries worker_block = 9;
+        proto.consensus.ProtoWorkerBlockInfo worker_block_info = 10;
     }
 }

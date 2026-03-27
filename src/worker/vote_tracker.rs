@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +17,8 @@ use crate::rpc::PinnedMessage;
 use crate::utils::channel::Receiver;
 
 struct PendingBlock {
-    vote_count: usize,
+    block_n: u64,
+    voters: HashSet<String>,
     ack_chans: Option<Vec<MsgAckChanWithTag>>,
 }
 
@@ -25,11 +26,13 @@ pub struct VoteTracker {
     #[allow(dead_code)]
     config: AtomicConfig,
 
-    register_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
+    register_rx: Receiver<(u64, oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
     vote_rx: Receiver<ProtoWorkerVote>,
 
     pending: HashMap<HashType, PendingBlock>,
     threshold: usize,
+    consensus_name: String,
+    worker_names: HashSet<String>,
 
     total_blocks_acked: u64,
     total_txns_acked: u64,
@@ -39,10 +42,13 @@ pub struct VoteTracker {
 impl VoteTracker {
     pub fn new(
         config: AtomicConfig,
-        register_rx: Receiver<(oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
+        register_rx: Receiver<(u64, oneshot::Receiver<HashType>, Vec<MsgAckChanWithTag>)>,
         vote_rx: Receiver<ProtoWorkerVote>,
     ) -> Self {
         let threshold = config.get().consensus_config.liveness_u as usize + 1;
+        let consensus_name = config.get().net_config.name.strip_suffix("_worker").unwrap_or(&config.get().net_config.name).to_string();
+        let worker_names = config.get().consensus_config.learner_list.clone().into_iter().collect();
+        
         Self {
             config,
             register_rx,
@@ -52,6 +58,8 @@ impl VoteTracker {
             total_blocks_acked: 0,
             total_txns_acked: 0,
             log_timer: time::interval(Duration::from_secs(5)),
+            consensus_name,
+            worker_names,
         }
     }
 
@@ -73,8 +81,8 @@ impl VoteTracker {
                 if reg.is_none() {
                     return Err(());
                 }
-                let (hash_rx, ack_chans) = reg.unwrap();
-                self.handle_register(hash_rx, ack_chans).await;
+                let (block_n, hash_rx, ack_chans) = reg.unwrap();
+                self.handle_register(block_n, hash_rx, ack_chans).await;
             },
             vote = self.vote_rx.recv() => {
                 if vote.is_none() {
@@ -95,6 +103,7 @@ impl VoteTracker {
 
     async fn handle_register(
         &mut self,
+        block_n: u64,
         hash_rx: oneshot::Receiver<HashType>,
         ack_chans: Vec<MsgAckChanWithTag>,
     ) {
@@ -104,29 +113,45 @@ impl VoteTracker {
         };
 
         let entry = self.pending.entry(hash.clone()).or_insert_with(|| PendingBlock {
-            vote_count: 0,
+            block_n,
+            voters: HashSet::new(),
             ack_chans: None,
         });
+        entry.voters.insert(self.config.get().net_config.name.clone()); // Vote for myself
         entry.ack_chans = Some(ack_chans);
 
         self.maybe_ack(&hash).await;
     }
 
     async fn handle_vote(&mut self, vote: ProtoWorkerVote) {
-        let hash = vote.block_hash.clone();
-        let entry = self.pending.entry(hash.clone()).or_insert_with(|| PendingBlock {
-            vote_count: 0,
-            ack_chans: None,
-        });
-        entry.vote_count += 1;
+        let voter = vote.voter.clone();
+        let vote_n = vote.block_n;
 
-        self.maybe_ack(&hash).await;
+        let eligible_hashes: Vec<HashType> = self
+            .pending
+            .iter()
+            .filter(|(_, entry)| entry.block_n <= vote_n)
+            .map(|(hash, _)| hash.clone())
+            .collect();
+
+        for hash in &eligible_hashes {
+            if let Some(entry) = self.pending.get_mut(hash) {
+                entry.voters.insert(voter.clone());
+            }
+        }
+
+        for hash in eligible_hashes {
+            self.maybe_ack(&hash).await;
+        }
     }
 
     async fn maybe_ack(&mut self, hash: &HashType) {
+        
         let should_ack = {
             if let Some(entry) = self.pending.get(hash) {
-                entry.vote_count >= self.threshold && entry.ack_chans.is_some()
+                let worker_votes = entry.voters.iter().filter(|v| self.worker_names.contains(*v)).count();
+                worker_votes >= self.threshold && entry.ack_chans.is_some()
+                && entry.voters.contains(&self.consensus_name)
             } else {
                 false
             }
@@ -143,7 +168,7 @@ impl VoteTracker {
         self.total_blocks_acked += 1;
         self.total_txns_acked += ack_chans.len() as u64;
 
-        trace!(
+        info!(
             "Vote threshold reached for block {}, acking {} clients",
             hex::encode(hash), ack_chans.len()
         );
