@@ -121,7 +121,7 @@ impl BlockBroadcaster {
     async fn send_block_info_to_consensus(&self, block: &CachedBlock) {
         let config = self.config.get();
         let my_name = &config.net_config.name;
-        let consensus_name = my_name.strip_suffix("_worker").unwrap_or(my_name).to_string();
+        let consensus_name = config.consensus_config.node_list[0].clone();
 
         let info = ProtoWorkerBlockInfo {
             block_n: block.block.n,

@@ -31,7 +31,7 @@ pub struct VoteTracker {
 
     pending: HashMap<HashType, PendingBlock>,
     threshold: usize,
-    consensus_name: String,
+    node_names: HashSet<String>,
     worker_names: HashSet<String>,
 
     total_blocks_acked: u64,
@@ -46,9 +46,9 @@ impl VoteTracker {
         vote_rx: Receiver<ProtoWorkerVote>,
     ) -> Self {
         let threshold = config.get().consensus_config.liveness_u as usize + 1;
-        let consensus_name = config.get().net_config.name.strip_suffix("_worker").unwrap_or(&config.get().net_config.name).to_string();
+        let node_names = config.get().consensus_config.node_list.clone().into_iter().collect();
         let worker_names = config.get().consensus_config.learner_list.clone().into_iter().collect();
-        
+
         Self {
             config,
             register_rx,
@@ -58,7 +58,7 @@ impl VoteTracker {
             total_blocks_acked: 0,
             total_txns_acked: 0,
             log_timer: time::interval(Duration::from_secs(5)),
-            consensus_name,
+            node_names,
             worker_names,
         }
     }
@@ -150,8 +150,9 @@ impl VoteTracker {
         let should_ack = {
             if let Some(entry) = self.pending.get(hash) {
                 let worker_votes = entry.voters.iter().filter(|v| self.worker_names.contains(*v)).count();
+                let has_node_vote = entry.voters.iter().any(|v| self.node_names.contains(v));
                 worker_votes >= self.threshold && entry.ack_chans.is_some()
-                && entry.voters.contains(&self.consensus_name)
+                && has_node_vote
             } else {
                 false
             }
