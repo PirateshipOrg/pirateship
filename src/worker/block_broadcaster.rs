@@ -51,7 +51,7 @@ impl BlockBroadcaster {
         let me = &config.net_config.name;
         config
             .consensus_config
-            .node_list
+            .learner_list
             .iter()
             .filter(|e| *e != me)
             .cloned()

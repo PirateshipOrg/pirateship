@@ -31,20 +31,6 @@ fn process_args() -> Config {
     Config::deserialize(&cfg_contents)
 }
 
-fn offset_port(addr: &str, offset: u16) -> String {
-    let colon_pos = addr.rfind(':').expect("Address must contain ':'");
-    let (host, port_str) = addr.split_at(colon_pos);
-    let port: u16 = port_str[1..].parse().expect("Invalid port number");
-    format!("{}:{}", host, port + offset)
-}
-
-fn offset_all_ports(config: &mut Config, offset: u16) {
-    config.net_config.addr = offset_port(&config.net_config.addr, offset);
-    for (_name, node_info) in config.net_config.nodes.iter_mut() {
-        node_info.addr = offset_port(&node_info.addr, offset);
-    }
-}
-
 async fn run_main(cfg: Config) -> std::io::Result<()> {
     let mut node = WorkerNode::new(cfg);
     let mut handles = node.run().await;
@@ -73,11 +59,7 @@ const NUM_THREADS: usize = 16;
 fn main() {
     log4rs::init_config(config::default_log4rs_config()).unwrap();
 
-    let mut cfg = process_args();
-
-    info!("Worker for node: {}", cfg.net_config.name);
-
-    offset_all_ports(&mut cfg, 1111);
+    let cfg = process_args();
 
     info!("Worker listening on: {}", cfg.net_config.addr);
 

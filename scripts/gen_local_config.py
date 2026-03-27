@@ -23,7 +23,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crypto import gen_keys_and_certs, DEFAULT_CA_NAME
 
 DEFAULT_NUM_NODES = 4
-DEFAULT_NUM_CLIENTS = 1
 DEFAULT_PORT_BASE = 3000
 DEFAULT_OUTPUT_DIR = "configs"
 
@@ -119,10 +118,6 @@ def parse_args():
         help=f"Number of nodes (default: {DEFAULT_NUM_NODES})",
     )
     parser.add_argument(
-        "-c", "--num-clients", type=int, default=DEFAULT_NUM_CLIENTS,
-        help=f"Number of client configs (default: {DEFAULT_NUM_CLIENTS})",
-    )
-    parser.add_argument(
         "-p", "--port-base", type=int, default=DEFAULT_PORT_BASE,
         help=f"Base port; node i listens on port_base + i (default: {DEFAULT_PORT_BASE})",
     )
@@ -144,7 +139,6 @@ def parse_args():
 def generate(args):
     output_dir = args.output_dir
     num_nodes = args.num_nodes
-    num_clients = args.num_clients
     port_base = args.port_base
     host = args.host
 
@@ -164,9 +158,24 @@ def generate(args):
         node_list_for_crypto[name] = (addr, domain)
         nodes_map[name] = {"addr": addr, "domain": domain}
 
+    # Build worker address map. Workers share TLS certs and signing keys
+    # with their parent node but listen on a different port.
+    worker_names = [f"{name}_worker" for name in node_names]
+    worker_nodes_map = {}
+    for i, name in enumerate(node_names, start=1):
+        worker_name = f"{name}_worker"
+        worker_port = port_base + i + 1111
+        domain = f"{name}.pft.org"
+        worker_nodes_map[worker_name] = {"addr": f"{host}:{worker_port}", "domain": domain}
+
+    all_nodes_map = {}
+    all_nodes_map.update(nodes_map)
+    all_nodes_map.update(worker_nodes_map)
+
     # Generate all crypto material (TLS certs + Ed25519 signing keys).
+    # One client per worker, so generate num_nodes client signing keys.
     participants = gen_keys_and_certs(
-        node_list_for_crypto, DEFAULT_CA_NAME, num_clients, output_dir,
+        node_list_for_crypto, DEFAULT_CA_NAME, num_nodes, output_dir,
     )
     print("Generated crypto for:", participants)
 
@@ -188,12 +197,13 @@ def generate(args):
         cfg["net_config"]["tls_cert_path"] = rel(f"{name}_tls_cert.pem")
         cfg["net_config"]["tls_key_path"] = rel(f"{name}_tls_privkey.pem")
         cfg["net_config"]["tls_root_ca_cert_path"] = ca_cert
-        cfg["net_config"]["nodes"] = dict(nodes_map)
+        cfg["net_config"]["nodes"] = dict(all_nodes_map)
 
         cfg["rpc_config"]["allowed_keylist_path"] = keylist
         cfg["rpc_config"]["signing_priv_key_path"] = rel(f"{name}_signing_privkey.pem")
 
         cfg["consensus_config"]["node_list"] = list(node_names)
+        cfg["consensus_config"]["learner_list"] = list(worker_names)
         cfg["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"/tmp/testdb{i}"
 
         path = os.path.join(output_dir, f"{name}_config.json")
@@ -201,14 +211,57 @@ def generate(args):
             json.dump(cfg, f, indent=4)
         print(f"  wrote {path}")
 
-    # --- Client configs ---
-    for ci in range(1, num_clients + 1):
-        client_name = f"client{ci}"
+    # --- Worker configs (one per node, reusing parent's crypto material) ---
+    for i, name in enumerate(node_names, start=1):
+        worker_name = f"{name}_worker"
+        worker_port = port_base + i + 1111
+        cfg = json.loads(json.dumps(DEFAULT_NODE_CONFIG))  # deep copy
+
+        cfg["net_config"]["name"] = worker_name
+        cfg["net_config"]["addr"] = f"0.0.0.0:{worker_port}"
+        cfg["net_config"]["tls_cert_path"] = rel(f"{name}_tls_cert.pem")
+        cfg["net_config"]["tls_key_path"] = rel(f"{name}_tls_privkey.pem")
+        cfg["net_config"]["tls_root_ca_cert_path"] = ca_cert
+        cfg["net_config"]["nodes"] = dict(all_nodes_map)
+
+        cfg["rpc_config"]["allowed_keylist_path"] = keylist
+        cfg["rpc_config"]["signing_priv_key_path"] = rel(f"{name}_signing_privkey.pem")
+
+        cfg["consensus_config"]["node_list"] = list(node_names)
+        cfg["consensus_config"]["learner_list"] = list(worker_names)
+        cfg["consensus_config"]["log_storage_config"]["RocksDB"]["db_path"] = f"/tmp/testdb{i}"
+
+        path = os.path.join(output_dir, f"{worker_name}_config.json")
+        with open(path, "w") as f:
+            json.dump(cfg, f, indent=4)
+        print(f"  wrote {path}")
+
+    # Append worker entries to keylist (workers share parent node's signing key).
+    keylist_file = os.path.join(output_dir, "signing_pub_keys.keylist")
+    with open(keylist_file, "r") as f:
+        lines = f.read().strip().split("\n")
+    node_pub_keys = {}
+    for line in lines:
+        parts = line.split(" ", 1)
+        if len(parts) == 2:
+            node_pub_keys[parts[0]] = parts[1]
+    with open(keylist_file, "w") as f:
+        for line in lines:
+            print(line, file=f)
+        for name in node_names:
+            worker_name = f"{name}_worker"
+            if name in node_pub_keys:
+                print(f"{worker_name} {node_pub_keys[name]}", file=f)
+
+    # --- Client configs (one per worker, each pointing only to its worker) ---
+    for i, name in enumerate(node_names, start=1):
+        client_name = f"client{i}"
+        worker_name = f"{name}_worker"
         cfg = json.loads(json.dumps(DEFAULT_CLIENT_CONFIG))
 
         cfg["net_config"]["name"] = client_name
         cfg["net_config"]["tls_root_ca_cert_path"] = ca_cert
-        cfg["net_config"]["nodes"] = dict(nodes_map)
+        cfg["net_config"]["nodes"] = {worker_name: worker_nodes_map[worker_name]}
         cfg["rpc_config"]["signing_priv_key_path"] = rel(f"{client_name}_signing_privkey.pem")
 
         path = os.path.join(output_dir, f"{client_name}_config.json")
@@ -219,7 +272,7 @@ def generate(args):
     # --- Controller config ---
     cfg = json.loads(json.dumps(DEFAULT_CONTROLLER_CONFIG))
     cfg["net_config"]["tls_root_ca_cert_path"] = ca_cert
-    cfg["net_config"]["nodes"] = dict(nodes_map)
+    cfg["net_config"]["nodes"] = dict(all_nodes_map)
     cfg["rpc_config"]["signing_priv_key_path"] = rel("controller_signing_privkey.pem")
 
     path = os.path.join(output_dir, "controller_config.json")
@@ -227,7 +280,7 @@ def generate(args):
         json.dump(cfg, f, indent=4)
     print(f"  wrote {path}")
 
-    print(f"\nDone. {num_nodes} node + {num_clients} client + 1 controller configs in {output_dir}/")
+    print(f"\nDone. {num_nodes} node + {num_nodes} worker + {num_nodes} client + 1 controller configs in {output_dir}/")
 
 
 if __name__ == "__main__":
