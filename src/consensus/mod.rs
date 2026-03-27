@@ -143,6 +143,11 @@ impl ServerContextType for PinnedConsensusServerContext {
                             .expect("Channel send error");
                         return Ok(RespType::NoResp);
             },
+            crate::proto::rpc::proto_payload::Message::WorkerVote(_) |
+            crate::proto::rpc::proto_payload::Message::WorkerBlock(_) => {
+                        // Worker-only messages; ignore in consensus server.
+                        return Ok(RespType::NoResp);
+            },
         }
 
 

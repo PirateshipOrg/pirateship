@@ -11,6 +11,7 @@ pub mod rpc;
 pub mod proto;
 
 pub mod client;
+pub mod worker;
 
 #[macro_export]
 macro_rules! get_tx_list {

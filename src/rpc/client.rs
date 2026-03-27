@@ -387,6 +387,7 @@ impl PinnedClient {
             sock = Some(_sock);
         }
 
+
         Ok(sock.unwrap())
     }
 
@@ -795,8 +796,6 @@ impl PinnedClient {
             }
         }
 
-        // info!("Need to spawn workes for {:?}", need_to_spawn_workers);
-
         for name in &need_to_spawn_workers {
             let (tx, mut rx) = mpsc::channel(10);
             let mut lchans = client.0.chan_map.0.write().await;
@@ -827,7 +826,7 @@ impl PinnedClient {
 
                     break s
                 };
-                
+
                 while rx.recv_many(&mut msgs, 10).await > 0 {
                     let mut should_print_flush_time = false;
                     let mut combined_prefix = String::from("");

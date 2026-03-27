@@ -23,5 +23,7 @@ message ProtoPayload {
 
         proto.checkpoint.ProtoBackfillNack backfill_nack = 7;
 
+        proto.consensus.ProtoWorkerVote worker_vote = 8;
+        proto.consensus.ProtoAppendEntries worker_block = 9;
     }
 }
