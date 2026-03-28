@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
-use log::info;
+use log::{info, trace};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -11,7 +11,6 @@ use crate::consensus::batch_proposal::TxWithAckChanTag;
 use crate::crypto::HashType;
 use crate::proto::consensus::ProtoWorkerBlockInfo;
 use crate::proto::execution::{ProtoTransaction, ProtoTransactionOp, ProtoTransactionOpType, ProtoTransactionPhase};
-use crate::rpc::client::PinnedClient;
 use crate::rpc::server::LatencyProfile;
 use crate::rpc::{PinnedMessage, SenderType};
 use crate::utils::channel::{Receiver, Sender};
@@ -33,8 +32,8 @@ impl From<Cut> for CutSerialized {
 }
 
 pub struct WorkerHandler {
+    #[allow(dead_code)]
     config: AtomicConfig,
-    client: PinnedClient,
 
     block_info_rx: Receiver<ProtoWorkerBlockInfo>,
     batch_proposer_tx: Sender<TxWithAckChanTag>,
@@ -51,14 +50,12 @@ pub struct WorkerHandler {
 impl WorkerHandler {
     pub fn new(
         config: AtomicConfig,
-        client: PinnedClient,
         block_info_rx: Receiver<ProtoWorkerBlockInfo>,
         batch_proposer_tx: Sender<TxWithAckChanTag>,
         worker_acker_tx: Sender<(tokio::sync::mpsc::Receiver<(PinnedMessage, LatencyProfile)>, CutSerialized)>,
     ) -> Self {
         Self {
             config,
-            client,
             block_info_rx,
             batch_proposer_tx,
             cut_seen: HashMap::new(),
@@ -114,7 +111,7 @@ impl WorkerHandler {
 
         self.maybe_propose_cut().await;
 
-        info!(
+        trace!(
             "Received block info for block {} from {}",
             block_info.block_n, target
         );
@@ -122,7 +119,7 @@ impl WorkerHandler {
         Ok(())
     }
 
-    const BATCH_SIZE: usize = 10;
+    const BATCH_SIZE: usize = 1;
     async fn maybe_propose_cut(&mut self) {
         // How many pending blocks are there?
         let pending_blocks = self.cut_seen.keys()
@@ -142,6 +139,11 @@ impl WorkerHandler {
     async fn do_propose_cut(&mut self) {
         let cut = CutSerialized::from(self.cut_seen.clone());
         let cut_ser = bincode::serialize(&cut).unwrap();
+        for (worker_name, block_n, block_hash) in &cut.cut {
+            self.cut_proposed.insert(worker_name.clone(), (*block_n, block_hash.clone()));
+        }
+
+        // Send the cut to consensus.
         let cut_tx = ProtoTransaction {
             on_crash_commit: Some(ProtoTransactionPhase {
                 ops: vec![ProtoTransactionOp {
@@ -161,6 +163,9 @@ impl WorkerHandler {
         let tx_with_ack_chan_tag: TxWithAckChanTag = (Some(cut_tx), (tx, current_tag, SenderType::Anon));
         self.batch_proposer_tx.send(tx_with_ack_chan_tag).await.unwrap();
 
+
+        // Notify the acker.
         self.worker_acker_tx.send((ack_rx, cut)).await.unwrap();
+
     }
 }

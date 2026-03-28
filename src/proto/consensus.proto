@@ -114,6 +114,8 @@ message ProtoWorkerVote {
     bytes block_hash = 1;
     uint64 block_n = 2;
     string voter = 3;
+
+    uint64 byz_block_n = 4;
 }
 
 message ProtoWorkerBlockInfo {

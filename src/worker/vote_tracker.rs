@@ -10,10 +10,10 @@ use tokio::time::{self, Interval};
 use crate::config::AtomicConfig;
 use crate::consensus::batch_proposal::MsgAckChanWithTag;
 use crate::crypto::HashType;
-use crate::proto::client::{ProtoClientReply, ProtoTransactionReceipt};
+use crate::proto::client::{ProtoByzResponse, ProtoClientReply, ProtoTransactionReceipt};
 use crate::proto::consensus::ProtoWorkerVote;
 use crate::rpc::server::LatencyProfile;
-use crate::rpc::PinnedMessage;
+use crate::rpc::{PinnedMessage, SenderType};
 use crate::utils::channel::Receiver;
 
 struct PendingBlock {
@@ -37,6 +37,8 @@ pub struct VoteTracker {
     total_blocks_acked: u64,
     total_txns_acked: u64,
     log_timer: Interval,
+
+    pending_byz_responses: HashMap<(u64 /* block_n */, SenderType), Vec<ProtoByzResponse>>,
 }
 
 impl VoteTracker {
@@ -60,6 +62,7 @@ impl VoteTracker {
             log_timer: time::interval(Duration::from_secs(5)),
             node_names,
             worker_names,
+            pending_byz_responses: HashMap::new(),
         }
     }
 
@@ -117,10 +120,21 @@ impl VoteTracker {
             voters: HashSet::new(),
             ack_chans: None,
         });
+
+        for (i, (_, client_tag, sender)) in ack_chans.iter().enumerate() {
+            self.pending_byz_responses.entry((block_n, sender.clone())).or_insert_with(|| Vec::new()).push(ProtoByzResponse {
+                block_n,
+                tx_n: i as u64,
+                client_tag: *client_tag,
+            });
+        }
+
         entry.voters.insert(self.config.get().net_config.name.clone()); // Vote for myself
         entry.ack_chans = Some(ack_chans);
 
-        self.maybe_ack(&hash).await;
+
+
+        self.maybe_ack(&hash, 0).await;
     }
 
     async fn handle_vote(&mut self, vote: ProtoWorkerVote) {
@@ -141,11 +155,14 @@ impl VoteTracker {
         }
 
         for hash in eligible_hashes {
-            self.maybe_ack(&hash).await;
+            self.maybe_ack(&hash, vote.byz_block_n).await;
         }
     }
 
-    async fn maybe_ack(&mut self, hash: &HashType) {
+    async fn maybe_ack(&mut self, hash: &HashType, byz_block_n: u64) {
+        if byz_block_n == 0 {
+            return;
+        }
         
         let should_ack = {
             if let Some(entry) = self.pending.get(hash) {
@@ -174,16 +191,28 @@ impl VoteTracker {
             hex::encode(hash), ack_chans.len()
         );
 
-        for (reply_chan, client_tag, _sender) in ack_chans {
+        for (i, (reply_chan, client_tag, sender)) in ack_chans.into_iter().enumerate() {
+            let byz_responses = self.pending_byz_responses.iter()
+                .filter(|((n, _sender), _)| *n <= byz_block_n && *_sender == sender)
+                .map(|((n,  _sender), byz_responses)| (*n, byz_responses.clone()))
+                .collect::<HashMap<u64, Vec<ProtoByzResponse>>>();
+
+            byz_responses.keys().for_each(|n| {
+                self.pending_byz_responses.remove(&(*n, sender.clone()));
+            });
+
+            let byz_responses = byz_responses.values().flatten().cloned().collect::<Vec<ProtoByzResponse>>();
+
+
             let reply = ProtoClientReply {
                 reply: Some(crate::proto::client::proto_client_reply::Reply::Receipt(
                     ProtoTransactionReceipt {
                         req_digest: hash.clone(),
-                        block_n: 0,
-                        tx_n: 0,
+                        block_n: entry.block_n,
+                        tx_n: i as u64,
                         results: None,
-                        await_byz_response: false,
-                        byz_responses: vec![],
+                        await_byz_response: true,
+                        byz_responses,
                     },
                 )),
                 client_tag,

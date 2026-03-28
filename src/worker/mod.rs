@@ -216,6 +216,8 @@ impl WorkerNode {
             let (incoming_block_tx, incoming_block_rx) = make_channel(chan_depth);
             incoming_block_txs.insert(learner.clone(), incoming_block_tx);
             fork_receivers.push(Arc::new(Mutex::new(ForkReceiver::new(
+                config.clone(),
+                keystore.clone(),
                 incoming_block_rx,
                 storage_tx.clone(),
             ))));

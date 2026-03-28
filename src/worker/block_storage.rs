@@ -75,6 +75,7 @@ impl BlockStorage {
             block_hash,
             block_n,
             voter: self.config.get().net_config.name.clone(),
+            byz_block_n: 0,
         };
 
         self.vote_sender_tx

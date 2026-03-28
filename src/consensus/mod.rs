@@ -314,7 +314,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
         let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
         let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
-        let worker_handler = WorkerHandler::new(config.clone(), worker_handler_client.into(), worker_block_info_rx, batch_proposer_tx.clone(), worker_acker_tx);
+        let worker_handler = WorkerHandler::new(config.clone(), worker_block_info_rx, batch_proposer_tx.clone(), worker_acker_tx);
         let worker_acker = WorkerAcker::new(config.clone(), worker_acker_client.into(), worker_acker_rx);
 
         #[cfg(feature = "extra_2pc")]
