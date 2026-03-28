@@ -9,6 +9,7 @@ pub mod client_reply;
 mod logserver;
 mod pacemaker;
 mod worker_handler;
+mod worker_acker;
 pub mod extra_2pc;
 
 // #[cfg(test)]
@@ -29,6 +30,7 @@ use pacemaker::Pacemaker;
 use prost::Message;
 use staging::{Staging, VoteWithSender};
 use worker_handler::WorkerHandler;
+use worker_acker::WorkerAcker;
 use tokio::{sync::{mpsc::unbounded_channel, Mutex}, task::JoinSet};
 use crate::{proto::{checkpoint::ProtoBackfillNack, consensus::{ProtoAppendEntries, ProtoViewChange, ProtoWorkerBlockInfo}}, rpc::{client::Client, SenderType}, utils::{channel::{make_channel, Receiver, Sender}, RocksDBStorageEngine, StorageService}};
 
@@ -185,6 +187,7 @@ pub struct ConsensusNode<E: AppEngine + Send + Sync + 'static> {
     logserver: Arc<Mutex<LogServer>>,
     pacemaker: Arc<Mutex<Pacemaker>>,
     worker_handler: Arc<Mutex<WorkerHandler>>,
+    worker_acker: Arc<Mutex<WorkerAcker>>,
 
     #[cfg(feature = "extra_2pc")]
     extra_2pc: Arc<Mutex<TwoPCHandler>>,
@@ -240,6 +243,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let pacemaker_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let fork_receiver_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
         let worker_handler_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
+        let worker_acker_client = Client::new_atomic(config.clone(), keystore.clone(), false, 0);
 
         #[cfg(feature = "extra_2pc")]
         let extra_2pc_client = Client::new_atomic(config.clone(), keystore.clone(), true, 50);
@@ -270,6 +274,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let (gc_tx, gc_rx) = make_channel(_chan_depth);
         let (logserver_query_tx, logserver_query_rx) = make_channel(_chan_depth);
         let (worker_block_info_tx, worker_block_info_rx) = make_channel(_chan_depth);
+        let (worker_acker_tx, worker_acker_rx) = make_channel(_chan_depth);
 
         let block_maker_crypto = crypto.get_connector();
         let block_broadcaster_crypto = crypto.get_connector();
@@ -309,7 +314,8 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let client_reply = ClientReplyHandler::new(config.clone(), client_reply_rx, client_reply_command_rx);
         let logserver = LogServer::new(config.clone(), logserver_client.into(), logserver_rx, backfill_request_rx, gc_rx, logserver_query_rx, logserver_storage);
         let pacemaker = Pacemaker::new(config.clone(), pacemaker_client.into(), pacemaker_crypto, view_change_rx, pacemaker_cmd_tx, pacemaker_cmd_rx2, logserver_query_tx);
-        let worker_handler = WorkerHandler::new(config.clone(), worker_handler_client.into(), worker_block_info_rx);
+        let worker_handler = WorkerHandler::new(config.clone(), worker_handler_client.into(), worker_block_info_rx, batch_proposer_tx.clone(), worker_acker_tx);
+        let worker_acker = WorkerAcker::new(config.clone(), worker_acker_client.into(), worker_acker_rx);
 
         #[cfg(feature = "extra_2pc")]
         let extra_2pc = extra_2pc::TwoPCHandler::new(config.clone(), extra_2pc_client.into(), storage.get_connector(crypto.get_connector()), storage.get_connector(crypto.get_connector()), extra_2pc_command_rx, extra_2pc_phase_message_rx, extra_2pc_staging_tx);
@@ -330,6 +336,7 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
             logserver: Arc::new(Mutex::new(logserver)),
             pacemaker: Arc::new(Mutex::new(pacemaker)),
             worker_handler: Arc::new(Mutex::new(worker_handler)),
+            worker_acker: Arc::new(Mutex::new(worker_acker)),
 
             #[cfg(feature = "extra_2pc")]
             extra_2pc: Arc::new(Mutex::new(extra_2pc)),
@@ -408,6 +415,11 @@ impl<E: AppEngine + Send + Sync> ConsensusNode<E> {
         let worker_handler = self.worker_handler.clone();
         handles.spawn(async move {
             WorkerHandler::run(worker_handler).await;
+        });
+
+        let worker_acker = self.worker_acker.clone();
+        handles.spawn(async move {
+            WorkerAcker::run(worker_acker).await;
         });
 
         #[cfg(feature = "extra_2pc")]

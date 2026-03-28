@@ -6,6 +6,7 @@ mod fork_receiver;
 mod vote_sender;
 pub mod vote_tracker;
 
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::ops::Deref;
 use std::pin::Pin;
@@ -39,7 +40,7 @@ pub struct WorkerServerContext {
     config: AtomicConfig,
     keystore: AtomicKeyStore,
     batch_proposer_tx: Sender<TxWithAckChanTag>,
-    incoming_block_tx: Sender<(ProtoAppendEntries, SenderType)>,
+    incoming_block_txs: HashMap<String, Sender<(ProtoAppendEntries, SenderType)>>,
     vote_tx: Sender<ProtoWorkerVote>,
 }
 
@@ -51,14 +52,14 @@ impl PinnedWorkerServerContext {
         config: AtomicConfig,
         keystore: AtomicKeyStore,
         batch_proposer_tx: Sender<TxWithAckChanTag>,
-        incoming_block_tx: Sender<(ProtoAppendEntries, SenderType)>,
+        incoming_block_txs: HashMap<String, Sender<(ProtoAppendEntries, SenderType)>>,
         vote_tx: Sender<ProtoWorkerVote>,
     ) -> Self {
         Self(Arc::new(Box::pin(WorkerServerContext {
             config,
             keystore,
             batch_proposer_tx,
-            incoming_block_tx,
+            incoming_block_txs,
             vote_tx,
         })))
     }
@@ -123,10 +124,14 @@ impl ServerContextType for PinnedWorkerServerContext {
                 return Ok(RespType::Resp);
             }
             crate::proto::rpc::proto_payload::Message::WorkerBlock(ae) => {
-                self.incoming_block_tx
-                    .send((ae, sender))
-                    .await
-                    .expect("incoming_block_tx send error");
+                let sender_name = sender.to_name_and_sub_id().0;
+                if let Some(tx) = self.incoming_block_txs.get(&sender_name) {
+                    tx.send((ae, sender))
+                        .await
+                        .expect("incoming_block_tx send error");
+                } else {
+                    warn!("Worker: received block from unknown sender: {}", sender_name);
+                }
                 return Ok(RespType::NoResp);
             }
             crate::proto::rpc::proto_payload::Message::WorkerVote(vote) => {
@@ -157,7 +162,7 @@ pub struct WorkerNode {
     batch_proposer: Arc<Mutex<BatchProposer>>,
     block_sequencer: Arc<Mutex<BlockSequencer>>,
     block_broadcaster: Arc<Mutex<BlockBroadcaster>>,
-    fork_receiver: Arc<Mutex<ForkReceiver>>,
+    fork_receivers: Vec<Arc<Mutex<ForkReceiver>>>,
     block_storage: Arc<Mutex<BlockStorage>>,
     vote_sender: Arc<Mutex<VoteSender>>,
     vote_tracker: Arc<Mutex<VoteTracker>>,
@@ -188,11 +193,33 @@ impl WorkerNode {
         let (batch_proposer_tx, batch_proposer_rx) = make_channel(chan_depth);
         let (block_maker_tx, block_maker_rx) = make_channel(chan_depth);
         let (broadcaster_tx, broadcaster_rx) = make_channel(chan_depth);
-        let (incoming_block_tx, incoming_block_rx) = make_channel(chan_depth);
         let (storage_tx, storage_rx) = make_channel(chan_depth);
         let (vote_sender_tx, vote_sender_rx) = make_channel(chan_depth);
         let (vote_register_tx, vote_register_rx) = make_channel(chan_depth);
         let (vote_tx, vote_rx) = make_channel(chan_depth);
+
+        let my_name = config.get().net_config.name.clone();
+        let learner_list: Vec<String> = config
+            .get()
+            .consensus_config
+            .learner_list
+            .iter()
+            .filter(|n| *n != &my_name)
+            .cloned()
+            .collect();
+
+        let mut incoming_block_txs: HashMap<String, Sender<(ProtoAppendEntries, SenderType)>> =
+            HashMap::new();
+        let mut fork_receivers: Vec<Arc<Mutex<ForkReceiver>>> = Vec::new();
+
+        for learner in &learner_list {
+            let (incoming_block_tx, incoming_block_rx) = make_channel(chan_depth);
+            incoming_block_txs.insert(learner.clone(), incoming_block_tx);
+            fork_receivers.push(Arc::new(Mutex::new(ForkReceiver::new(
+                incoming_block_rx,
+                storage_tx.clone(),
+            ))));
+        }
 
         let sequencer_crypto = crypto.get_connector();
 
@@ -200,7 +227,7 @@ impl WorkerNode {
             config.clone(),
             keystore.clone(),
             batch_proposer_tx,
-            incoming_block_tx,
+            incoming_block_txs,
             vote_tx,
         );
 
@@ -229,11 +256,6 @@ impl WorkerNode {
             config.clone(),
             broadcaster_client.into(),
             broadcaster_rx,
-        );
-
-        let fork_receiver = ForkReceiver::new(
-            incoming_block_rx,
-            storage_tx,
         );
 
         let storage_config = config.get().consensus_config.log_storage_config.clone();
@@ -275,7 +297,7 @@ impl WorkerNode {
             batch_proposer: Arc::new(Mutex::new(batch_proposer)),
             block_sequencer: Arc::new(Mutex::new(block_sequencer)),
             block_broadcaster: Arc::new(Mutex::new(block_broadcaster)),
-            fork_receiver: Arc::new(Mutex::new(fork_receiver)),
+            fork_receivers,
             block_storage: Arc::new(Mutex::new(block_storage)),
             vote_sender: Arc::new(Mutex::new(vote_sender)),
             vote_tracker: Arc::new(Mutex::new(vote_tracker)),
@@ -287,7 +309,7 @@ impl WorkerNode {
         let batch_proposer = self.batch_proposer.clone();
         let block_sequencer = self.block_sequencer.clone();
         let block_broadcaster = self.block_broadcaster.clone();
-        let fork_receiver = self.fork_receiver.clone();
+        let fork_receivers = self.fork_receivers.clone();
         let block_storage = self.block_storage.clone();
         let vote_sender = self.vote_sender.clone();
         let vote_tracker = self.vote_tracker.clone();
@@ -313,9 +335,11 @@ impl WorkerNode {
             BlockBroadcaster::run(block_broadcaster).await;
         });
 
-        handles.spawn(async move {
-            ForkReceiver::run(fork_receiver).await;
-        });
+        for fork_receiver in fork_receivers {
+            handles.spawn(async move {
+                ForkReceiver::run(fork_receiver).await;
+            });
+        }
 
         handles.spawn(async move {
             BlockStorage::run(block_storage).await;
