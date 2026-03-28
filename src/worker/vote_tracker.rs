@@ -36,6 +36,7 @@ pub struct VoteTracker {
 
     total_blocks_acked: u64,
     total_txns_acked: u64,
+    total_txns_byz_committed: u64,
     log_timer: Interval,
 
     pending_byz_responses: HashMap<(u64 /* block_n */, SenderType), Vec<ProtoByzResponse>>,
@@ -59,6 +60,7 @@ impl VoteTracker {
             threshold,
             total_blocks_acked: 0,
             total_txns_acked: 0,
+            total_txns_byz_committed: 0,
             log_timer: time::interval(Duration::from_secs(5)),
             node_names,
             worker_names,
@@ -94,9 +96,10 @@ impl VoteTracker {
                 self.handle_vote(vote.unwrap()).await;
             },
             _ = self.log_timer.tick() => {
-                info!(
-                    "VoteTracker stats: total blocks acked = {}, total txns acked = {}",
-                    self.total_blocks_acked, self.total_txns_acked
+                info!("total_blocks_acked = {}, total_txns_acked = {}, total_txns_byz_committed = {}",
+                    self.total_blocks_acked,
+                    self.total_txns_acked,
+                    self.total_txns_byz_committed
                 );
             },
         }
@@ -186,7 +189,7 @@ impl VoteTracker {
         self.total_blocks_acked += 1;
         self.total_txns_acked += ack_chans.len() as u64;
 
-        info!(
+        trace!(
             "Vote threshold reached for block {}, acking {} clients",
             hex::encode(hash), ack_chans.len()
         );
@@ -202,6 +205,7 @@ impl VoteTracker {
             });
 
             let byz_responses = byz_responses.values().flatten().cloned().collect::<Vec<ProtoByzResponse>>();
+            self.total_txns_byz_committed += byz_responses.len() as u64;
 
 
             let reply = ProtoClientReply {

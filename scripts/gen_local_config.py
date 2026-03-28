@@ -261,7 +261,7 @@ def generate(args):
 
         cfg["net_config"]["name"] = client_name
         cfg["net_config"]["tls_root_ca_cert_path"] = ca_cert
-        cfg["net_config"]["nodes"] = {worker_name: worker_nodes_map[worker_name]}
+        cfg["net_config"]["nodes"] = dict(worker_nodes_map)
         cfg["rpc_config"]["signing_priv_key_path"] = rel(f"{client_name}_signing_privkey.pem")
 
         path = os.path.join(output_dir, f"{client_name}_config.json")
