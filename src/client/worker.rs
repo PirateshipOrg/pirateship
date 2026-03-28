@@ -15,6 +15,7 @@ pub struct ClientWorker<Gen: PerWorkerWorkloadGenerator> {
     generator: Gen,
     id: usize,
     stat_tx: Sender<ClientWorkerStat>,
+    target: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +69,7 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
         generator: Gen,
         id: usize,
         stat_tx: Sender<ClientWorkerStat>,
+        target: Option<String>,
     ) -> Self {
         Self {
             config,
@@ -75,6 +77,7 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
             generator,
             id,
             stat_tx,
+            target,
         }
     }
 
@@ -249,7 +252,11 @@ impl<Gen: PerWorkerWorkloadGenerator + Send + Sync + 'static> ClientWorker<Gen> 
         let mut node_list = self.config.net_config.nodes.keys().map(|e| e.clone()).collect::<Vec<_>>();
         node_list.sort();
 
-        let mut curr_leader_id = 0;
+        let mut curr_leader_id = if let Some(ref target) = self.target {
+            node_list.iter().position(|n| n == target).unwrap_or(0)
+        } else {
+            0
+        };
         let mut curr_round_robin_id = id % node_list.len();
 
         let my_name = self.config.net_config.name.clone();

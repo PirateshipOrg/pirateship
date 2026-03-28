@@ -25,6 +25,7 @@ from ssh_utils import *
 from deployment import Deployment
 from experiments import Experiment
 from autobahn_experiments import AutobahnExperiment
+from dag_experiments import PirateshipDagExperiment
 from results import *
 import pickle
 import re
@@ -136,6 +137,8 @@ def parse_config(path, workdir=None, existing_experiments=None):
             klass = AppExperiment
         elif experiment_type == "autobahn":
             klass = AutobahnExperiment
+        elif experiment_type == "dag":
+            klass = PirateshipDagExperiment
         project_home = toml_dict["project_home"]
 
         if "sweeping_parameters" in e:

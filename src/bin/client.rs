@@ -7,16 +7,16 @@ use tokio::{sync::Mutex, task::JoinSet};
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 
-fn process_args() -> ClientConfig {
+fn process_args() -> (ClientConfig, Option<String>) {
     macro_rules! usage_str {
         () => {
-            "\x1b[31;1mUsage: {} path/to/config.json\x1b[0m"
+            "\x1b[31;1mUsage: {} path/to/config.json [--target <node_name>]\x1b[0m"
         };
     }
 
     let args: Vec<_> = std::env::args().collect();
 
-    if args.len() != 2 {
+    if args.len() < 2 {
         panic!(usage_str!(), args[0]);
     }
 
@@ -27,13 +27,27 @@ fn process_args() -> ClientConfig {
 
     let cfg_contents = std::fs::read_to_string(cfg_path).expect("Invalid file path");
 
-    ClientConfig::deserialize(&cfg_contents)
+    let mut target = None;
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--target" {
+            if i + 1 >= args.len() {
+                panic!(usage_str!(), args[0]);
+            }
+            target = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            panic!(usage_str!(), args[0]);
+        }
+    }
+
+    (ClientConfig::deserialize(&cfg_contents), target)
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     log4rs::init_config(default_log4rs_config()).unwrap();
-    let config = process_args();
+    let (config, target) = process_args();
 
     let mut keys = KeyStore::empty();
     keys.priv_key = KeyStore::get_privkeys(&config.rpc_config.signing_priv_key_path);
@@ -52,25 +66,26 @@ async fn main() -> std::io::Result<()> {
         let keys = keys.clone();
         let _stat_tx = stat_tx.clone();
         let client = Client::new(&config.fill_missing(), &keys, config.full_duplex, id as u64).into();
+        let _target = target.clone();
         match config.workload_config.request_config {
             RequestConfig::Blanks => {
                 let generator = BlankWorkloadGenerator{};
-                let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
+                let worker = ClientWorker::new(config, client, generator, id, _stat_tx, _target);
                 ClientWorker::launch(worker, &mut client_handles).await;
             },
             RequestConfig::KVReadWriteUniform(kvread_write_uniform) => {
                 let generator = KVReadWriteUniformGenerator::new(&kvread_write_uniform.clone());
-                let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
+                let worker = ClientWorker::new(config, client, generator, id, _stat_tx, _target);
                 ClientWorker::launch(worker, &mut client_handles).await;
             },
             RequestConfig::KVReadWriteYCSB(kvread_write_ycsb) => {
                 let generator = KVReadWriteYCSBGenerator::new(&kvread_write_ycsb, id, config.workload_config.num_clients);
-                let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
+                let worker = ClientWorker::new(config, client, generator, id, _stat_tx, _target);
                 ClientWorker::launch(worker, &mut client_handles).await;
             },
             RequestConfig::MockSQL() => {
                 let generator = MockSQLGenerator::new();
-                let worker = ClientWorker::new(config, client, generator, id, _stat_tx);
+                let worker = ClientWorker::new(config, client, generator, id, _stat_tx, _target);
                 ClientWorker::launch(worker, &mut client_handles).await;
             },
         };
