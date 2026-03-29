@@ -66,7 +66,8 @@ duration = 60
 
 [experiments.sweeping_parameters]
 # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-num_clients = [100, 200, 400] 
+# num_clients = [100, 200, 400] 
+num_clients = [30, 40, 50, 60] 
 
 
 # [[experiments]]

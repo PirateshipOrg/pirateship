@@ -52,6 +52,7 @@ impl VoteTracker {
         let node_names = config.get().consensus_config.node_list.clone().into_iter().collect();
         let worker_names = config.get().consensus_config.learner_list.clone().into_iter().collect();
 
+        let log_interval = Duration::from_millis(config.get().app_config.logger_stats_report_ms as u64);
         Self {
             config,
             register_rx,
@@ -61,7 +62,7 @@ impl VoteTracker {
             total_blocks_acked: 0,
             total_txns_acked: 0,
             total_txns_byz_committed: 0,
-            log_timer: time::interval(Duration::from_secs(5)),
+            log_timer: time::interval(log_interval),
             node_names,
             worker_names,
             pending_byz_responses: HashMap::new(),

@@ -428,11 +428,18 @@ resource "azurerm_linux_virtual_machine" "clientpool_vm" {
   #   version   = "latest"
   # }
 
+  # source_image_reference {
+  #   publisher = "Canonical"
+  #   offer     = "0001-com-ubuntu-server-focal"
+  #   sku       = "20_04-lts-gen2"
+  #   version   = "20.04.202410020"
+  # }
+
   source_image_reference {
     publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-focal"
-    sku       = "20_04-lts-gen2"
-    version   = "20.04.202410020"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"
   }
   
 

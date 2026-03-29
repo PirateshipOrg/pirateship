@@ -7,6 +7,7 @@ import pickle
 from typing import Callable, Dict, List, OrderedDict, Tuple
 
 from experiments import Experiment
+from dag_experiments import PirateshipDagExperiment
 from collections import defaultdict
 import re
 from dateutil.parser import isoparse
@@ -42,6 +43,9 @@ node_rgx2 = re.compile(r"\[INFO\]\[.*\]\[(.*)\] Total unlogged txs: ([0-9]+)")
 
 # Sample log: [INFO][pft::client::logger][2025-02-25T23:33:23.145307984+00:00] Average Crash commit latency: 104390 us, Average Byz commit latency: 29271247 us
 client_rgx = re.compile(r"\[INFO\]\[.*\]\[(.*)\] Average Crash commit latency: ([0-9]+) us, Average Byz commit latency: ([0-9]+) us")
+
+# Sample log: [INFO][pft::worker::vote_tracker][2024-08-06T10:28:13.926997933+00:00] total_blocks_acked = 100, total_txns_acked = 5000, total_txns_byz_committed = 5000
+worker_rgx = re.compile(r"\[INFO\]\[.*\]\[(.*)\] total_blocks_acked = ([0-9]+), total_txns_acked = ([0-9]+), total_txns_byz_committed = ([0-9]+)")
 
 
 def process_tput(points, duration, ramp_up, ramp_down, tputs, tputs_unbatched, byz=False, read_points=[[]]) -> List:
@@ -225,6 +229,135 @@ class Result:
         except:
             pass
 
+    def parse_dag_worker_logs(self, log_dir, duration, ramp_up, ramp_down, tputs, tputs_unbatched, byz=False):
+        worker_log_files = sorted([
+            f for f in os.listdir(log_dir)
+            if re.match(r'node\d+_worker\.log', f)
+        ])
+        if not worker_log_files:
+            return
+
+        all_file_points = []
+        print(worker_log_files)
+        for fname in worker_log_files:
+            points = []
+            with open(os.path.join(log_dir, fname), "r") as f:
+                for line in f.readlines():
+                    captures = worker_rgx.findall(line)
+                    if len(captures) == 1:
+                        ts, blocks, txns_acked, txns_byz = captures[0]
+                        points.append((isoparse(ts), int(blocks), int(txns_acked), int(txns_byz)))
+
+                print(fname, points)
+            all_file_points.append(points)
+
+        first_times = [pts[0][0] for pts in all_file_points if pts]
+        if not first_times:
+            return
+        global_start = min(first_times)
+
+        start_time = global_start + datetime.timedelta(seconds=ramp_up)
+        end_time = global_start + datetime.timedelta(seconds=duration) - datetime.timedelta(seconds=ramp_down)
+
+        total_acked = 0
+        total_byz = 0
+        total_blocks = 0
+        all_filtered_times = []
+
+        for points in all_file_points:
+            filtered = [p for p in points if start_time <= p[0] <= end_time]
+            if len(filtered) < 2:
+                continue
+            total_acked += filtered[-1][2] - filtered[0][2]
+            total_byz += filtered[-1][3] - filtered[0][3]
+            total_blocks += filtered[-1][1] - filtered[0][1]
+            all_filtered_times.append(filtered[0][0])
+            all_filtered_times.append(filtered[-1][0])
+
+        if not all_filtered_times:
+            return
+
+        total_time = (max(all_filtered_times) - min(all_filtered_times)).total_seconds()
+        if total_time <= 0:
+            return
+
+        print(">>>", total_acked, total_byz, total_blocks, total_time)
+
+        if byz:
+            tputs.append(total_byz / total_time)
+        else:
+            tputs.append(total_acked / total_time)
+        tputs_unbatched.append(total_blocks / total_time)
+
+    def process_dag_experiment(self, experiment, ramp_up, ramp_down, byz=False, tput_scale=1000.0, latency_scale=1000.0) -> Stats | None:
+        tputs = []
+        tputs_unbatched = []
+        latencies = []
+        duration = experiment.duration
+        for repeat_num in range(experiment.repeats):
+            log_dir = os.path.join(experiment.local_workdir, "logs", str(repeat_num))
+            client_log_files = [f for f in os.listdir(log_dir) if f.startswith("client") and f.endswith(".log")]
+
+            self.parse_dag_worker_logs(log_dir, duration, ramp_up, ramp_down, tputs, tputs_unbatched, byz=byz)
+            self.parse_client_logs(log_dir, client_log_files, duration, ramp_up, ramp_down, latencies, byz=byz)
+
+        print(len(tputs), len(tputs_unbatched), len(latencies))
+        if len(latencies) == 0:
+            return None
+        latency_prob_dist = np.array(latencies)
+        latency_prob_dist.sort()
+        p = 1. * np.arange(len(latency_prob_dist)) / (len(latency_prob_dist) - 1)
+        try:
+            stdev_tput = np.std(tputs)
+        except:
+            stdev_tput = 0
+        try:
+            stdev_tput_unbatched = np.std(tputs_unbatched)
+        except:
+            stdev_tput_unbatched = 0
+        try:
+            stdev_latency = np.std(latencies)
+        except:
+            stdev_latency = 0
+
+        mean_latency = np.mean(latencies)
+        try:
+            median_latency = np.median(latencies)
+            p25_latency = np.percentile(latencies, 25),
+            p75_latency = np.percentile(latencies, 75),
+            p99_latency = np.percentile(latencies, 99),
+        except:
+            median_latency = mean_latency
+            p25_latency = mean_latency
+            p75_latency = mean_latency
+            p99_latency = mean_latency
+
+        ret = Stats(
+            num_nodes=experiment.num_nodes,
+            num_clients=experiment.num_clients,
+            mean_tput=np.mean(tputs),
+            stdev_tput=stdev_tput,
+            mean_tput_unbatched=np.mean(tputs_unbatched),
+            stdev_tput_unbatched=stdev_tput_unbatched,
+            latency_prob_dist=latency_prob_dist,
+            mean_latency=mean_latency,
+            median_latency=median_latency,
+            p25_latency=p25_latency,
+            p75_latency=p75_latency,
+            p99_latency=p99_latency,
+            max_latency=np.max(latencies),
+            min_latency=np.min(latencies),
+            stdev_latency=stdev_latency
+        )
+
+        for k, v in ret.__dict__.items():
+            if "tput" in k and isinstance(v, float):
+                ret.__dict__[k] /= tput_scale
+            if "latency" in k and isinstance(v, float):
+                ret.__dict__[k] /= latency_scale
+
+        return ret
+
     def process_experiment(self, experiment, ramp_up, ramp_down, byz, tput_scale=1000.0, latency_scale=1000.0) -> Stats | None:
         tputs = []
         tputs_unbatched = []
@@ -390,6 +523,8 @@ class Result:
 
                     if isinstance(experiment, AutobahnExperiment):
                         experiment_type = "autobahn"
+                    elif isinstance(experiment, PirateshipDagExperiment):
+                        experiment_type = "dag"
                     else:
                         experiment_type = "pirateship"
 
@@ -397,6 +532,8 @@ class Result:
                         stats = self.process_experiment(experiment, ramp_up, ramp_down, byz=False)
                     elif experiment_type == "autobahn":
                         stats = self.process_autobahn_experiment(experiment, ramp_up, ramp_down, byz=False)
+                    elif experiment_type == "dag":
+                        stats = self.process_dag_experiment(experiment, ramp_up, ramp_down, byz=False)
                     if stats is not None:
                         final_stats.append(stats)
                     else:
@@ -412,7 +549,21 @@ class Result:
                     if idx in skip_indices:
                         print("\x1b[31;1mSkipping experiment", experiment.name, "for byz commit\x1b[0m")
                         continue
-                    stats = self.process_experiment(experiment, ramp_up, ramp_down, byz=True)
+
+                    if isinstance(experiment, AutobahnExperiment):
+                        experiment_type = "autobahn"
+                    elif isinstance(experiment, PirateshipDagExperiment):
+                        experiment_type = "dag"
+                    else:
+                        experiment_type = "pirateship"
+
+                    if experiment_type == "pirateship":
+                        stats = self.process_experiment(experiment, ramp_up, ramp_down, byz=True)
+                    elif experiment_type == "autobahn":
+                        stats = self.process_autobahn_experiment(experiment, ramp_up, ramp_down, byz=True)
+                    elif experiment_type == "dag":
+                        stats = self.process_dag_experiment(experiment, ramp_up, ramp_down, byz=True)
+                    # stats = self.process_experiment(experiment, ramp_up, ramp_down, byz=True)
                     if stats is not None:
                         final_stats.append(stats)
                     else:
@@ -766,7 +917,7 @@ class Result:
                 # plt.yscale("log")
                 plt.ylim((0, 125))
                 plt.xlim((50, 550))
-                plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.0), ncol=legends_ncols, fontsize=20, align='center', markerscale=0.1)
+                plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.0), ncol=legends_ncols, fontsize=20, markerscale=0.1)
                 plt.xticks(fontsize=70)
                 plt.yticks(fontsize=70)
 

@@ -182,7 +182,7 @@ class PirateshipDagExperiment(Experiment):
             client = f"client{client_num + 1}"
             worker_name = f"node{(client_num % self.num_nodes) + 1}_worker"
             config["net_config"]["name"] = client
-            config["net_config"]["nodes"] = {worker_name: worker_nodes_map[worker_name]}
+            config["net_config"]["nodes"] = deepcopy(all_nodes_map)
 
             tls_cert_path, tls_key_path, tls_root_ca_cert_path, \
                 allowed_keylist_path, signing_priv_key_path = crypto_info[client]
@@ -254,6 +254,10 @@ PID="$PID $!"
                 for bin in bin_list:
                     if "node" in bin and not bin.endswith("_worker"):
                         _script += _launch(vm, bin)
+
+            _script += f"""
+sleep 10 # Wait for the servers to be ready
+"""
 
             # Pass 2: launch workers
             for vm, bin_list in self.binary_mapping.items():
