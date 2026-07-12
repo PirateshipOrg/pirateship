@@ -1,44 +1,81 @@
-# PirateShip
+# Pirateship SOSP 2026 Artifacts
 
-This is a prototype implementation of the PirateShip consensus protocol for VM-based TEEs (eg, AMD SEV-SNP and Intel TDX).
+This branch (`sosp-artifact`) acts as a snapshot to reproduce the graphs in our SOSP submission, while the main development continues in `main`.
 
-> WARNING: Code is still under development and is not audited. DO NOT use it in production.
+# Setup
 
-## Supported protocols
+Running the experiments requires access to Azure. Please contact the authors to have your email added to our development Azure account.
 
-We use Rust features to use the same codebase to implement multiple protocols for benchmarking.
-Protocols currently available are:
+Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/?view=azure-cli-latest). Then run:
+```bash
+az login # Login using the email provided with the authors.
+```
 
-- PirateShip
-- Raft (also called `lucky_raft`)
-- Signed Raft
-- PBFT (Linearized version)
-- Jolteon
-- Hotstuff
-- Engraft
-
-All protocols except PirateShip only have their steady-states implemented without leader election/view change.
-
-## Building
-
-PirateShip uses Rust. So `cargo build` should suffice.
-For convenience, we have provided a `Makefile` with multiple targets for different protocols and PirateShip with different features/apps.
-
-See `Makefile` for more details.
+Install [Terraform](https://developer.hashicorp.com/terraform/install)
 
 
-## Deployment
+Clone the repo locally with the submodules:
 
-See `scripts` for instructions on how to deploy and run PirateShip experiments.
-The `deployment` directory is tailor-made for deploying VMs in Azure using Terraform.
-However, porting to another cloud is possible: subclass the `Deployment` class in `scripts` to use your own deployment scripts.
+```bash
+git clone --recurse-submodules git@github.com:PirateshipOrg/pirateship.git
+```
 
-## Current Performance Results
+Setup your Python environment:
 
-**Setup**: 7 node LAN setup with 16 core SEV nodes with 64 GB RAM and 10 Gbps NIC capacity.
+```bash
+virtualenv .venv
+source .venv/bin/activate
+pip install -r scripts/requirements.txt
+```
 
-![PirateShip Performance](perf.png)
 
-## Correctness
+## Running Experiments
 
-PirateShip has been modelled in TLA+: https://github.com/PirateshipOrg/pirateship-tla
+Our experiments are end-to-end encoded in TOML files similar to the ones in `experiments/`.
+Below we summarize the common steps to run each experiment.
+Refer to additional details about running our experiment infrastructure [here](scripts/README.md).
+
+```bash
+# To start an experiment, we first deploy the necessary VMs.
+python3 scripts deploy -c path/to/experiment/toml
+
+# This deploys the VMs and sets up a directory to store log files and SSH keys.
+# The directory typically is named `deployment_artifacts/<timestamp>`
+# We will call this directory <workdir>.
+
+# Wait for up to 5 minutes after running deploy for all VMs to be deployed properly.
+
+# Next, we build the binaries and setup the experiments in all the VMs.
+python3 scripts deploy-experiments -c path/to/experiment/toml -d <workdir>
+
+# We run the experiments next.
+python3 scripts run-experiments -c path/to/experiment/toml -d <workdir> 
+
+
+# This will download all the logs from the experiments after the experiments end.
+# We plot the graphs next.
+python3 scripts results -c path/to/experiment/toml -d <workdir>
+
+# The plots will be available in <workdir>/results/
+```
+
+
+
+# Artifact Claims
+
+We arrange our main results into 4 claims and provide scripts and configs to run the experiments for each in `claims/`.
+For a more comprehensive set of experiment configs, see the `experiments/` directory.
+
+
+## Claim 1:
+
+
+## Claim 2:
+
+
+## Claim 3:
+
+
+## Claim 4:
+
+> Note: The multi-platform experiment, as described in the paper, requires very specific Azure quotas in the regions described in the paper, and incurs very high network egress costs. Similarly, running the Code Transparency Service requires access to Azure Confidential Containers. We have not been able to make arrangements for these requirements with our current Azure account.
