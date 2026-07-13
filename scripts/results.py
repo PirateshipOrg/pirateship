@@ -978,7 +978,7 @@ class Result:
 
         plt.grid()
 
-        plt.xlim(25, 45)
+        # plt.xlim(25, 45)
         plt.xticks(fontsize=90)
         plt.yticks(fontsize=65)
 

@@ -35,6 +35,8 @@ Our experiments are end-to-end encoded in TOML files similar to the ones in `exp
 Below we summarize the common steps to run each experiment.
 Refer to additional details about running our experiment infrastructure [here](scripts/README.md).
 
+> WARNING: The following steps take a lot of time! Please be patient.
+
 ```bash
 # To start an experiment, we first deploy the necessary VMs.
 python3 scripts deploy -c path/to/experiment/toml

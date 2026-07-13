@@ -1,0 +1,106 @@
+workdir = "deployment_artifacts"
+project_home = "https://github.com/grapheo12/pirateship"
+
+[deployment_config]
+mode = "lan"
+ssh_key = "cluster_key.pem"
+ssh_user = "pftadmin"
+node_port_base = 3000
+
+
+[node_config]
+
+[node_config.net_config]
+client_max_retry = 10
+
+[node_config.rpc_config]
+recv_buffer_size = 32768
+channel_depth = 1000
+
+[node_config.consensus_config]
+liveness_u = 2
+max_backlog_batch_size = 1000
+signature_max_delay_blocks = 50
+signature_max_delay_ms = 102 # roughly batch_max_delay_ms * signature_max_delay_blocks
+num_crypto_workers = 5
+view_timeout_ms = 4000
+batch_max_delay_ms = 2
+commit_index_gap_soft = 250
+commit_index_gap_hard = 500
+
+[node_config.consensus_config.log_storage_config.RocksDB]
+write_buffer_size = 2147483648
+max_write_buffer_number = 1
+max_write_buffers_to_merge = 1
+
+[node_config.app_config]
+logger_stats_report_ms = 100
+checkpoint_interval_ms = 1000
+
+[node_config.evil_config]
+simulate_byzantine_behavior = true
+byzantine_start_block = 10000
+
+
+[client_config]
+full_duplex = true
+client_sub_id = 0       # This is filled up later by the caller code.
+
+[client_config.net_config]
+client_max_retry = 10
+
+[client_config.workload_config]
+num_requests = 100_000_000
+request_config = "Blanks"
+max_concurrent_requests = 16
+
+[[experiments]]
+name = "pirateship"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make pirateship_logger_evil"
+duration = 60
+
+[experiments.sweeping_parameters]
+num_clients = [400]
+
+
+[[results]]
+name = "timeseries"
+plotter = "crash_byz_tput_timeseries"
+ramp_up = 17
+ramp_down = 10
+output = "evil_experiment.pdf"
+force_parse = true
+target_node = "node3"
+
+[results.font]
+size = 55
+
+[[results.events]]
+name = "first_equivocate"
+pattern = "\\[INFO\\]\\[.*\\]\\[(.*)\\] Equivocation starting on .*"
+target = "node1"
+description = "Equivocation\nstart"
+
+[[results.events]]
+name = "first_revolt"
+pattern = "\\[INFO\\]\\[.*\\]\\[(.*)\\] Got view change from .* with view .*"
+target = "node1"
+occurrence_num = 8 # 7 from the first view change; 1 from the second view change
+description = "First follower\ntimeout"
+
+[[results.events]]
+name = "moved_view"
+pattern = "\\[INFO\\]\\[.*\\]\\[(.*)\\] Got view change from Auth\\(\"node1\", 0\\) with view .*"
+target = "node1"
+occurrence_num = 2
+description = "Leader\nstep down"
+
+[[results.events]]
+name = "view_stabilized"
+pattern = "\\[INFO\\]\\[.*\\]\\[(.*)\\] View .* stabilized"
+occurrence_num = 2
+target = "node1"
+description = "New view\nstabilized"
