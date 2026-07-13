@@ -11,7 +11,7 @@ Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/?view=azure-cli-
 az login # Login using the email provided with the authors.
 ```
 
-Install [Terraform](https://developer.hashicorp.com/terraform/install)
+Install [Terraform](https://developer.hashicorp.com/terraform/install). Terraform handles all VM deployment and teardown necessary for the experiments.
 
 
 Clone the repo locally with the submodules:
@@ -57,25 +57,54 @@ python3 scripts run-experiments -c path/to/experiment/toml -d <workdir>
 python3 scripts results -c path/to/experiment/toml -d <workdir>
 
 # The plots will be available in <workdir>/results/
+
+# IMPORTANT: Don't forget to teardown the VMs after the experiment is done.
+python3 scripts teardown -c path/to/experiment/toml -d <workdir>
 ```
 
 
 
 # Artifact Claims
 
-We arrange our main results into 4 claims and provide scripts and configs to run the experiments for each in `claims/`.
+We arrange our main results into 4 claims and provide experiment TOML file for each in `claims/`.
+For each TOML file, repeat the "Running Experiments" section above to generate the results.
 For a more comprehensive set of experiment configs, see the `experiments/` directory.
 
 
-## Claim 1:
+## Claim 1: Pirateship imposes minimal overhead over existing CFT and BFT protocols.
+
+Please run an experiment with `claims/01-overhead.toml` for this.
+This runs Pirateship against signed_raft, engraft, autobahn and hotstuff with loads near saturation,
+and creates a subset of Fig 5a.
 
 
-## Claim 2:
+## Claim 2: Pirateship can automatically detect and recover from equivocation.
+
+Please run an experiment with `claims/02-equivocation.toml` for this.
+This replicates Fig 6b, which plots the throughput of a selected node over time.
+
+If you can't see the negative spike in throughput, change `results.target_node` to any other node.
+The experiment makes the leader in view 1 (node1) to equivocate and create two branches.
+Half the nodes receive branch 1 and the other half branch 2.
+The new leader in view 2 (node2) has equal probability of selecting one of these.
+Hence only half of the nodes need to rollback and therefore have a negative throughput spike.
 
 
-## Claim 3:
+## Claim 3: Pirateship's fast path creates latency benefits. Commit and Audit have the same throughput.
+
+Please run an experiment with `claims/03-fastpath.toml` for this.
+This runs Pirateship with and without fast path audits and compares the latency of commit, fast path audit and slow path audit.
+It will replicate Fig 6a.
 
 
-## Claim 4:
+## Claim 4: Applications can effectively use the asynchronous auditing capability.
+
+Please run an experiment with `claims/04-application.toml` for this.
+This runs the banking application that forces transactions above a given money threshold to wait for audits,
+and then plots the average response times vs the threshold.
+It replicates Fig 7b.
+
+
+
 
 > Note: The multi-platform experiment, as described in the paper, requires very specific Azure quotas in the regions described in the paper, and incurs very high network egress costs. Similarly, running the Code Transparency Service requires access to Azure Confidential Containers. We have not been able to make arrangements for these requirements with our current Azure account.
