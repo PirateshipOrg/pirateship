@@ -19,7 +19,7 @@ class AppExperiment(Experiment):
         for bin in TARGET_BINARIES:
             copy_file_from_remote_public_ip(f"{remote_repo}/target/release/{bin}", os.path.join(self.local_workdir, "build", bin), self.dev_ssh_user, self.dev_ssh_key, self.dev_vm)
 
-        remote_script_dir = f"{remote_repo}/scripts_v2/loadtest"
+        remote_script_dir = f"{remote_repo}/scripts/loadtest"
         TARGET_SCRIPTS = ["load.py", "locustfile.py", "docker-compose.yml", "toggle.py", "shamir.py", "zipfian.py"]
 
         # Copy the scripts to build directory
@@ -31,7 +31,7 @@ class AppExperiment(Experiment):
         TARGET_BINARIES = [self.workload]
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
 
-        remote_script_dir = f"{remote_repo}/scripts_v2/loadtest"
+        remote_script_dir = f"{remote_repo}/scripts/loadtest"
         TARGET_SCRIPTS = ["load.py", "locustfile.py", "docker-compose.yml", "toggle.py", "shamir.py", "zipfian.py"]
 
 
@@ -46,7 +46,61 @@ class AppExperiment(Experiment):
         return all([bin in res2[0] for bin in TARGET_BINARIES]) and all([script in res1[0] for script in TARGET_SCRIPTS])
     
 
+    @property
+    def client_venv(self):
+        # Dedicated, isolated virtualenv for the client-side Python stack (locust,
+        # load.py, toggle.py, ...). Kept out of the per-experiment remote_workdir so
+        # it persists and is reused across deploys/experiments.
+        return f"/home/{self.dev_ssh_user}/pirateship_client_venv"
+
+    def install_client_dependencies(self, deployment: Deployment):
+        # Install the client-side dependencies on every client VM.
+        # Must run independently of config generation: configs are cached across
+        # re-runs (see the early return in generate_configs), but the client VMs
+        # still need these packages, so this is called unconditionally on deploy.
+        if self.client_region == -1:
+            client_vms = deployment.get_all_client_vms()
+        else:
+            client_vms = deployment.get_all_client_vms_in_region(self.client_region)
+
+        venv = self.client_venv
+
+        # Pinned freeze of the known-good client environment. A clean venv with an
+        # unpinned `pip install` pulls today's latest, which regresses (e.g.
+        # "RuntimeError: greenlet is being finalized" from a newer gevent/greenlet).
+        # Install against this as a constraints file so locust/gevent/greenlet/
+        # urllib3/zope/etc. get the exact versions that produced the paper results,
+        # while locust-plugins still resolves to a compatible version.
+        local_reqs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")
+        remote_reqs = f"/home/{self.dev_ssh_user}/pirateship_client_requirements.txt"
+
+        for vm in client_vms:
+            copy_remote_public_ip(local_reqs, remote_reqs, self.dev_ssh_user, self.dev_ssh_key, vm)
+            run_remote_public_ip([
+                f"sudo apt-get update",
+                f"sudo apt-get install -y python3-pip python3-venv",
+                # Install the client-side Python stack into a dedicated, isolated
+                # virtualenv. A clean venv (no --system-site-packages) also bypasses
+                # the stale apt python3-* packages in system dist-packages that
+                # otherwise shadow/ABI-mismatch this stack. The execution scripts run
+                # from this venv too (see generate_arbiter_script). Re-running
+                # `python3 -m venv` on an existing venv is a no-op, so subsequent
+                # deploys are cheap.
+                f"python3 -m venv {venv}",
+                f"{venv}/bin/pip install --upgrade pip",
+                # -c pins every package listed in the freeze to its known-good
+                # version; locust-plugins (not in the freeze) resolves against them.
+                f"{venv}/bin/pip install -c {remote_reqs} locust 'locust-plugins[dashboards]' aiohttp requests numpy",
+                # Verify against the venv launcher; failures here are otherwise
+                # swallowed by run_remote_public_ip.
+                f"{venv}/bin/locust --version || echo 'ERROR: locust still cannot import its dependencies'",
+            ], self.dev_ssh_user, self.dev_ssh_key, vm, hide=False)
+
     def generate_configs(self, deployment: Deployment, config_dir, log_dir):
+        # Client dependencies must be (re)installed on every deploy, before the
+        # config-generation early return below can skip out.
+        self.install_client_dependencies(deployment)
+
         # If config_dir is not empty, assume the configs have already been generated
         if len(os.listdir(config_dir)) > 0:
             print("Skipping config generation for experiment", self.name)
@@ -165,18 +219,6 @@ class AppExperiment(Experiment):
         self.binary_mapping[self.locust_master].append("loader")
         self.binary_mapping[self.locust_master].append("master")
 
-        # Install pip and the dependencies in client vms.
-        for vm in self.client_vms:
-            run_remote_public_ip([
-                f"sudo apt-get update",
-                f"sudo apt-get install -y python3-pip",
-                f"pip3 install locust",
-                f"pip3 install locust-plugins[dashboards]",
-                f"pip3 install aiohttp",
-                f"pip3 install requests",
-                f"pip3 install numpy",
-            ], self.dev_ssh_user, self.dev_ssh_key, vm, hide=False)
-
 
 
         
@@ -226,7 +268,7 @@ sleep 1
             load_phase_seconds = 5 + self.num_clients // 3000 # 5s min
             _script += f"""
 # Run the load phase.
-$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} 'python3 {self.remote_workdir}/build/load.py {host} {self.num_clients} {self.total_client_vms} {self.workers_per_client} {self.workload} > {self.remote_workdir}/logs/{repeat_num}/loader.log 2> {self.remote_workdir}/logs/{repeat_num}/loader.err' &
+$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} '{self.client_venv}/bin/python {self.remote_workdir}/build/load.py {host} {self.num_clients} {self.total_client_vms} {self.workers_per_client} {self.workload} > {self.remote_workdir}/logs/{repeat_num}/loader.log 2> {self.remote_workdir}/logs/{repeat_num}/loader.err' &
 PID="$PID $!"
 sleep {load_phase_seconds}
 """
@@ -244,7 +286,7 @@ sleep {load_phase_seconds}
 # Run phase start
 
 # Run the locust master
-$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} '/home/pftadmin/.local/bin/locust -f {self.remote_workdir}/build/locustfile.py --timescale --headless --master --users {self.num_clients} --spawn-rate {int(self.total_worker_processes * 100)} --host {host} --run-time {self.duration}s --config-users {config_users_str} --pguser postgres --pgpassword password > {self.remote_workdir}/logs/{repeat_num}/locust-master.log 2> {self.remote_workdir}/logs/{repeat_num}/locust-master.err' &
+$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} '{self.client_venv}/bin/locust -f {self.remote_workdir}/build/locustfile.py --timescale --headless --master --users {self.num_clients} --spawn-rate {int(self.total_worker_processes * 100)} --host {host} --run-time {self.duration}s --config-users {config_users_str} --pguser postgres --pgpassword password > {self.remote_workdir}/logs/{repeat_num}/locust-master.log 2> {self.remote_workdir}/logs/{repeat_num}/locust-master.err' &
 PID="$PID $!"
 sleep 1
 
@@ -262,7 +304,7 @@ sleep 1
                         continue
 
                     _script += f"""
-$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} '/home/pftadmin/.local/bin/locust -f {self.remote_workdir}/build/locustfile.py --timescale --headless --worker --master-host {self.locust_master.private_ip} --processes 1 --run-time {self.duration}s --config-users {config_users_str} --pguser postgres --pgpassword password --pghost {self.locust_master.private_ip} --pgport 5432 > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err' &
+$SSH_CMD {self.dev_ssh_user}@{vm.public_ip} '{self.client_venv}/bin/locust -f {self.remote_workdir}/build/locustfile.py --timescale --headless --worker --master-host {self.locust_master.private_ip} --processes 1 --run-time {self.duration}s --config-users {config_users_str} --pguser postgres --pgpassword password --pghost {self.locust_master.private_ip} --pgport 5432 > {self.remote_workdir}/logs/{repeat_num}/{bin}.log 2> {self.remote_workdir}/logs/{repeat_num}/{bin}.err' &
 PID="$PID $!"
 """
             
@@ -276,7 +318,7 @@ PID="$PID $!"
 
             _script += f"""
 # Run the toggle program
-$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} 'python3 {self.remote_workdir}/build/toggle.py {host} {toggle_ramp_up} {toggle_duration} > {self.remote_workdir}/logs/{repeat_num}/toggle.log 2> {self.remote_workdir}/logs/{repeat_num}/toggle.err' &
+$SSH_CMD {self.dev_ssh_user}@{self.locust_master.public_ip} '{self.client_venv}/bin/python {self.remote_workdir}/build/toggle.py {host} {toggle_ramp_up} {toggle_duration} > {self.remote_workdir}/logs/{repeat_num}/toggle.log 2> {self.remote_workdir}/logs/{repeat_num}/toggle.err' &
 PID="$PID $!"
 """
             

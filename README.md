@@ -109,4 +109,4 @@ It replicates Fig 7b.
 
 
 
-> Note: The multi-platform experiment, as described in the paper, requires very specific Azure quotas in the regions described in the paper, and incurs very high network egress costs. Similarly, running the Code Transparency Service requires access to Azure Confidential Containers. We have not been able to make arrangements for these requirements with our current Azure account.
+> Note: The multi-platform experiment, as described in the paper, requires very specific Azure quotas in the regions described in the paper, and incurs very high network egress costs. Similarly, running the Code Transparency Service requires access to Azure Confidential Containers. We have not been able to re-acquire the quotas for these requirements with our current Azure account.

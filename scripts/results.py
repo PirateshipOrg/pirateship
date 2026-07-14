@@ -1,6 +1,7 @@
 
 import collections
 from copy import deepcopy
+import json
 from dataclasses import dataclass
 import os
 import pickle
@@ -869,6 +870,262 @@ class Result:
                     f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
                     f.write(f"Stdev Tput: {stat.stdev_tput} ktx/s, Stdev Latency: {stat.stdev_latency} ms\n")
                     f.write("==================================\n")
+
+
+    def bank_parse(self, ramp_up, ramp_down, legends) -> Dict[str, List[Stats]]:
+        '''
+        Locust-based counterpart to tput_latency_sweep_parse: each sub-experiment
+        in a group becomes a Stats data point (ordered by seq num) parsed from the
+        locust master's stats log (locust-master.err). Used by bank_plotter for
+        smallbank workloads.
+        '''
+        plot_dict = {}
+
+        # Which indices do I skip?
+        skip_indices = self.kwargs.get('skip_indices', [])
+
+        # Find parsing log files for each group
+        for group_name, experiments in self.experiment_groups.items():
+            print("========", group_name, "========")
+            experiments.sort(key=lambda x: x.seq_num)
+            legend = legends.get(group_name, None)
+            if legend is None:
+                print("\x1b[31;1mNo legend found for", group_name, ". Skipping...\x1b[0m")
+                continue
+
+            final_stats = []
+
+            for idx, experiment in enumerate(experiments):
+                if idx in skip_indices:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "\x1b[0m")
+                    continue
+                stats = self.process_locust_experiment(experiment, ramp_up, ramp_down)
+                if stats is not None:
+                    final_stats.append(stats)
+                else:
+                    print("\x1b[31;1mSkipping experiment", experiment.name, "(no locust data)\x1b[0m")
+
+                plot_dict[legend] = final_stats
+
+        pprint(plot_dict)
+        return plot_dict
+
+
+    # Locust logs its stats tables to stderr (locust-master.err), not stdout.
+    # Periodic "Aggregated" rows look like:
+    #   Aggregated  <#reqs>  <#fails>(<pct>%) | <Avg> <Min> <Max> <Med> | <req/s> <fail/s>
+    locust_aggregated_rgx = re.compile(
+        r"Aggregated\s+(\d+)\s+\d+\([\d.]+%\)\s*\|\s*"
+        r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\|\s*([\d.]+)\s+([\d.]+)"
+    )
+
+    def parse_locust_master_log(self, log_dir):
+        '''
+        Parse the aggregated median response time (ms) and throughput (req/s) from
+        the locust master's stderr log (locust-master.err). Uses the final
+        aggregated summary, i.e. the whole-run statistics. Returns
+        (median_latency_ms, mean_latency_ms, throughput_rps) or None if no stats
+        were found.
+        '''
+        fname = os.path.join(log_dir, "locust-master.err")
+        try:
+            with open(fname, "r") as f:
+                text = f.read()
+        except Exception as e:
+            print(f"\x1b[31;1mError reading {fname}. Skipping...\x1b[0m")
+            print(f"\x1b[31;1mError details: {e}\x1b[0m")
+            return None
+
+        rows = self.locust_aggregated_rgx.findall(text)
+        if len(rows) == 0:
+            print(f"\x1b[31;1mNo aggregated locust stats found in {fname}. Skipping...\x1b[0m")
+            return None
+
+        # Final aggregated summary (cumulative over the whole run).
+        _num_reqs, avg, _min, _max, med, rps, _failps = rows[-1]
+        median_latency = float(med)
+        mean_latency = float(avg)
+        throughput = float(rps)
+
+        # Prefer locust's dedicated median from the "Response time percentiles
+        # (approximated)" table when present (the Aggregated row's first value is
+        # the 50th percentile).
+        if "Response time percentiles" in text:
+            tail = text.rsplit("Response time percentiles", 1)[-1]
+            m = re.search(r"Aggregated\s+(\d+)", tail)
+            if m is not None:
+                median_latency = float(m.group(1))
+
+        return median_latency, mean_latency, throughput
+
+
+    def process_locust_experiment(self, experiment, ramp_up, ramp_down) -> Stats | None:
+        medians = []
+        means = []
+        tputs = []
+        for repeat_num in range(experiment.repeats):
+            log_dir = os.path.join(experiment.local_workdir, "logs", str(repeat_num))
+            parsed = self.parse_locust_master_log(log_dir)
+            if parsed is None:
+                continue
+            median_latency, mean_latency, throughput = parsed
+            medians.append(median_latency)
+            means.append(mean_latency)
+            tputs.append(throughput)
+
+        print(len(medians), "repeat(s) parsed")
+        if len(medians) == 0:
+            return None
+
+        # Aggregate across repeats.
+        median_latency = float(np.mean(medians))
+        mean_latency = float(np.mean(means))
+        mean_tput = float(np.mean(tputs))
+        stdev_latency = float(np.std(medians)) if len(medians) > 1 else 0.0
+        stdev_tput = float(np.std(tputs)) if len(tputs) > 1 else 0.0
+
+        return Stats(
+            num_nodes=experiment.num_nodes,
+            num_clients=experiment.num_clients,
+            mean_tput=mean_tput,
+            stdev_tput=stdev_tput,
+            mean_tput_unbatched=0,
+            stdev_tput_unbatched=0,
+            latency_prob_dist=np.array(medians),
+            mean_latency=mean_latency,
+            median_latency=median_latency,
+            p25_latency=median_latency,
+            p75_latency=median_latency,
+            p99_latency=median_latency,
+            max_latency=median_latency,
+            min_latency=median_latency,
+            stdev_latency=stdev_latency,
+        )
+
+
+    def bank_plotter(self):
+        '''
+        Plots average latency (response time) against the swept payment threshold
+        for smallbank workloads.
+
+        Reuses the parsing logic of tput_latency_sweep: each sub-experiment in a
+        group is a separate data point, ordered by experiment seq num. The x-axis
+        value for each point is that sub-experiment's payment_threshold and the
+        y-axis value is its mean latency. Each group is a separate line.
+        '''
+
+        # Parse args
+        ramp_up = self.kwargs.get('ramp_up', 0)
+        ramp_down = self.kwargs.get('ramp_down', 0)
+        legends = self.kwargs.get('legends', {})
+        force_parse = self.kwargs.get('force_parse', False)
+
+        # Try retreive plot dict from cache
+        try:
+            if force_parse:
+                raise Exception("Force parse")
+
+            with open(os.path.join(self.workdir, "plot_dict.pkl"), "rb") as f:
+                plot_dict = pickle.load(f)
+        except:
+            # smallbank app experiments report stats via the locust master
+            # (locust-master.err), not the PirateShip client-log format, so parse
+            # the locust master log instead.
+            plot_dict = self.bank_parse(ramp_up, ramp_down, legends)
+
+        # Save plot dict
+        with open(os.path.join(self.workdir, "plot_dict.pkl"), "wb") as f:
+            pickle.dump(plot_dict, f)
+
+        # Payment threshold for each point, keyed by legend and ordered by seq num
+        # to line up with the Stats lists produced by the parser.
+        thresholds = {}
+        for group_name, experiments in self.experiment_groups.items():
+            legend = legends.get(group_name, None)
+            if legend is None:
+                continue
+            experiments = sorted(experiments, key=lambda x: x.seq_num)
+            thresholds[legend] = [
+                float(exp.base_client_config.get("payment_threshold", 0))
+                for exp in experiments
+            ]
+
+        output = self.kwargs.get('output', None)
+        self.bank_plot(plot_dict, thresholds, output)
+
+        # Print a summary of the results
+        with open(os.path.join(self.workdir, "summary.txt"), "w") as f:
+            for legend, stats in plot_dict.items():
+                f.write(f"{legend}\n")
+                for stat in stats:
+                    f.write(f"=============Num Nodes: {stat.num_nodes}, Num Clients: {stat.num_clients}================\n")
+                    f.write(f"Mean Tput: {stat.mean_tput} ktx/s, Mean Latency: {stat.mean_latency} ms\n")
+                    f.write(f"Median Latency: {stat.median_latency} ms, 99th Percentile Latency: {stat.p99_latency} ms\n")
+                    f.write(f"Max Latency: {stat.max_latency} ms, Min Latency: {stat.min_latency} ms\n")
+                    f.write(f"Stdev Tput: {stat.stdev_tput} ktx/s, Stdev Latency: {stat.stdev_latency} ms\n")
+                    f.write("==================================\n")
+
+
+    def bank_plot(self, plot_dict: Dict[str, List[Stats]], thresholds: Dict[str, List[float]], output: str | None):
+        font = self.kwargs.get('font', {
+            'size'   : 65
+        })
+        matplotlib.rc('font', **font)
+        matplotlib.rc("axes.formatter", limits=(-99, 99))
+
+        num_lines = len(plot_dict)
+        colors = self.kwargs.get('colors', ['b', 'g', 'r', 'c', 'm', 'y', 'k', "orange", "brown", "purple"])
+        markers = self.kwargs.get('markers', ['o', 's', 'D', '^', 'v', 'p', 'P', '*', 'X', 'H', 'x'])
+        while len(colors) < num_lines:
+            colors += colors
+        while len(markers) < num_lines:
+            markers += markers
+
+        legends_ncols = self.kwargs.get('legends_ncols', len(plot_dict))
+        if legends_ncols > 4:
+            legends_ncols = 4
+
+        # Payment thresholds span orders of magnitude, so use a log x-axis by default.
+        logscale_x = self.kwargs.get('logscale_x', True)
+
+        fig, ax = plt.subplots()
+        ax.grid()
+
+        all_x = set()
+        plot_dict_items = list(sorted(plot_dict.items()))
+        for i, (legend, stat_list) in enumerate(plot_dict_items):
+            # y-axis is the median response time parsed from locust-master.err.
+            latencies = [stat.median_latency for stat in stat_list]
+            payment_thresholds = thresholds.get(legend, list(range(1, len(stat_list) + 1)))
+            all_x.update(payment_thresholds)
+            ax.plot(payment_thresholds, latencies, label=legend, color=colors[i], marker=markers[i], mew=6, ms=12, linewidth=6)
+
+        # usetex is enabled globally, so the literal '$' must be escaped as '\$'.
+        plt.xlabel(r"Payment Threshold (\$)", fontsize=70)
+        plt.ylabel("Response Time (ms)", fontsize=70)
+
+        if logscale_x:
+            plt.xscale("log")
+
+        if len(all_x) > 0:
+            xticks = sorted(all_x)
+            plt.xticks(xticks, [f"{int(x)}" for x in xticks], fontsize=70)
+        else:
+            plt.xticks(fontsize=70)
+        plt.yticks(fontsize=70)
+
+        plt.legend(loc='upper center', bbox_to_anchor=(0.5, 1.0), ncol=legends_ncols, fontsize=20, markerscale=0.1)
+
+        plt.gcf().set_size_inches(
+            self.kwargs.get("output_width", 30),
+            self.kwargs.get("output_height", 12)
+        )
+
+        if output is not None:
+            output = os.path.join(self.workdir, output)
+            plt.savefig(output, bbox_inches="tight")
+        else:
+            plt.show()
 
 
     def stacked_bar_graph_parse(self, ramp_up, ramp_down, legends) -> OrderedDict[str, List[Stats]]:
