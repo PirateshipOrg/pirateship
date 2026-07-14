@@ -64,59 +64,57 @@ build_command = "make -C autobahn"
 duration = 60
 
 [experiments.sweeping_parameters]
-# num_clients = [100_000, 120_000, 150_000, 200_000, 250_000, 300_000, 310_000, 320_000]
-num_clients = [100_000]
-
-# [[experiments]]
-# name = "pirateship"
-# repeats = 1
-# num_nodes = 7
-# node_distribution = "uniform"
-# build_command = "make"
-# duration = 60
-
-# [experiments.sweeping_parameters]
-# # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-# num_clients = [10]
+num_clients = [250_000, 300_000, 310_000, 320_000]
 
 
+[[experiments]]
+name = "pirateship"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make"
+duration = 60
 
-# [[experiments]]
-# name = "hotstuff"
-# repeats = 1
-# num_nodes = 7
-# node_distribution = "uniform"
-# build_command = "make hotstuff_logger"
-# duration = 60
-
-# [experiments.sweeping_parameters]
-# # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-# num_clients = [10]
+[experiments.sweeping_parameters]
+num_clients = [50, 100, 200, 400]
 
 
-# [[experiments]]
-# name = "engraft"
-# repeats = 1
-# num_nodes = 5
-# node_distribution = "uniform"
-# build_command = "make engraft_logger"
-# duration = 60
 
-# [experiments.sweeping_parameters]
-# # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-# num_clients = [10]
+[[experiments]]
+name = "hotstuff"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make hotstuff_logger"
+duration = 60
 
-# [[experiments]]
-# name = "signed_raft_n7"
-# repeats = 1
-# num_nodes = 7
-# node_distribution = "uniform"
-# build_command = "make signed_raft_logger"
-# duration = 60
+[experiments.sweeping_parameters]
+num_clients = [10, 20, 30, 50, 100]
 
-# [experiments.sweeping_parameters]
-# # num_clients = [10, 20, 30, 50, 100, 200, 400, 500, 600]
-# num_clients = [10]
+
+
+[[experiments]]
+name = "engraft"
+repeats = 1
+num_nodes = 5
+node_distribution = "uniform"
+build_command = "make engraft_logger"
+duration = 60
+
+[experiments.sweeping_parameters]
+num_clients = [20, 30, 50, 100]
+
+
+[[experiments]]
+name = "signed_raft_n7"
+repeats = 1
+num_nodes = 7
+node_distribution = "uniform"
+build_command = "make signed_raft_logger"
+duration = 60
+
+[experiments.sweeping_parameters]
+num_clients = [50, 100, 200, 400]
 
 
 [[results]]
