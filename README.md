@@ -20,6 +20,7 @@ Clone the repo locally with the submodules:
 git clone --recurse-submodules git@github.com:PirateshipOrg/pirateship.git
 ```
 
+Besides these, you will need Python and rsync to run the scripts.
 Setup your Python environment:
 
 ```bash
