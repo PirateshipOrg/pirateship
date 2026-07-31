@@ -2,6 +2,7 @@ from copy import deepcopy
 import json
 from experiments import Experiment, copy_file_from_remote_public_ip
 import os
+from os.path import abspath
 import subprocess
 from typing import List
 
@@ -551,9 +552,9 @@ class CommandMaker:
         return f'./node generate_keys --filename {filename}'
     
     @staticmethod
-    def generate_key_from_target(filename):
+    def generate_key_from_target(filename, bin_path="./autobahn/target/release/node"):
         assert isinstance(filename, str)
-        return f'./autobahn/target/release/node generate_keys --filename {filename}'
+        return f'{bin_path} generate_keys --filename {filename}'
 
     @staticmethod
     def run_primary(keys, committee, store, parameters, debug=False, binary_name="./node"):
@@ -624,7 +625,8 @@ def gen_config(nodes: int, base_port: int, workers: int, node_parameters: NodePa
     keys = []
     key_files = [PathMaker.key_file(i, path_prefix=path_prefix) for i in range(nodes)]
     for filename in key_files:
-        cmd = CommandMaker.generate_key_from_target(filename).split()
+        _path = abspath(f"{path_prefix}../build/node")
+        cmd = CommandMaker.generate_key_from_target(filename, _path).split()
         subprocess.run(cmd, check=True)
         keys += [Key.from_file(filename)]
 

@@ -414,7 +414,6 @@ sleep 60
         self.dev_vm = deployment.dev_vm
         self.dev_ssh_user = deployment.ssh_user
         self.dev_ssh_key = deployment.ssh_key
-        self.generate_configs(deployment, config_dir, log_dir_base)
         self.local_workdir = workdir
 
         # Hard dependency on Linux style paths
@@ -428,7 +427,9 @@ sleep 60
         else:
             self.copy_back_build_files()
 
-        # Call order: generate_configs, remote_build, generate_arbiter_script
+        self.generate_configs(deployment, config_dir, log_dir_base)
+
+        # Call order: remote_build, generate_configs, generate_arbiter_script
         # DO NOT CHANGE THIS ORDER. Subclasses may depend on this order.
 
         # Generate the shell script to run the experiment
