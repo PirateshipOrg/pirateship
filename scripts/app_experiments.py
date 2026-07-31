@@ -11,6 +11,19 @@ from ssh_utils import run_remote_public_ip, copy_remote_public_ip
 
 
 class AppExperiment(Experiment):
+    @property
+    def workload(self):
+        # Derived from the config rather than assigned during generate_configs:
+        # deploy() runs the build steps (which name the binary after the
+        # workload) before generate_configs.
+        return self.base_client_config.get("workload", "kms")
+
+    @property
+    def payment_threshold(self):
+        if self.workload != "smallbank":
+            return ""
+        return str(self.base_client_config.get("payment_threshold", 1000))
+
     def copy_back_build_files(self):
         remote_repo = f"/home/{self.dev_ssh_user}/repo"
         TARGET_BINARIES = [self.workload]
@@ -77,8 +90,8 @@ class AppExperiment(Experiment):
         for vm in client_vms:
             copy_remote_public_ip(local_reqs, remote_reqs, self.dev_ssh_user, self.dev_ssh_key, vm)
             run_remote_public_ip([
-                f"sudo apt-get update",
-                f"sudo apt-get install -y python3-pip python3-venv",
+                f"DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a sudo apt-get update",
+                f"DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a sudo apt-get install -y python3-pip python3-venv",
                 # Install the client-side Python stack into a dedicated, isolated
                 # virtualenv. A clean venv (no --system-site-packages) also bypasses
                 # the stale apt python3-* packages in system dist-packages that
@@ -198,11 +211,6 @@ class AppExperiment(Experiment):
         self.total_client_vms = len(client_vms)
         self.total_worker_processes = self.total_client_vms * self.workers_per_client
         self.locust_master = self.client_vms[0]
-        self.workload = self.base_client_config.get("workload", "kms")
-        if self.workload == "smallbank":
-            self.payment_threshold = str(self.base_client_config.get("payment_threshold", 1000))
-        else:
-            self.payment_threshold = ""
 
         self.total_machines = self.workers_per_client * self.total_client_vms
 

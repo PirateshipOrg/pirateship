@@ -2,6 +2,94 @@
 
 This branch (`sosp-artifact`) acts as a snapshot to reproduce the graphs in our SOSP submission, while the main development continues in `main`.
 
+# [Update Jul 30 2026] Bastion access
+
+Access to our deployment of 7 consensus nodes and 3 client nodes is now possible through a Bastion VM.
+Please provide the authors with a public key to be added to the VM.
+Then SSH into `azureuser@20.59.110.203`. The repo is hosted at `/mnt/pirateship/`.
+We recommend opening the repo in VS Code (or its derivatives) with SSH tunneling to have a better visualization of the directory organization.
+
+## Running experiments against a fixed deployment
+
+For ease of running experiments, we have pre-configured the working directory for each of the claims (see "Artifact Claims" below).
+This skips the necessity of running of running `deploy` and `teardown` phases for all experiments (see "Running Experiments" below.)
+
+Following commands will run the experiment for each claim.
+
+```bash
+# Make sure you are in the right repo and Python environment
+cd /mnt/pirateship
+source .venv/bin/activate
+
+# Claim 1
+python3 scripts deploy-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
+python3 scripts run-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
+python3 scripts results -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
+python3 scripts clean-dev -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
+
+
+# Claim 2
+python3 scripts deploy-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
+python3 scripts run-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
+python3 scripts results -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
+python3 scripts clean-dev -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
+
+
+# Claim 3
+python3 scripts deploy-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
+python3 scripts run-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
+python3 scripts results -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
+python3 scripts clean-dev -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
+
+# Claim 4
+python3 scripts deploy-experiments -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
+python3 scripts run-experiments -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
+python3 scripts results -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
+python3 scripts clean-dev -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
+
+
+# Clean up experiment logs for next re-run
+rm -r deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/experiments
+rm -r deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/experiments
+rm -r deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/experiments
+rm -r deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/experiments
+```
+
+## Observing logs: What to expect
+
+The logging in the scripts is intentionally kept very verbose.
+You may observe error lines occassionally, which in most cases are benign and the script will automatically move forward.
+
+A successful `deploy-experiments` command will end in an rsync output like the following:
+```text
+<!-- snip -->
+Copying deployment_artifacts/2026-07-31T01:13:27.832021+00:00 to 10 nodes
+Copied to nodepool_vm0_sev_loc0_id0 Output (truncated):
+ sent 244,950,480 bytes  received 19,413 bytes  28,819,987.41 bytes/sec
+total size is 740,287,945  speedup is 3.02
+Copied to nodepool_vm6_sev_loc0_id6 Output (truncated):
+ sent 244,950,480 bytes  received 19,413 bytes  28,819,987.41 bytes/sec
+total size is 740,287,945  speedup is 3.02
+<!-- snip -->
+```
+
+A successful `run-experiments` results in a progress bar at the screen while the experiments are running.
+Once finished, you will see logs for copying the logs from all nodes back like the following:
+```text
+Experiment ended
+receiving incremental file list
+experiments/autobahn/0/logs/0/client1-0-0.err
+experiments/autobahn/0/logs/0/client1-0-0.log
+experiments/autobahn/0/logs/0/client1-0-0.metrics
+experiments/autobahn/0/logs/0/client1-1-0.err
+experiments/autobahn/0/logs/0/client1-1-0.log
+experiments/autobahn/0/logs/0/client1-1-0.metrics
+<!-- snip -->
+```
+
+Similarly, `results` command will also produce a lot of output, however the end result would be a pdf file with the graph at `<workdir>/results/`.
+
+
 # Setup
 
 Running the experiments requires access to Azure. Please contact the authors to have your email added to our development Azure account.

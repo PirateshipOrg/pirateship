@@ -73,7 +73,7 @@ ramp_up = 17
 ramp_down = 10
 output = "evil_experiment.pdf"
 force_parse = true
-target_node = "node3"
+target_node = "node1"
 
 [results.font]
 size = 55
