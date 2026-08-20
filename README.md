@@ -2,7 +2,7 @@
 
 This branch (`sosp-artifact`) acts as a snapshot to reproduce the graphs in our SOSP submission, while the main development continues in `main`.
 
-# [Update Jul 30 2026] Bastion access
+# [Update Aug 20 2026] Bastion access
 
 Access to our deployment of 7 consensus nodes and 3 client nodes is now possible through a Bastion VM.
 Please provide the authors with a public key to be added to the VM.
@@ -22,30 +22,30 @@ cd /mnt/pirateship
 source .venv/bin/activate
 
 # Claim 1
-python3 scripts deploy-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
-python3 scripts run-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
-python3 scripts results -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
-python3 scripts clean-dev -c claims/01-overhead.toml -d deployment_artifacts/2026-07-31T01\:13\:27.832021+00\:00/
+python3 scripts deploy-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-08-20T18:55:17.519894+00:00
+python3 scripts run-experiments -c claims/01-overhead.toml -d deployment_artifacts/2026-08-20T18:55:17.519894+00:00
+python3 scripts results -c claims/01-overhead.toml -d deployment_artifacts/2026-08-20T18:55:17.519894+00:00
+python3 scripts clean-dev -c claims/01-overhead.toml -d deployment_artifacts/2026-08-20T18:55:17.519894+00:00
 
 
 # Claim 2
-python3 scripts deploy-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
-python3 scripts run-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
-python3 scripts results -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
-python3 scripts clean-dev -c claims/02-equivocation.toml -d deployment_artifacts/2026-07-31T02\:20\:32.872167+00\:00/
+python3 scripts deploy-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-08-20T19:02:06.886793+00:00
+python3 scripts run-experiments -c claims/02-equivocation.toml -d deployment_artifacts/2026-08-20T19:02:06.886793+00:00
+python3 scripts results -c claims/02-equivocation.toml -d deployment_artifacts/2026-08-20T19:02:06.886793+00:00
+python3 scripts clean-dev -c claims/02-equivocation.toml -d deployment_artifacts/2026-08-20T19:02:06.886793+00:00
 
 
 # Claim 3
-python3 scripts deploy-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
-python3 scripts run-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
-python3 scripts results -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
-python3 scripts clean-dev -c claims/03-fastpath.toml -d deployment_artifacts/2026-07-31T02\:33\:39.968105+00\:00/
+python3 scripts deploy-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-08-20T19:04:11.755604+00:00
+python3 scripts run-experiments -c claims/03-fastpath.toml -d deployment_artifacts/2026-08-20T19:04:11.755604+00:00
+python3 scripts results -c claims/03-fastpath.toml -d deployment_artifacts/2026-08-20T19:04:11.755604+00:00
+python3 scripts clean-dev -c claims/03-fastpath.toml -d deployment_artifacts/2026-08-20T19:04:11.755604+00:00
 
 # Claim 4
-python3 scripts deploy-experiments -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
-python3 scripts run-experiments -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
-python3 scripts results -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
-python3 scripts clean-dev -c claims/04-application.toml -d deployment_artifacts/2026-07-31T03\:03\:13.560921+00\:00/
+python3 scripts deploy-experiments -c claims/04-application.toml -d deployment_artifacts/2026-08-20T19:21:33.453412+00:00
+python3 scripts run-experiments -c claims/04-application.toml -d deployment_artifacts/2026-08-20T19:21:33.453412+00:00
+python3 scripts results -c claims/04-application.toml -d deployment_artifacts/2026-08-20T19:21:33.453412+00:00
+python3 scripts clean-dev -c claims/04-application.toml -d deployment_artifacts/2026-08-20T19:21:33.453412+00:00
 
 
 # Clean up experiment logs for next re-run
